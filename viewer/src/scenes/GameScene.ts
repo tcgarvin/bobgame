@@ -1,86 +1,83 @@
 import Phaser from 'phaser';
+import type { MapData } from '../types/map';
+import { TileType, createTestRoom } from '../types/map';
 
 const TILE_SIZE = 16;
 const SCALE = 3;  // Scale up for visibility (16 * 3 = 48px per tile)
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 3;
+const ZOOM_STEP = 0.1;
 
 export class GameScene extends Phaser.Scene {
   private player?: Phaser.GameObjects.Sprite;
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
+  private wasdKeys?: { W: Phaser.Input.Keyboard.Key; A: Phaser.Input.Keyboard.Key; S: Phaser.Input.Keyboard.Key; D: Phaser.Input.Keyboard.Key };
+  private mapData?: MapData;
 
   constructor() {
     super({ key: 'GameScene' });
   }
 
   create(): void {
-    // Create a simple test room (10x10)
-    this.createTestRoom();
+    // Create the test room using our map data structure
+    this.mapData = createTestRoom(10, 10);
+    this.renderMap();
 
-    // Create player
+    // Create player from map entity
     this.createPlayer();
 
     // Setup camera controls
     this.setupCamera();
 
-    // Add keyboard controls
-    if (this.input.keyboard) {
-      this.cursors = this.input.keyboard.createCursorKeys();
-    }
+    // Setup keyboard controls
+    this.setupKeyboardControls();
+
+    // Setup scroll wheel zoom
+    this.setupScrollZoom();
 
     // Display instructions
-    this.add.text(10, 10, 'Arrow keys to move camera\nPlayer animates automatically', {
+    this.add.text(10, 10, 'Arrow keys/WASD to pan camera\nScroll wheel to zoom', {
       fontFamily: 'monospace',
       fontSize: '14px',
       color: '#ffffff',
-    });
+    }).setScrollFactor(0).setDepth(100);
   }
 
-  private createTestRoom(): void {
-    const roomWidth = 10;
-    const roomHeight = 10;
+  private renderMap(): void {
+    if (!this.mapData) return;
 
-    // Floor tile indices in the Floor.png spritesheet
-    // Stone floor is in the first few rows
-    const stoneFloorTiles = [0, 1, 2];  // Variety of stone floor tiles
-
-    // Wall tile index - using a simple filled tile
-    // In Wall.png, there are various wall configurations
-    const wallTileIndex = 0;
-
-    for (let y = 0; y < roomHeight; y++) {
-      for (let x = 0; x < roomWidth; x++) {
+    for (let y = 0; y < this.mapData.height; y++) {
+      for (let x = 0; x < this.mapData.width; x++) {
+        const tile = this.mapData.tiles[y][x];
         const posX = x * TILE_SIZE * SCALE + TILE_SIZE * SCALE / 2;
         const posY = y * TILE_SIZE * SCALE + TILE_SIZE * SCALE / 2;
 
-        // Border = walls, interior = floor
-        const isWall = x === 0 || x === roomWidth - 1 || y === 0 || y === roomHeight - 1;
-
-        if (isWall) {
-          const wall = this.add.sprite(posX, posY, 'wall', wallTileIndex);
-          wall.setScale(SCALE);
-        } else {
-          // Random floor tile for variety
-          const floorTile = stoneFloorTiles[Math.floor(Math.random() * stoneFloorTiles.length)];
-          const floor = this.add.sprite(posX, posY, 'floor', floorTile);
-          floor.setScale(SCALE);
-        }
+        const spriteKey = tile.type === TileType.WALL ? 'wall' : 'floor';
+        const sprite = this.add.sprite(posX, posY, spriteKey, tile.spriteIndex);
+        sprite.setScale(SCALE);
       }
     }
   }
 
   private createPlayer(): void {
-    // Place player in center of room
-    const centerX = 5 * TILE_SIZE * SCALE + TILE_SIZE * SCALE / 2;
-    const centerY = 5 * TILE_SIZE * SCALE + TILE_SIZE * SCALE / 2;
+    if (!this.mapData) return;
 
-    this.player = this.add.sprite(centerX, centerY, 'player0', 0);
+    const playerEntity = this.mapData.entities.find(e => e.id === 'player');
+    if (!playerEntity) return;
+
+    const centerX = playerEntity.position.x * TILE_SIZE * SCALE + TILE_SIZE * SCALE / 2;
+    const centerY = playerEntity.position.y * TILE_SIZE * SCALE + TILE_SIZE * SCALE / 2;
+
+    this.player = this.add.sprite(centerX, centerY, playerEntity.spriteKey, playerEntity.spriteFrame);
     this.player.setScale(SCALE);
     this.player.play('player-idle');
   }
 
   private setupCamera(): void {
-    // Set camera bounds
-    const worldWidth = 10 * TILE_SIZE * SCALE;
-    const worldHeight = 10 * TILE_SIZE * SCALE;
+    if (!this.mapData) return;
+
+    const worldWidth = this.mapData.width * TILE_SIZE * SCALE;
+    const worldHeight = this.mapData.height * TILE_SIZE * SCALE;
 
     this.cameras.main.setBounds(0, 0, worldWidth, worldHeight);
 
@@ -89,23 +86,68 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  update(): void {
-    if (!this.cursors) return;
+  private setupKeyboardControls(): void {
+    if (!this.input.keyboard) return;
 
+    // Arrow keys
+    this.cursors = this.input.keyboard.createCursorKeys();
+
+    // WASD keys
+    this.wasdKeys = {
+      W: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.W),
+      A: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A),
+      S: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
+      D: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D),
+    };
+  }
+
+  private setupScrollZoom(): void {
+    this.input.on('wheel', (_pointer: Phaser.Input.Pointer, _gameObjects: Phaser.GameObjects.GameObject[], _deltaX: number, deltaY: number) => {
+      const camera = this.cameras.main;
+
+      if (deltaY > 0) {
+        // Zoom out
+        camera.zoom = Math.max(MIN_ZOOM, camera.zoom - ZOOM_STEP);
+      } else if (deltaY < 0) {
+        // Zoom in
+        camera.zoom = Math.min(MAX_ZOOM, camera.zoom + ZOOM_STEP);
+      }
+    });
+  }
+
+  update(): void {
     const camSpeed = 5;
 
-    // Camera panning with arrow keys (for testing)
-    if (this.cursors.left.isDown) {
-      this.cameras.main.scrollX -= camSpeed;
+    // Arrow key panning
+    if (this.cursors) {
+      if (this.cursors.left.isDown) {
+        this.cameras.main.scrollX -= camSpeed;
+      }
+      if (this.cursors.right.isDown) {
+        this.cameras.main.scrollX += camSpeed;
+      }
+      if (this.cursors.up.isDown) {
+        this.cameras.main.scrollY -= camSpeed;
+      }
+      if (this.cursors.down.isDown) {
+        this.cameras.main.scrollY += camSpeed;
+      }
     }
-    if (this.cursors.right.isDown) {
-      this.cameras.main.scrollX += camSpeed;
-    }
-    if (this.cursors.up.isDown) {
-      this.cameras.main.scrollY -= camSpeed;
-    }
-    if (this.cursors.down.isDown) {
-      this.cameras.main.scrollY += camSpeed;
+
+    // WASD panning
+    if (this.wasdKeys) {
+      if (this.wasdKeys.A.isDown) {
+        this.cameras.main.scrollX -= camSpeed;
+      }
+      if (this.wasdKeys.D.isDown) {
+        this.cameras.main.scrollX += camSpeed;
+      }
+      if (this.wasdKeys.W.isDown) {
+        this.cameras.main.scrollY -= camSpeed;
+      }
+      if (this.wasdKeys.S.isDown) {
+        this.cameras.main.scrollY += camSpeed;
+      }
     }
   }
 }
