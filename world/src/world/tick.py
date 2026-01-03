@@ -67,6 +67,7 @@ class TickResult:
 
 # Type alias for tick callbacks
 TickCallback = Callable[[TickResult], Awaitable[None]]
+TickStartCallback = Callable[[TickContext], Awaitable[None]]
 
 
 class TickLoop:
@@ -89,10 +90,12 @@ class TickLoop:
         world: World,
         config: TickConfig | None = None,
         on_tick_complete: TickCallback | None = None,
+        on_tick_start: TickStartCallback | None = None,
     ):
         self.world = world
         self.config = config or TickConfig()
         self.on_tick_complete = on_tick_complete
+        self.on_tick_start = on_tick_start
 
         self._running = False
         self._current_context: TickContext | None = None
@@ -144,6 +147,10 @@ class TickLoop:
                 )
 
                 logger.debug("tick_started", tick_id=self._current_context.tick_id)
+
+                # Notify tick start (for sending observations)
+                if self.on_tick_start:
+                    await self.on_tick_start(self._current_context)
 
                 # Wait for intent deadline
                 await self._wait_until_deadline()

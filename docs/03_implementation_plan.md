@@ -141,33 +141,55 @@ See `world/CLAUDE.md` for detailed architecture decisions
 
 ---
 
-## Milestone 3: gRPC API & Basic Agent
+## Milestone 3: gRPC API & Basic Agent ✓
 
 **Goal**: Agent connects and controls entity via gRPC
+
+**Status**: Complete (126 tests passing)
 
 ### Tasks
 
 #### 3.1 Protobuf Definitions
-- [ ] Define `world.proto`:
+- [x] Define `world.proto`:
   - `TickService`: `StreamTicks`
-  - `LeaseService`: `AcquireLease`, `RenewLease`
+  - `LeaseService`: `AcquireLease`, `RenewLease`, `ReleaseLease`
   - `ObservationService`: `StreamObservations`
   - `ActionService`: `SubmitIntent`
-- [ ] Compile for Python
+  - `EntityDiscoveryService`: `ListControllableEntities`
+- [x] Compile for Python
 
 #### 3.2 gRPC Server
-- [ ] Implement tick streaming
-- [ ] Implement lease management
-- [ ] Implement observation generation (basic, no LOS yet)
-- [ ] Implement intent submission
+- [x] Implement tick streaming
+- [x] Implement lease management with expiry
+- [x] Implement observation generation (basic, no LOS yet)
+- [x] Implement intent submission
+- [x] Implement entity discovery service
 
 #### 3.3 Simple Test Agent
-- [ ] gRPC client connecting to world
-- [ ] Acquire lease
-- [ ] Receive observations
-- [ ] Submit random movement intents
+- [x] gRPC client connecting to world
+- [x] Acquire lease
+- [x] Receive observations
+- [x] Submit random movement intents
 
 **Deliverable**: Agent moves entity via gRPC
+
+### Implementation Notes
+
+Files created in `world/src/world/`:
+- `conversion.py` - Proto type conversion functions
+- `lease.py` - Lease management with expiry tracking
+- `server.py` - Main WorldServer entry point
+- `services/` - gRPC service implementations:
+  - `lease_service.py` - LeaseServiceServicer
+  - `tick_service.py` - TickServiceServicer
+  - `action_service.py` - ActionServiceServicer
+  - `observation_service.py` - ObservationServiceServicer
+  - `discovery_service.py` - EntityDiscoveryServiceServicer
+
+Files created in `agents/src/agents/`:
+- `random_agent.py` - RandomAgent class for testing
+
+See `world/CLAUDE.md` for detailed architecture decisions
 
 ---
 

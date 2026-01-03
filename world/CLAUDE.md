@@ -75,23 +75,132 @@ uv run pytest tests/ -v -k swap  # filter by name
 uv run mypy src/world/           # type check
 ```
 
-## Future Considerations (for Milestone 3+)
+## Architecture Decisions (Milestone 3)
 
-### gRPC Integration
+### gRPC Service Architecture
 
-The tick loop is designed for gRPC integration:
-- `TickLoop.submit_move_intent()` can be called from gRPC handlers
-- `on_tick_complete` callback for emitting observations
-- `TickContext` tracks deadline for intent rejection
+Services are implemented in `services/` directory, each as a separate servicer class:
 
-Conversion functions needed in `__init__.py` or new `conversion.py`:
+```
+services/
+├── __init__.py           # Exports all servicers
+├── action_service.py     # SubmitIntent RPC
+├── discovery_service.py  # ListControllableEntities RPC
+├── lease_service.py      # Acquire/Renew/Release lease RPCs
+├── observation_service.py # StreamObservations RPC
+└── tick_service.py       # StreamTicks RPC
+```
+
+### WorldServer: Central Coordinator
+
+`WorldServer` in `server.py` wires everything together:
+- Creates shared `LeaseManager` and `TickLoop`
+- Registers all service implementations
+- Hooks `on_tick_complete` to broadcast observations
+- Provides `add_entity()` that tracks spawn ticks
+
+### Lease Management
+
+`LeaseManager` in `lease.py` handles entity control leases:
+- Leases expire after 30 seconds by default
+- Same controller re-acquiring gets renewal
+- Expired leases cleaned up on access or periodic cleanup
+- Validation: `is_valid_lease(lease_id, entity_id)`
+
+### Proto Type Conversion
+
+`conversion.py` provides bidirectional conversion:
 - `direction_to_proto()` / `direction_from_proto()`
 - `position_to_proto()` / `position_from_proto()`
-- `entity_to_proto()`
+- `entity_to_proto()` / `entity_from_proto()`
+- `tile_to_proto()` / `tile_from_proto()`
 
-### Observation Generation (Milestone 3)
+**Python keyword handling**: Proto fields named `self` or `from` require special handling:
+```python
+# For 'self' field in Observation:
+observation.self.CopyFrom(entity_proto)
 
-Will need to add to state.py or new observation.py:
-- Line-of-sight calculation
-- Visible entity filtering
-- Event generation (entered/left view)
+# For 'from' field in EntityMoved (constructor uses from_):
+pb.EntityMoved(entity_id=id, from_=from_pos, to=to_pos)
+```
+
+### Observation Generation (Basic)
+
+Current implementation (no LOS):
+- All entities visible to all observers
+- Nearby tiles within radius=5 returned
+- Movement events generated from `TickResult`
+
+Future work: Line-of-sight filtering, enter/leave events.
+
+## Running the Server
+
+```bash
+cd world
+# Start server with one entity
+uv run python -m world.server --spawn-entity bob:5,5 --tick-duration 1000
+
+# In another terminal, run random agent
+cd ../agents
+uv run python -m agents.random_agent --entity bob
+```
+
+## Gotchas & Learnings
+
+### Observation Timing Model
+
+Observations must be sent at the **start** of a tick (via `on_tick_start`), not after processing. This gives agents time to receive the observation and submit intents before the deadline.
+
+```
+Tick N starts → observation sent (tick_id=N) → agent submits → deadline → process → Tick N+1
+```
+
+If observations are sent after processing, agents will always be one tick behind and get "wrong_tick" rejections.
+
+### Proto Import Paths
+
+Generated `world_pb2_grpc.py` files have incorrect imports. After running `compile_proto.sh`, fix:
+
+```python
+# Change this:
+import world_pb2 as world__pb2
+
+# To this:
+from . import world_pb2 as world__pb2
+```
+
+This must be done in both `world/src/world/` and `agents/src/agents/`.
+
+### Proto Python Keywords
+
+Proto fields named after Python keywords need special handling:
+
+```python
+# 'self' field - use CopyFrom after construction
+observation = pb.Observation(tick_id=..., ...)
+observation.self.CopyFrom(entity_proto)
+
+# 'from' field - use trailing underscore in constructor
+pb.EntityMoved(entity_id=id, from_=from_pos, to=to_pos)
+```
+
+### Agent Module Imports
+
+To avoid RuntimeWarning when running `python -m agents.random_agent`, use lazy imports in `__init__.py`:
+
+```python
+def __getattr__(name: str):
+    if name == "RandomAgent":
+        from .random_agent import RandomAgent
+        return RandomAgent
+    raise AttributeError(...)
+```
+
+## Future Considerations (Milestone 4+)
+
+### Line-of-Sight (Milestone 8)
+
+Will need to add:
+- Bresenham ray casting
+- Visibility filtering per observer
+- Enter/leave visibility events
