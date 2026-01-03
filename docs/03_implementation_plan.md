@@ -97,34 +97,47 @@ See `04_tileset_preparation.md` for details.
 
 ---
 
-## Milestone 2: World Core
+## Milestone 2: World Core ✓
 
 **Goal**: Tick-based simulation with movement
+
+**Status**: Complete (84 tests passing)
 
 ### Tasks
 
 #### 2.1 World State
-- [ ] Define core data classes: `World`, `Entity`, `Tile`, `Position`
-- [ ] Grid representation with walkability/opacity
-- [ ] Entity registry
+- [x] Define core data classes: `World`, `Entity`, `Tile`, `Position`
+- [x] Grid representation with walkability/opacity
+- [x] Entity registry
 
 #### 2.2 Tick Loop
-- [ ] Async tick loop at 1 Hz
-- [ ] Tick counter and timing
-- [ ] Intent collection with deadline
+- [x] Async tick loop at 1 Hz
+- [x] Tick counter and timing
+- [x] Intent collection with deadline
 
 #### 2.3 Movement System
-- [ ] Cardinal and diagonal movement
-- [ ] Diagonal blocking rule
-- [ ] Claim-resolve-enact pipeline
-- [ ] Conflict resolution (priority-based)
+- [x] Cardinal and diagonal movement
+- [x] Diagonal blocking rule
+- [x] Claim-resolve-enact pipeline
+- [x] Conflict resolution (priority-based)
 
 #### 2.4 Unit Tests
-- [ ] Movement validation tests
-- [ ] Conflict resolution tests (same destination, swaps, cycles)
-- [ ] Diagonal blocking tests
+- [x] Movement validation tests
+- [x] Conflict resolution tests (same destination, swaps, cycles)
+- [x] Diagonal blocking tests
 
 **Deliverable**: In-memory world that processes movement intents
+
+### Implementation Notes
+
+Files created in `world/src/world/`:
+- `types.py` - Position, Direction, constants
+- `state.py` - World, Entity, Tile with dual-indexed registry
+- `movement.py` - Claim-resolve-enact conflict resolution
+- `tick.py` - Async tick loop with deadline handling
+- `exceptions.py` - Custom exceptions
+
+See `world/CLAUDE.md` for detailed architecture decisions
 
 ---
 
