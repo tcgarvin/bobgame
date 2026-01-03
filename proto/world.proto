@@ -1,0 +1,311 @@
+syntax = "proto3";
+
+package world;
+
+option java_multiple_files = true;
+option java_package = "com.bobgame.world";
+
+// ============================================================================
+// Core Types
+// ============================================================================
+
+message Position {
+  int32 x = 1;
+  int32 y = 2;
+}
+
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  NORTH = 1;
+  NORTHEAST = 2;
+  EAST = 3;
+  SOUTHEAST = 4;
+  SOUTH = 5;
+  SOUTHWEST = 6;
+  WEST = 7;
+  NORTHWEST = 8;
+}
+
+message Entity {
+  string entity_id = 1;
+  Position position = 2;
+  string entity_type = 3;
+  repeated string tags = 4;
+  int32 status_bits = 5;
+  Inventory inventory = 6;
+}
+
+message Inventory {
+  repeated InventoryItem items = 1;
+}
+
+message InventoryItem {
+  string kind = 1;
+  int32 quantity = 2;
+}
+
+message Tile {
+  Position position = 1;
+  bool walkable = 2;
+  bool opaque = 3;
+  string floor_type = 4;
+}
+
+message WorldObject {
+  string object_id = 1;
+  Position position = 2;
+  string object_type = 3;
+  map<string, string> state = 4;  // e.g., "open": "true", "progress": "3"
+}
+
+// ============================================================================
+// Tick Service
+// ============================================================================
+
+service TickService {
+  rpc StreamTicks(StreamTicksRequest) returns (stream TickEvent);
+}
+
+message StreamTicksRequest {}
+
+message TickEvent {
+  int64 tick_id = 1;
+  int64 tick_start_server_time_ms = 2;
+  int64 intent_deadline_server_time_ms = 3;
+  int32 tick_duration_ms = 4;
+  string world_version = 5;
+}
+
+// ============================================================================
+// Entity Discovery Service (for Runner)
+// ============================================================================
+
+service EntityDiscoveryService {
+  rpc ListControllableEntities(ListControllableEntitiesRequest) returns (ControllableEntitiesResponse);
+}
+
+message ListControllableEntitiesRequest {}
+
+message ControllableEntitiesResponse {
+  repeated ControllableEntity entities = 1;
+}
+
+message ControllableEntity {
+  string entity_id = 1;
+  string entity_type = 2;
+  repeated string tags = 3;
+  int64 spawn_tick = 4;
+  bool has_active_lease = 5;
+}
+
+// ============================================================================
+// Lease Service
+// ============================================================================
+
+service LeaseService {
+  rpc AcquireLease(AcquireLeaseRequest) returns (LeaseResponse);
+  rpc RenewLease(RenewLeaseRequest) returns (LeaseResponse);
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+}
+
+message AcquireLeaseRequest {
+  string entity_id = 1;
+  string controller_id = 2;
+}
+
+message RenewLeaseRequest {
+  string lease_id = 1;
+}
+
+message ReleaseLeaseRequest {
+  string lease_id = 1;
+}
+
+message LeaseResponse {
+  bool success = 1;
+  string lease_id = 2;
+  int64 expires_at_ms = 3;
+  string reason = 4;  // if not success
+}
+
+message ReleaseLeaseResponse {
+  bool success = 1;
+}
+
+// ============================================================================
+// Observation Service
+// ============================================================================
+
+service ObservationService {
+  rpc StreamObservations(StreamObservationsRequest) returns (stream Observation);
+}
+
+message StreamObservationsRequest {
+  string lease_id = 1;
+  string entity_id = 2;
+}
+
+message Observation {
+  int64 tick_id = 1;
+  int64 deadline_ms = 2;
+
+  // Self state
+  Entity self = 3;
+
+  // Visible world
+  repeated Tile visible_tiles = 4;
+  repeated Entity visible_entities = 5;
+  repeated WorldObject visible_objects = 6;
+
+  // Events since last observation
+  repeated ObservationEvent events = 7;
+}
+
+message ObservationEvent {
+  oneof event {
+    EntityEnteredView entity_entered = 1;
+    EntityLeftView entity_left = 2;
+    EntityMoved entity_moved = 3;
+    EntityActed entity_acted = 4;
+    Utterance utterance = 5;
+    ObjectChanged object_changed = 6;
+  }
+}
+
+message EntityEnteredView {
+  Entity entity = 1;
+}
+
+message EntityLeftView {
+  string entity_id = 1;
+  Position last_known_position = 2;
+}
+
+message EntityMoved {
+  string entity_id = 1;
+  Position from = 2;
+  Position to = 3;
+}
+
+message EntityActed {
+  string entity_id = 1;
+  string action_type = 2;
+  bool success = 3;
+  string details = 4;
+}
+
+message Utterance {
+  string speaker_id = 1;
+  string channel = 2;
+  string text = 3;
+  Position position = 4;
+}
+
+message ObjectChanged {
+  string object_id = 1;
+  string field = 2;
+  string old_value = 3;
+  string new_value = 4;
+}
+
+// ============================================================================
+// Action Service
+// ============================================================================
+
+service ActionService {
+  rpc SubmitIntent(SubmitIntentRequest) returns (SubmitIntentResponse);
+}
+
+message SubmitIntentRequest {
+  string lease_id = 1;
+  string entity_id = 2;
+  int64 tick_id = 3;
+  Intent intent = 4;
+}
+
+message Intent {
+  oneof action {
+    MoveIntent move = 1;
+    PickupIntent pickup = 2;
+    UseIntent use = 3;
+    SayIntent say = 4;
+    WaitIntent wait = 5;
+  }
+}
+
+message MoveIntent {
+  Direction direction = 1;
+}
+
+message PickupIntent {
+  string kind = 1;
+  int32 amount = 2;  // default 1
+}
+
+message UseIntent {
+  string kind = 1;
+  int32 amount = 2;  // default 1
+}
+
+message SayIntent {
+  string text = 1;
+  string channel = 2;  // default "local"
+}
+
+message WaitIntent {}
+
+message SubmitIntentResponse {
+  bool accepted = 1;
+  string reason = 2;  // if not accepted: "late_tick", "invalid_lease", "illegal_action"
+}
+
+// ============================================================================
+// Viewer Service (Read-Only)
+// ============================================================================
+
+service ViewerService {
+  rpc StreamViewerEvents(ViewerFilter) returns (stream ViewerEvent);
+  rpc GetSnapshot(ViewerFilter) returns (WorldSnapshot);
+}
+
+message ViewerFilter {
+  repeated string entity_ids = 1;  // empty = all
+  Position region_min = 2;  // optional region filter
+  Position region_max = 3;
+}
+
+message ViewerEvent {
+  int64 tick_id = 1;
+
+  oneof event {
+    TickCompleted tick_completed = 2;
+    EntitySpawned entity_spawned = 3;
+    EntityDespawned entity_despawned = 4;
+    EntityMoved entity_moved = 5;
+    EntityActed entity_acted = 6;
+    Utterance utterance = 7;
+    ObjectChanged object_changed = 8;
+  }
+}
+
+message TickCompleted {
+  int64 tick_id = 1;
+  int32 entities_moved = 2;
+  int32 actions_processed = 3;
+}
+
+message EntitySpawned {
+  Entity entity = 1;
+}
+
+message EntityDespawned {
+  string entity_id = 1;
+  string reason = 2;
+}
+
+message WorldSnapshot {
+  int64 tick_id = 1;
+  repeated Entity entities = 2;
+  repeated WorldObject objects = 3;
+  // Note: tiles are static, loaded separately
+}
