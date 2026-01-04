@@ -7,9 +7,17 @@ from typing import Awaitable, Callable
 
 import structlog
 
+from .foraging import (
+    CollectResult,
+    EatResult,
+    ObjectChange,
+    process_collect_phase,
+    process_eat_phase,
+    process_regeneration,
+)
 from .movement import MoveResult, process_movement_phase
 from .state import World
-from .types import Direction
+from .types import CollectIntent, Direction, EatIntent
 
 logger = structlog.get_logger()
 
@@ -32,6 +40,8 @@ class TickContext:
 
     # Collected intents for this tick
     move_intents: dict[str, Direction] = field(default_factory=dict)
+    collect_intents: dict[str, CollectIntent] = field(default_factory=dict)
+    eat_intents: dict[str, EatIntent] = field(default_factory=dict)
 
     def is_past_deadline(self) -> bool:
         """Check if current time is past the intent deadline."""
@@ -55,6 +65,44 @@ class TickContext:
         self.move_intents[entity_id] = direction
         return True
 
+    def submit_collect_intent(self, intent: CollectIntent) -> bool:
+        """Submit a collect intent for this tick."""
+        if self.is_past_deadline():
+            logger.debug(
+                "intent_rejected_late",
+                entity_id=intent.entity_id,
+                tick_id=self.tick_id,
+            )
+            return False
+        if intent.entity_id in self.collect_intents:
+            logger.debug(
+                "intent_rejected_duplicate",
+                entity_id=intent.entity_id,
+                tick_id=self.tick_id,
+            )
+            return False
+        self.collect_intents[intent.entity_id] = intent
+        return True
+
+    def submit_eat_intent(self, intent: EatIntent) -> bool:
+        """Submit an eat intent for this tick."""
+        if self.is_past_deadline():
+            logger.debug(
+                "intent_rejected_late",
+                entity_id=intent.entity_id,
+                tick_id=self.tick_id,
+            )
+            return False
+        if intent.entity_id in self.eat_intents:
+            logger.debug(
+                "intent_rejected_duplicate",
+                entity_id=intent.entity_id,
+                tick_id=self.tick_id,
+            )
+            return False
+        self.eat_intents[intent.entity_id] = intent
+        return True
+
 
 @dataclass
 class TickResult:
@@ -62,7 +110,10 @@ class TickResult:
 
     tick_id: int
     move_results: list[MoveResult]
-    duration_ms: float
+    collect_results: list[CollectResult] = field(default_factory=list)
+    eat_results: list[EatResult] = field(default_factory=list)
+    object_changes: list[ObjectChange] = field(default_factory=list)
+    duration_ms: float = 0.0
 
 
 # Type alias for tick callbacks
@@ -202,8 +253,21 @@ class TickLoop:
 
         start = time.time()
 
-        # Process movement phase
+        # Phase 1: Movement
         move_results = process_movement_phase(self.world, ctx.move_intents)
+
+        # Phase 2: Collect
+        collect_results, collect_changes = process_collect_phase(
+            self.world, ctx.collect_intents
+        )
+
+        # Phase 3: Eat
+        eat_results = process_eat_phase(self.world, ctx.eat_intents)
+
+        # Phase 4: Regeneration
+        regen_changes = process_regeneration(self.world)
+
+        all_object_changes = collect_changes + regen_changes
 
         elapsed_ms = (time.time() - start) * 1000
 
@@ -212,12 +276,17 @@ class TickLoop:
             tick_id=ctx.tick_id,
             moves_submitted=len(ctx.move_intents),
             moves_succeeded=sum(1 for r in move_results if r.success),
+            collects_succeeded=sum(1 for r in collect_results if r.success),
+            eats_succeeded=sum(1 for r in eat_results if r.success),
             duration_ms=elapsed_ms,
         )
 
         return TickResult(
             tick_id=ctx.tick_id,
             move_results=move_results,
+            collect_results=collect_results,
+            eat_results=eat_results,
+            object_changes=all_object_changes,
             duration_ms=elapsed_ms,
         )
 
@@ -261,14 +330,30 @@ async def run_ticks(
         if intent_callback:
             await intent_callback(ctx)
 
-        # Process movement
+        # Phase 1: Movement
         move_results = process_movement_phase(world, ctx.move_intents)
+
+        # Phase 2: Collect
+        collect_results, collect_changes = process_collect_phase(
+            world, ctx.collect_intents
+        )
+
+        # Phase 3: Eat
+        eat_results = process_eat_phase(world, ctx.eat_intents)
+
+        # Phase 4: Regeneration
+        regen_changes = process_regeneration(world)
+
+        all_object_changes = collect_changes + regen_changes
 
         elapsed_ms = (time.time() - tick_start) * 1000
 
         result = TickResult(
             tick_id=ctx.tick_id,
             move_results=move_results,
+            collect_results=collect_results,
+            eat_results=eat_results,
+            object_changes=all_object_changes,
             duration_ms=elapsed_ms,
         )
         results.append(result)

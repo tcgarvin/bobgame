@@ -4,10 +4,14 @@
 # Starts all components and handles cleanup on exit
 #
 # Usage:
-#   ./dev.sh
+#   ./dev.sh [config]
+#
+# Arguments:
+#   config - Optional config name (default: foraging)
+#            Available: default, foraging (see world/configs/)
 #
 # Starts:
-#   - World server with one entity (bob)
+#   - World server using the specified config
 #   - Random agent controlling bob
 #   - Viewer dev server
 #
@@ -25,16 +29,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/logs"
 PIDS=()
 
+# Default config
+CONFIG="${1:-foraging}"
+
 # Parse arguments
 for arg in "$@"; do
     case $arg in
         --help|-h)
-            echo "Usage: $0"
+            echo "Usage: $0 [config]"
+            echo ""
+            echo "Arguments:"
+            echo "  config  Config name from world/configs/ (default: foraging)"
             echo ""
             echo "Starts all components for development:"
             echo "  - World server (gRPC :50051, WebSocket :8765)"
             echo "  - Random agent controlling 'bob'"
             echo "  - Viewer (http://localhost:5173)"
+            echo ""
+            echo "Available configs:"
+            for cfg in "$SCRIPT_DIR/world/configs"/*.toml; do
+                echo "  - $(basename "${cfg%.toml}")"
+            done
             exit 0
             ;;
     esac
@@ -130,10 +145,10 @@ wait_for_port() {
 }
 
 # Start World Server
-log_info "Starting World Server..."
+log_info "Starting World Server with config '$CONFIG'..."
 cd "$SCRIPT_DIR/world"
 uv run python -m world.server \
-    --spawn-entity bob:5,5 \
+    --config "$CONFIG" \
     > "$LOG_DIR/world.log" 2>&1 &
 WORLD_PID=$!
 PIDS+=($WORLD_PID)

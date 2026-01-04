@@ -291,18 +291,22 @@ class SubmitIntentRequest(_message.Message):
     def __init__(self, lease_id: _Optional[str] = ..., entity_id: _Optional[str] = ..., tick_id: _Optional[int] = ..., intent: _Optional[_Union[Intent, _Mapping]] = ...) -> None: ...
 
 class Intent(_message.Message):
-    __slots__ = ("move", "pickup", "use", "say", "wait")
+    __slots__ = ("move", "pickup", "use", "say", "wait", "collect", "eat")
     MOVE_FIELD_NUMBER: _ClassVar[int]
     PICKUP_FIELD_NUMBER: _ClassVar[int]
     USE_FIELD_NUMBER: _ClassVar[int]
     SAY_FIELD_NUMBER: _ClassVar[int]
     WAIT_FIELD_NUMBER: _ClassVar[int]
+    COLLECT_FIELD_NUMBER: _ClassVar[int]
+    EAT_FIELD_NUMBER: _ClassVar[int]
     move: MoveIntent
     pickup: PickupIntent
     use: UseIntent
     say: SayIntent
     wait: WaitIntent
-    def __init__(self, move: _Optional[_Union[MoveIntent, _Mapping]] = ..., pickup: _Optional[_Union[PickupIntent, _Mapping]] = ..., use: _Optional[_Union[UseIntent, _Mapping]] = ..., say: _Optional[_Union[SayIntent, _Mapping]] = ..., wait: _Optional[_Union[WaitIntent, _Mapping]] = ...) -> None: ...
+    collect: CollectIntent
+    eat: EatIntent
+    def __init__(self, move: _Optional[_Union[MoveIntent, _Mapping]] = ..., pickup: _Optional[_Union[PickupIntent, _Mapping]] = ..., use: _Optional[_Union[UseIntent, _Mapping]] = ..., say: _Optional[_Union[SayIntent, _Mapping]] = ..., wait: _Optional[_Union[WaitIntent, _Mapping]] = ..., collect: _Optional[_Union[CollectIntent, _Mapping]] = ..., eat: _Optional[_Union[EatIntent, _Mapping]] = ...) -> None: ...
 
 class MoveIntent(_message.Message):
     __slots__ = ("direction",)
@@ -337,6 +341,24 @@ class SayIntent(_message.Message):
 class WaitIntent(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class CollectIntent(_message.Message):
+    __slots__ = ("object_id", "item_type", "amount")
+    OBJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    ITEM_TYPE_FIELD_NUMBER: _ClassVar[int]
+    AMOUNT_FIELD_NUMBER: _ClassVar[int]
+    object_id: str
+    item_type: str
+    amount: int
+    def __init__(self, object_id: _Optional[str] = ..., item_type: _Optional[str] = ..., amount: _Optional[int] = ...) -> None: ...
+
+class EatIntent(_message.Message):
+    __slots__ = ("item_type", "amount")
+    ITEM_TYPE_FIELD_NUMBER: _ClassVar[int]
+    AMOUNT_FIELD_NUMBER: _ClassVar[int]
+    item_type: str
+    amount: int
+    def __init__(self, item_type: _Optional[str] = ..., amount: _Optional[int] = ...) -> None: ...
 
 class SubmitIntentResponse(_message.Message):
     __slots__ = ("accepted", "reason")

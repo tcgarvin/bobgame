@@ -1,0 +1,13 @@
+# Default world configuration
+# 10x10 world with a single entity for basic testing
+
+[world]
+width = 10
+height = 10
+tick_duration_ms = 1000
+
+[[entities]]
+id = "bob"
+type = "player"
+x = 5
+y = 5

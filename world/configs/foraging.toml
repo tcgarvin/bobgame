@@ -1,0 +1,29 @@
+# Foraging test configuration
+# 10x10 world with bob and berry bushes for milestone 5a testing
+
+[world]
+width = 10
+height = 10
+tick_duration_ms = 1000
+
+[[entities]]
+id = "bob"
+type = "player"
+x = 5
+y = 5
+
+[[objects]]
+id = "bush1"
+type = "bush"
+x = 3
+y = 3
+berry_count = 5
+max_berries = 5
+
+[[objects]]
+id = "bush2"
+type = "bush"
+x = 7
+y = 7
+berry_count = 5
+max_berries = 5

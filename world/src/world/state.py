@@ -4,8 +4,56 @@ from typing import Mapping
 
 from pydantic import BaseModel, PrivateAttr
 
-from .exceptions import EntityAlreadyExistsError, EntityNotFoundError, PositionOccupiedError
+from .exceptions import (
+    EntityAlreadyExistsError,
+    EntityNotFoundError,
+    ObjectAlreadyExistsError,
+    ObjectNotFoundError,
+    PositionOccupiedError,
+)
 from .types import Position
+
+
+class Inventory(BaseModel, frozen=True):
+    """Immutable inventory as item_type -> count mapping."""
+
+    items: tuple[tuple[str, int], ...] = ()
+
+    def count(self, item_type: str) -> int:
+        """Get count of item type."""
+        for k, v in self.items:
+            if k == item_type:
+                return v
+        return 0
+
+    def has(self, item_type: str, amount: int = 1) -> bool:
+        """Check if inventory has at least amount of item_type."""
+        return self.count(item_type) >= amount
+
+    def add(self, item_type: str, amount: int = 1) -> "Inventory":
+        """Return new inventory with added items."""
+        new_items = dict(self.items)
+        new_items[item_type] = new_items.get(item_type, 0) + amount
+        return Inventory(items=tuple(new_items.items()))
+
+    def remove(self, item_type: str, amount: int = 1) -> "Inventory":
+        """Return new inventory with removed items.
+
+        Raises:
+            ValueError: If insufficient items to remove.
+        """
+        current = self.count(item_type)
+        if current < amount:
+            raise ValueError(
+                f"Cannot remove {amount} {item_type}, only have {current}"
+            )
+        new_items = dict(self.items)
+        new_count = current - amount
+        if new_count == 0:
+            del new_items[item_type]
+        else:
+            new_items[item_type] = new_count
+        return Inventory(items=tuple(new_items.items()))
 
 
 class Tile(BaseModel, frozen=True):
@@ -25,11 +73,37 @@ class Entity(BaseModel, frozen=True):
     entity_type: str = "default"
     tags: tuple[str, ...] = ()
     status_bits: int = 0
-    # Inventory deferred to Milestone 5
+    inventory: Inventory = Inventory()
 
     def with_position(self, new_position: Position) -> "Entity":
         """Return copy with updated position."""
         return self.model_copy(update={"position": new_position})
+
+    def with_inventory(self, new_inventory: Inventory) -> "Entity":
+        """Return copy with updated inventory."""
+        return self.model_copy(update={"inventory": new_inventory})
+
+
+class WorldObject(BaseModel, frozen=True):
+    """Immutable world object state (bushes, chests, etc.)."""
+
+    object_id: str
+    position: Position
+    object_type: str
+    state: tuple[tuple[str, str], ...] = ()
+
+    def get_state(self, key: str, default: str = "") -> str:
+        """Get state value by key."""
+        for k, v in self.state:
+            if k == key:
+                return v
+        return default
+
+    def with_state(self, key: str, value: str) -> "WorldObject":
+        """Return copy with updated state value."""
+        new_state = dict(self.state)
+        new_state[key] = value
+        return self.model_copy(update={"state": tuple(new_state.items())})
 
 
 class World(BaseModel):
@@ -53,6 +127,10 @@ class World(BaseModel):
 
     # Position index for quick lookups
     _entity_positions: dict[Position, str] = PrivateAttr(default_factory=dict)
+
+    # Object registry (multiple objects can share a position)
+    _objects: dict[str, WorldObject] = PrivateAttr(default_factory=dict)
+    _object_positions: dict[Position, list[str]] = PrivateAttr(default_factory=dict)
 
     # --- Tile operations ---
 
@@ -150,6 +228,54 @@ class World(BaseModel):
     def is_position_occupied(self, position: Position) -> bool:
         """Check if position has an entity."""
         return position in self._entity_positions
+
+    # --- Object operations ---
+
+    def add_object(self, obj: WorldObject) -> None:
+        """Add object to world.
+
+        Raises:
+            ObjectAlreadyExistsError: If object with same ID already exists.
+        """
+        if obj.object_id in self._objects:
+            raise ObjectAlreadyExistsError(f"Object {obj.object_id} already exists")
+        self._objects[obj.object_id] = obj
+        if obj.position not in self._object_positions:
+            self._object_positions[obj.position] = []
+        self._object_positions[obj.position].append(obj.object_id)
+
+    def get_object(self, object_id: str) -> WorldObject:
+        """Get object by ID.
+
+        Raises:
+            ObjectNotFoundError: If object not found.
+        """
+        if object_id not in self._objects:
+            raise ObjectNotFoundError(f"Object {object_id} not found")
+        return self._objects[object_id]
+
+    def get_objects_at(self, position: Position) -> list[WorldObject]:
+        """Get all objects at position."""
+        object_ids = self._object_positions.get(position, [])
+        return [self._objects[oid] for oid in object_ids]
+
+    def update_object(self, obj: WorldObject) -> None:
+        """Update object state (must already exist, position unchanged).
+
+        Raises:
+            ObjectNotFoundError: If object not found.
+        """
+        if obj.object_id not in self._objects:
+            raise ObjectNotFoundError(f"Object {obj.object_id} not found")
+        self._objects[obj.object_id] = obj
+
+    def all_objects(self) -> Mapping[str, WorldObject]:
+        """Return read-only view of all objects."""
+        return self._objects
+
+    def object_count(self) -> int:
+        """Return number of objects in the world."""
+        return len(self._objects)
 
     # --- Tick operations ---
 

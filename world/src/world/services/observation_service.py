@@ -10,7 +10,7 @@ import structlog
 
 from .. import world_pb2 as pb
 from .. import world_pb2_grpc
-from ..conversion import entity_to_proto, tile_to_proto
+from ..conversion import entity_to_proto, object_to_proto, tile_to_proto
 from ..lease import LeaseManager
 from ..state import World
 from ..tick import TickContext, TickLoop
@@ -134,6 +134,9 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
         # In future milestones, this will use line-of-sight
         visible_tiles = self._get_nearby_tiles(entity.position, radius=5)
 
+        # Include visible objects (within radius)
+        visible_objects = self._get_nearby_objects(entity.position, radius=5)
+
         # No events at tick start (events would be from previous tick)
         # Future: could include last tick's movement results here
         events: list[pb.ObservationEvent] = []
@@ -145,11 +148,24 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
             deadline_ms=context.deadline_ms,
             visible_entities=visible_entities,
             visible_tiles=visible_tiles,
+            visible_objects=visible_objects,
             events=events,
         )
         # Set 'self' field (Python keyword) using CopyFrom
         observation.self.CopyFrom(self_proto)
         return observation
+
+    def _get_nearby_objects(
+        self, center: Position, radius: int = 5
+    ) -> list[pb.WorldObject]:
+        """Get objects within a radius of the center position."""
+        objects = []
+        for obj in self.world.all_objects().values():
+            dx = abs(obj.position.x - center.x)
+            dy = abs(obj.position.y - center.y)
+            if dx <= radius and dy <= radius:
+                objects.append(object_to_proto(obj))
+        return objects
 
     def _get_nearby_tiles(
         self, center: Position, radius: int = 5

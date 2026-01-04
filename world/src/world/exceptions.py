@@ -35,3 +35,15 @@ class TickDeadlineError(WorldError):
     """Raised when intent submitted after deadline."""
 
     pass
+
+
+class ObjectNotFoundError(WorldError):
+    """Raised when object is not found."""
+
+    pass
+
+
+class ObjectAlreadyExistsError(WorldError):
+    """Raised when trying to add an object that already exists."""
+
+    pass

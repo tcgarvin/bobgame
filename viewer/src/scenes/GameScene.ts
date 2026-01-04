@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import type { MapData } from '../types/map';
 import { TileType, createTestRoom } from '../types/map';
 import { WebSocketClient, WorldState } from '../network';
-import type { ConnectionState, InterpolatedEntity } from '../network';
+import type { ConnectionState, InterpolatedEntity, TrackedObject } from '../network';
 
 const TILE_SIZE = 16;
 const SCALE = 3; // Scale up for visibility (16 * 3 = 48px per tile)
@@ -24,6 +24,7 @@ export class GameScene extends Phaser.Scene {
   private wsClient?: WebSocketClient;
   private worldState: WorldState = new WorldState();
   private entitySprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
+  private objectSprites: Map<string, Phaser.GameObjects.Container> = new Map();
   private connectionText?: Phaser.GameObjects.Text;
 
   constructor() {
@@ -76,6 +77,17 @@ export class GameScene extends Phaser.Scene {
         this.createEntitySprite(entity);
       } else {
         this.removeEntitySprite(entity.entityId);
+      }
+    });
+
+    // Handle object changes
+    this.worldState.onObjectChange((action, obj) => {
+      if (action === 'added') {
+        this.createObjectSprite(obj);
+      } else if (action === 'removed') {
+        this.removeObjectSprite(obj.objectId);
+      } else if (action === 'updated') {
+        this.updateObjectSprite(obj);
       }
     });
 
@@ -147,6 +159,101 @@ export class GameScene extends Phaser.Scene {
       sprite.destroy();
       this.entitySprites.delete(entityId);
       console.log(`Removed sprite for entity ${entityId}`);
+    }
+  }
+
+  private createObjectSprite(obj: TrackedObject): void {
+    const posX = obj.position.x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+    const posY = obj.position.y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+
+    // Create a container for the bush (graphics + text)
+    const container = this.add.container(posX, posY);
+    container.setDepth(5); // Between tiles and entities
+
+    // Draw bush as a green circle
+    const graphics = this.add.graphics();
+    graphics.setName('bushGraphics');
+    this.drawBushGraphics(graphics, obj);
+    container.add(graphics);
+
+    // Add berry count text
+    const berryCount = parseInt(obj.state.berry_count || '0', 10);
+    const text = this.add.text(0, 0, berryCount.toString(), {
+      fontFamily: 'monospace',
+      fontSize: '12px',
+      color: '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    text.setName('berryText');
+    text.setOrigin(0.5, 0.5);
+    container.add(text);
+
+    this.objectSprites.set(obj.objectId, container);
+    console.log(`Created bush ${obj.objectId} at (${obj.position.x}, ${obj.position.y}) with ${berryCount} berries`);
+  }
+
+  private removeObjectSprite(objectId: string): void {
+    const container = this.objectSprites.get(objectId);
+    if (container) {
+      container.destroy();
+      this.objectSprites.delete(objectId);
+      console.log(`Removed object ${objectId}`);
+    }
+  }
+
+  private updateObjectSprite(obj: TrackedObject): void {
+    const container = this.objectSprites.get(obj.objectId);
+    if (container && obj.objectType === 'bush') {
+      // Update graphics
+      const graphics = container.getByName('bushGraphics') as Phaser.GameObjects.Graphics;
+      if (graphics) {
+        graphics.clear();
+        this.drawBushGraphics(graphics, obj);
+      }
+
+      // Update text
+      const text = container.getByName('berryText') as Phaser.GameObjects.Text;
+      if (text) {
+        const berryCount = parseInt(obj.state.berry_count || '0', 10);
+        text.setText(berryCount.toString());
+      }
+    }
+  }
+
+  private drawBushGraphics(graphics: Phaser.GameObjects.Graphics, obj: TrackedObject): void {
+    const berryCount = parseInt(obj.state.berry_count || '0', 10);
+    const maxBerries = parseInt(obj.state.max_berries || '5', 10);
+    const ratio = maxBerries > 0 ? berryCount / maxBerries : 0;
+
+    // Bush color based on berry count
+    let bushColor = 0x228b22; // Forest green (full)
+    if (ratio <= 0) {
+      bushColor = 0x556b2f; // Dark olive (empty)
+    } else if (ratio < 0.5) {
+      bushColor = 0x6b8e23; // Olive drab (low)
+    }
+
+    const size = TILE_SIZE * SCALE * 0.8;
+
+    // Draw bush body (circle)
+    graphics.fillStyle(bushColor, 1);
+    graphics.fillCircle(0, 0, size / 2);
+
+    // Draw berry dots if bush has berries
+    if (berryCount > 0) {
+      graphics.fillStyle(0xff0000, 1); // Red berries
+      const berrySize = 4;
+      const positions = [
+        { x: -8, y: -6 },
+        { x: 6, y: -8 },
+        { x: -6, y: 6 },
+        { x: 8, y: 4 },
+        { x: 0, y: 8 },
+      ];
+      for (let i = 0; i < Math.min(berryCount, positions.length); i++) {
+        graphics.fillCircle(positions[i].x, positions[i].y, berrySize);
+      }
     }
   }
 

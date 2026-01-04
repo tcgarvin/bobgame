@@ -133,26 +133,35 @@ class RandomAgent:
                 visible_entities=len(observation.visible_entities),
             )
 
-            # Choose random direction
-            direction = random.choice(DIRECTIONS)
+            # Decide what action to take
+            intent = self._decide_action(observation)
 
-            # Submit move intent for the CURRENT tick
+            # Submit intent for the CURRENT tick
             # (observation is sent at tick start, before deadline)
             response = action_stub.SubmitIntent(
                 pb.SubmitIntentRequest(
                     lease_id=self._lease_id,
                     entity_id=self.entity_id,
                     tick_id=observation.tick_id,
-                    intent=pb.Intent(move=pb.MoveIntent(direction=direction)),
+                    intent=intent,
                 )
             )
 
             if response.accepted:
-                logger.debug(
-                    "intent_submitted",
-                    tick_id=observation.tick_id,
-                    direction=pb.Direction.Name(direction),
-                )
+                if intent.HasField("move"):
+                    logger.debug(
+                        "intent_submitted",
+                        tick_id=observation.tick_id,
+                        action="move",
+                        direction=pb.Direction.Name(intent.move.direction),
+                    )
+                elif intent.HasField("collect"):
+                    logger.debug(
+                        "intent_submitted",
+                        tick_id=observation.tick_id,
+                        action="collect",
+                        object_id=intent.collect.object_id,
+                    )
             else:
                 logger.warning(
                     "intent_rejected",
@@ -162,6 +171,38 @@ class RandomAgent:
 
             # Renew lease periodically (every 10 seconds)
             self._maybe_renew_lease()
+
+    def _decide_action(self, observation: pb.Observation) -> pb.Intent:
+        """Decide what action to take based on observation.
+
+        Priority:
+        1. If on a bush with berries, collect
+        2. Otherwise, move randomly
+        """
+        self_pos = observation.self.position
+
+        # Check for bushes at our position with berries
+        for obj in observation.visible_objects:
+            if obj.object_type == "bush" and obj.position.x == self_pos.x and obj.position.y == self_pos.y:
+                berry_count = int(obj.state.get("berry_count", "0"))
+                if berry_count > 0:
+                    logger.info(
+                        "collecting_berries",
+                        object_id=obj.object_id,
+                        berry_count=berry_count,
+                        position=f"({self_pos.x}, {self_pos.y})",
+                    )
+                    return pb.Intent(
+                        collect=pb.CollectIntent(
+                            object_id=obj.object_id,
+                            item_type="berry",
+                            amount=1,
+                        )
+                    )
+
+        # No bush at position, move randomly
+        direction = random.choice(DIRECTIONS)
+        return pb.Intent(move=pb.MoveIntent(direction=direction))
 
     def _maybe_renew_lease(self) -> None:
         """Renew lease if needed."""

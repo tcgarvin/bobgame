@@ -17,7 +17,7 @@ from .services import (
     TickServiceServicer,
     ViewerWebSocketService,
 )
-from .state import Entity, World
+from .state import Entity, World, WorldObject
 from .tick import TickConfig, TickContext, TickLoop, TickResult
 from .types import Position
 
@@ -111,6 +111,10 @@ class WorldServer:
         self.world.add_entity(entity)
         self.discovery_service.register_entity_spawn(entity.entity_id, self.world.tick)
 
+    def add_object(self, obj: WorldObject) -> None:
+        """Add an object to the world."""
+        self.world.add_object(obj)
+
     async def start(self) -> None:
         """Start the gRPC server and tick loop."""
         # Create gRPC server with thread pool for handling requests
@@ -185,6 +189,7 @@ async def run_server(
     ws_port: int = DEFAULT_WS_PORT,
     tick_duration_ms: int = 1000,
     entities: list[Entity] | None = None,
+    objects: list[WorldObject] | None = None,
 ) -> None:
     """Run a world server with the given configuration.
 
@@ -195,6 +200,7 @@ async def run_server(
         ws_port: WebSocket port for viewer connections
         tick_duration_ms: Duration of each tick in milliseconds
         entities: Initial entities to add to the world
+        objects: Initial objects (bushes, etc.) to add to the world
     """
     world = World(width=width, height=height)
     config = TickConfig(
@@ -209,6 +215,11 @@ async def run_server(
         for entity in entities:
             server.add_entity(entity)
 
+    # Add initial objects
+    if objects:
+        for obj in objects:
+            server.add_object(obj)
+
     logger.info(
         "starting_world_server",
         width=width,
@@ -217,6 +228,7 @@ async def run_server(
         ws_port=ws_port,
         tick_duration_ms=tick_duration_ms,
         entities=len(entities) if entities else 0,
+        objects=len(objects) if objects else 0,
     )
 
     await server.run_forever()
@@ -226,28 +238,74 @@ def main() -> None:
     """CLI entry point for the world server."""
     import argparse
 
+    from .config import (
+        config_to_entities,
+        config_to_objects,
+        find_config,
+        list_configs,
+        load_config,
+    )
+
     parser = argparse.ArgumentParser(description="Bob's World Server")
+    parser.add_argument(
+        "--config",
+        type=str,
+        help=f"Config name or path (available: {', '.join(list_configs())})",
+    )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="gRPC port")
     parser.add_argument(
         "--ws-port", type=int, default=DEFAULT_WS_PORT, help="WebSocket port for viewers"
     )
-    parser.add_argument("--width", type=int, default=100, help="World width")
-    parser.add_argument("--height", type=int, default=100, help="World height")
+    parser.add_argument("--width", type=int, help="World width (overrides config)")
+    parser.add_argument("--height", type=int, help="World height (overrides config)")
     parser.add_argument(
-        "--tick-duration", type=int, default=1000, help="Tick duration in ms"
+        "--tick-duration", type=int, help="Tick duration in ms (overrides config)"
     )
     parser.add_argument(
         "--spawn-entity",
         type=str,
         nargs="*",
         default=[],
-        help="Spawn entity at x,y (e.g., 'bob:5,5')",
+        help="Spawn entity at x,y (e.g., 'bob:5,5') - adds to config entities",
+    )
+    parser.add_argument(
+        "--spawn-bush",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Spawn bush at x,y (e.g., 'bush1:3,3') - adds to config objects",
     )
 
     args = parser.parse_args()
 
-    # Parse entity spawns
-    entities = []
+    # Load config if specified
+    if args.config:
+        try:
+            config_path = find_config(args.config)
+            config = load_config(config_path)
+            logger.info("config_loaded", path=str(config_path))
+        except FileNotFoundError as e:
+            parser.error(str(e))
+    else:
+        # Default config: small 10x10 world
+        from .config import Config, WorldConfig
+
+        config = Config(world=WorldConfig(width=10, height=10))
+
+    # Apply CLI overrides
+    width = args.width if args.width is not None else config.world.width
+    height = args.height if args.height is not None else config.world.height
+    tick_duration = (
+        args.tick_duration
+        if args.tick_duration is not None
+        else config.world.tick_duration_ms
+    )
+
+    # Start with entities/objects from config
+    entities = config_to_entities(config)
+    objects = config_to_objects(config)
+
+    # Add CLI-specified entities
     for spawn in args.spawn_entity:
         if ":" not in spawn:
             parser.error(f"Invalid spawn format: {spawn} (expected 'id:x,y')")
@@ -263,6 +321,23 @@ def main() -> None:
             )
         )
 
+    # Add CLI-specified bushes
+    for spawn in args.spawn_bush:
+        if ":" not in spawn:
+            parser.error(f"Invalid spawn format: {spawn} (expected 'id:x,y')")
+        object_id, coords = spawn.split(":", 1)
+        if "," not in coords:
+            parser.error(f"Invalid coords format: {coords} (expected 'x,y')")
+        x, y = coords.split(",", 1)
+        objects.append(
+            WorldObject(
+                object_id=object_id,
+                position=Position(x=int(x), y=int(y)),
+                object_type="bush",
+                state=(("berry_count", "5"), ("max_berries", "5")),
+            )
+        )
+
     # Configure structlog for CLI
     structlog.configure(
         processors=[
@@ -275,12 +350,13 @@ def main() -> None:
 
     asyncio.run(
         run_server(
-            width=args.width,
-            height=args.height,
+            width=width,
+            height=height,
             port=args.port,
             ws_port=args.ws_port,
-            tick_duration_ms=args.tick_duration,
+            tick_duration_ms=tick_duration,
             entities=entities,
+            objects=objects,
         )
     )
 

@@ -230,6 +230,8 @@ message Intent {
     UseIntent use = 3;
     SayIntent say = 4;
     WaitIntent wait = 5;
+    CollectIntent collect = 6;
+    EatIntent eat = 7;
   }
 }
 
@@ -253,6 +255,17 @@ message SayIntent {
 }
 
 message WaitIntent {}
+
+message CollectIntent {
+  string object_id = 1;   // Optional: specific object to collect from
+  string item_type = 2;   // What to collect (e.g., "berry")
+  int32 amount = 3;       // How many to collect (default 1)
+}
+
+message EatIntent {
+  string item_type = 1;   // What to eat from inventory
+  int32 amount = 2;       // How many to eat (default 1)
+}
 
 message SubmitIntentResponse {
   bool accepted = 1;

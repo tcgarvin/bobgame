@@ -1,7 +1,7 @@
 """Conversion functions between internal types and proto messages."""
 
 from . import world_pb2 as pb
-from .state import Entity, Tile
+from .state import Entity, Inventory, Tile, WorldObject
 from .types import Direction, Position
 
 
@@ -32,6 +32,21 @@ def position_from_proto(proto_position: pb.Position) -> Position:
     return Position(x=proto_position.x, y=proto_position.y)
 
 
+def inventory_to_proto(inventory: Inventory) -> pb.Inventory:
+    """Convert internal Inventory to proto Inventory."""
+    items = [
+        pb.InventoryItem(kind=item_type, quantity=count)
+        for item_type, count in inventory.items
+    ]
+    return pb.Inventory(items=items)
+
+
+def inventory_from_proto(proto_inventory: pb.Inventory) -> Inventory:
+    """Convert proto Inventory to internal Inventory."""
+    items = tuple((item.kind, item.quantity) for item in proto_inventory.items)
+    return Inventory(items=items)
+
+
 def entity_to_proto(entity: Entity) -> pb.Entity:
     """Convert internal Entity to proto Entity."""
     return pb.Entity(
@@ -40,7 +55,7 @@ def entity_to_proto(entity: Entity) -> pb.Entity:
         entity_type=entity.entity_type,
         tags=list(entity.tags),
         status_bits=entity.status_bits,
-        # inventory deferred to Milestone 5
+        inventory=inventory_to_proto(entity.inventory),
     )
 
 
@@ -52,6 +67,7 @@ def entity_from_proto(proto_entity: pb.Entity) -> Entity:
         entity_type=proto_entity.entity_type,
         tags=tuple(proto_entity.tags),
         status_bits=proto_entity.status_bits,
+        inventory=inventory_from_proto(proto_entity.inventory),
     )
 
 
@@ -72,4 +88,24 @@ def tile_from_proto(proto_tile: pb.Tile) -> Tile:
         walkable=proto_tile.walkable,
         opaque=proto_tile.opaque,
         floor_type=proto_tile.floor_type,
+    )
+
+
+def object_to_proto(obj: WorldObject) -> pb.WorldObject:
+    """Convert internal WorldObject to proto WorldObject."""
+    return pb.WorldObject(
+        object_id=obj.object_id,
+        position=position_to_proto(obj.position),
+        object_type=obj.object_type,
+        state=dict(obj.state),
+    )
+
+
+def object_from_proto(proto_obj: pb.WorldObject) -> WorldObject:
+    """Convert proto WorldObject to internal WorldObject."""
+    return WorldObject(
+        object_id=proto_obj.object_id,
+        position=position_from_proto(proto_obj.position),
+        object_type=proto_obj.object_type,
+        state=tuple(proto_obj.state.items()),
     )

@@ -31,24 +31,33 @@ bobgame/
 ## Running the System
 
 ```bash
-./dev.sh  # Starts world server, random agent, and viewer
+./dev.sh              # Uses 'foraging' config by default (bob + berry bushes)
+./dev.sh default      # Minimal config (bob only, no objects)
 ```
 
 Or manually:
 ```bash
-cd world && uv run python -m world.server --spawn-entity bob:5,5
+cd world && uv run python -m world.server --config foraging
 cd agents && uv run python -m agents.random_agent --entity bob
 cd viewer && npm run dev
 ```
 
+**Configs** are in `world/configs/`:
+- `foraging.toml` - 10x10 world with bob at (5,5) and bushes at (3,3), (7,7)
+- `default.toml` - Minimal 10x10 world
+
 ## Key Files by Component
 
 **World Core** (`world/src/world/`):
-- `state.py` - World, Entity, Tile data models
+- `state.py` - World, Entity, Tile, WorldObject, Inventory data models
 - `tick.py` - Async tick loop with deadline handling
 - `movement.py` - Claim-resolve-enact conflict resolution
+- `foraging.py` - Collect/eat actions and bush regeneration
 - `server.py` - WorldServer entry point
 - `services/` - gRPC service implementations
+
+**Agents** (`agents/src/agents/`):
+- `random_agent.py` - Reference agent that moves randomly and collects berries
 
 **Proto** (`proto/world.proto`):
 - Defines all gRPC services and message types
@@ -61,7 +70,10 @@ cd viewer && npm run dev
 
 ## Component-Specific Notes
 
-See `world/CLAUDE.md` and `viewer/CLAUDE.md` for detailed architecture decisions and patterns.
+See component CLAUDE.md files for detailed architecture decisions:
+- `world/CLAUDE.md` - Simulation engine, tick loop, movement conflict resolution
+- `viewer/CLAUDE.md` - Phaser rendering, WebSocket integration
+- `agents/CLAUDE.md` - Agent implementation patterns, foraging, intent submission
 
 ## Tests
 

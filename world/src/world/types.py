@@ -70,3 +70,20 @@ class MoveIntent(BaseModel, frozen=True):
 
     entity_id: str
     direction: Direction
+
+
+class CollectIntent(BaseModel, frozen=True):
+    """Intent to collect items from an object at the entity's position."""
+
+    entity_id: str
+    object_id: str | None = None  # If None, collect from any object at position
+    item_type: str = "berry"
+    amount: int = 1
+
+
+class EatIntent(BaseModel, frozen=True):
+    """Intent to consume items from inventory."""
+
+    entity_id: str
+    item_type: str
+    amount: int = 1

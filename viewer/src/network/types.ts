@@ -22,13 +22,27 @@ export interface MoveResult {
   success: boolean;
 }
 
+export interface ObjectState {
+  object_id: string;
+  position: Position;
+  object_type: string;
+  state: Record<string, string>;
+}
+
+export interface ObjectChange {
+  object_id: string;
+  field: string;
+  old_value: string;
+  new_value: string;
+}
+
 // Message types
 
 export interface SnapshotMessage {
   type: 'snapshot';
   tick_id: number;
   entities: EntityState[];
-  objects: unknown[]; // For Milestone 5
+  objects: ObjectState[];
   world_size: { width: number; height: number };
   tick_duration_ms: number;
 }
@@ -45,6 +59,7 @@ export interface TickCompletedMessage {
   type: 'tick_completed';
   tick_id: number;
   moves: MoveResult[];
+  object_changes: ObjectChange[];
   actions_processed: number;
 }
 

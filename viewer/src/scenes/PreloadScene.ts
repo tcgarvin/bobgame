@@ -54,6 +54,8 @@ export class PreloadScene extends Phaser.Scene {
       frameWidth: 16,
       frameHeight: 16,
     });
+
+    // Note: Bushes are rendered using Graphics objects, no sprite needed
   }
 
   create(): void {

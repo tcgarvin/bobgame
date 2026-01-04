@@ -143,11 +143,20 @@ class ViewerWebSocketService:
                 "tags": list(entity.tags),
             })
 
+        objects = []
+        for obj in self.world.all_objects().values():
+            objects.append({
+                "object_id": obj.object_id,
+                "position": {"x": obj.position.x, "y": obj.position.y},
+                "object_type": obj.object_type,
+                "state": dict(obj.state),
+            })
+
         return {
             "type": "snapshot",
             "tick_id": self.world.tick,
             "entities": entities,
-            "objects": [],  # For Milestone 5
+            "objects": objects,
             "world_size": {"width": self.world.width, "height": self.world.height},
             "tick_duration_ms": self.tick_config.tick_duration_ms,
         }
@@ -174,11 +183,27 @@ class ViewerWebSocketService:
                 "success": move_result.success,
             })
 
+        object_changes = []
+        for change in result.object_changes:
+            object_changes.append({
+                "object_id": change.object_id,
+                "field": change.field,
+                "old_value": change.old_value,
+                "new_value": change.new_value,
+            })
+
+        total_actions = (
+            len(result.move_results)
+            + len(result.collect_results)
+            + len(result.eat_results)
+        )
+
         event = {
             "type": "tick_completed",
             "tick_id": result.tick_id,
             "moves": moves,
-            "actions_processed": len(result.move_results),
+            "object_changes": object_changes,
+            "actions_processed": total_actions,
         }
         self.broadcast_event(event)
 

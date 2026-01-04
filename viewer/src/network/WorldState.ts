@@ -5,6 +5,7 @@
 
 import type {
   EntityState,
+  ObjectState,
   SnapshotMessage,
   TickStartedMessage,
   TickCompletedMessage,
@@ -44,6 +45,21 @@ export type EntityChangeHandler = (
 ) => void;
 
 /**
+ * Tracked world object (bushes, etc.)
+ */
+export interface TrackedObject {
+  objectId: string;
+  objectType: string;
+  position: { x: number; y: number };
+  state: Record<string, string>;
+}
+
+export type ObjectChangeHandler = (
+  action: 'added' | 'removed' | 'updated',
+  object: TrackedObject
+) => void;
+
+/**
  * Ease-out quadratic function for smoother movement feel
  */
 function easeOutQuad(t: number): number {
@@ -52,18 +68,27 @@ function easeOutQuad(t: number): number {
 
 export class WorldState {
   private entities: Map<string, InterpolatedEntity> = new Map();
+  private objects: Map<string, TrackedObject> = new Map();
   private currentTickId: number = 0;
   private tickDurationMs: number = 1000;
   private tickStartTime: number = 0;
   private worldSize: { width: number; height: number } = { width: 100, height: 100 };
   private initialized: boolean = false;
   private entityChangeHandler: EntityChangeHandler | null = null;
+  private objectChangeHandler: ObjectChangeHandler | null = null;
 
   /**
    * Set handler for entity add/remove events
    */
   onEntityChange(handler: EntityChangeHandler): void {
     this.entityChangeHandler = handler;
+  }
+
+  /**
+   * Set handler for object add/remove/update events
+   */
+  onObjectChange(handler: ObjectChangeHandler): void {
+    this.objectChangeHandler = handler;
   }
 
   /**
@@ -102,6 +127,20 @@ export class WorldState {
   }
 
   /**
+   * Get all objects (for rendering)
+   */
+  getObjects(): TrackedObject[] {
+    return Array.from(this.objects.values());
+  }
+
+  /**
+   * Get a specific object by ID
+   */
+  getObject(objectId: string): TrackedObject | undefined {
+    return this.objects.get(objectId);
+  }
+
+  /**
    * Handle incoming WebSocket message
    */
   handleMessage(message: ViewerMessage): void {
@@ -122,13 +161,19 @@ export class WorldState {
    * Initialize world state from snapshot
    */
   private handleSnapshot(msg: SnapshotMessage): void {
-    console.log(`Received snapshot: tick=${msg.tick_id}, entities=${msg.entities.length}`);
+    console.log(`Received snapshot: tick=${msg.tick_id}, entities=${msg.entities.length}, objects=${msg.objects.length}`);
 
     // Clear existing entities
     for (const entity of this.entities.values()) {
       this.entityChangeHandler?.('removed', entity);
     }
     this.entities.clear();
+
+    // Clear existing objects
+    for (const obj of this.objects.values()) {
+      this.objectChangeHandler?.('removed', obj);
+    }
+    this.objects.clear();
 
     // Set world state
     this.currentTickId = msg.tick_id;
@@ -141,6 +186,13 @@ export class WorldState {
       const entity = this.createInterpolatedEntity(entityState);
       this.entities.set(entity.entityId, entity);
       this.entityChangeHandler?.('added', entity);
+    }
+
+    // Add objects from snapshot
+    for (const objState of msg.objects) {
+      const obj = this.createTrackedObject(objState);
+      this.objects.set(obj.objectId, obj);
+      this.objectChangeHandler?.('added', obj);
     }
 
     this.initialized = true;
@@ -175,6 +227,15 @@ export class WorldState {
         // Reset start position to current for smooth transition
         entity.startX = entity.currentX;
         entity.startY = entity.currentY;
+      }
+    }
+
+    // Apply object changes
+    for (const change of msg.object_changes ?? []) {
+      const obj = this.objects.get(change.object_id);
+      if (obj) {
+        obj.state[change.field] = change.new_value;
+        this.objectChangeHandler?.('updated', obj);
       }
     }
 
@@ -234,6 +295,18 @@ export class WorldState {
       targetY: state.position.y,
       startX: state.position.x,
       startY: state.position.y,
+    };
+  }
+
+  /**
+   * Create a tracked object from server state
+   */
+  private createTrackedObject(state: ObjectState): TrackedObject {
+    return {
+      objectId: state.object_id,
+      objectType: state.object_type,
+      position: { x: state.position.x, y: state.position.y },
+      state: { ...state.state },
     };
   }
 }
