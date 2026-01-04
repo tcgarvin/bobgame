@@ -193,30 +193,59 @@ See `world/CLAUDE.md` for detailed architecture decisions
 
 ---
 
-## Milestone 4: Live Viewer Integration
+## Milestone 4: Live Viewer Integration ✓
 
 **Goal**: Viewer shows real-time world state
 
+**Status**: Complete (137 tests passing)
+
 ### Tasks
 
-#### 4.1 Viewer gRPC Connection
-Option A: gRPC-Web with Envoy proxy
-Option B: REST/WebSocket bridge (simpler)
-- [ ] Implement chosen approach
-- [ ] Stream viewer events to frontend
+#### 4.1 Viewer WebSocket Bridge
+Chose WebSocket bridge approach (simpler than gRPC-Web):
+- [x] WebSocket server embedded in WorldServer
+- [x] JSON message format for events
+- [x] Stream viewer events to frontend
 
 #### 4.2 Viewer Service
-- [ ] Add `ViewerService` to proto
-- [ ] Implement `StreamViewerEvents`
-- [ ] Entity position updates
-- [ ] Tick synchronization
+- [x] Implement `ViewerWebSocketService` (Python)
+- [x] Snapshot on connect (entities, world size, tick info)
+- [x] `tick_started` and `tick_completed` events
+- [x] Entity position updates with move results
 
 #### 4.3 Viewer Updates
-- [ ] Connect to event stream
-- [ ] Update entity positions on tick
-- [ ] Interpolate movement between ticks (smooth animation)
+- [x] TypeScript WebSocket client with reconnection
+- [x] `WorldState` class with interpolation
+- [x] Update entity positions on tick
+- [x] Smooth 60fps movement interpolation (ease-out curve)
 
 **Deliverable**: Viewer shows live entity movement
+
+### Implementation Notes
+
+Files created in `world/src/world/services/`:
+- `viewer_ws_service.py` - WebSocket server with snapshot/event broadcasting
+
+Files created in `viewer/src/network/`:
+- `types.ts` - Message type definitions
+- `WebSocketClient.ts` - Connection management with reconnection
+- `WorldState.ts` - Entity state with interpolation
+
+Modified files:
+- `world/src/world/server.py` - Integrated WebSocket service
+- `viewer/src/scenes/GameScene.ts` - Connected to live world state
+
+Usage:
+```bash
+# Start world server (gRPC on 50051, WebSocket on 8765)
+cd world && uv run python -m world.server --spawn-entity bob:5,5
+
+# Start random agent
+cd agents && uv run python -m agents.random_agent --entity bob
+
+# Start viewer (opens browser)
+cd viewer && npm run dev
+```
 
 ---
 

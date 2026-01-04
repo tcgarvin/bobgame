@@ -287,10 +287,7 @@ class TestFullServerIntegration:
         world = World(width=10, height=10)
         config = TickConfig(tick_duration_ms=50, intent_deadline_ms=25)
 
-        server = WorldServer(world, port=0, tick_config=config)
-        # Use a random port - we need to bind first to get it
-        # For this test, we'll use a fixed high port
-        server.port = 50099
+        server = WorldServer(world, port=50099, ws_port=18765, tick_config=config)
 
         server.add_entity(Entity(entity_id="bob", position=Position(x=5, y=5)))
 
@@ -315,7 +312,7 @@ class TestFullServerIntegration:
         world = World(width=10, height=10)
         config = TickConfig(tick_duration_ms=100, intent_deadline_ms=50)
 
-        server = WorldServer(world, port=50098, tick_config=config)
+        server = WorldServer(world, port=50098, ws_port=18766, tick_config=config)
         server.add_entity(Entity(entity_id="bob", position=Position(x=5, y=5)))
 
         initial_position = world.get_entity("bob").position

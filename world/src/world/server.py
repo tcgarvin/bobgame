@@ -15,6 +15,7 @@ from .services import (
     LeaseServiceServicer,
     ObservationServiceServicer,
     TickServiceServicer,
+    ViewerWebSocketService,
 )
 from .state import Entity, World
 from .tick import TickConfig, TickContext, TickLoop, TickResult
@@ -22,8 +23,9 @@ from .types import Position
 
 logger = structlog.get_logger()
 
-# Default port for world server
+# Default ports
 DEFAULT_PORT = 50051
+DEFAULT_WS_PORT = 8765
 
 
 class WorldServer:
@@ -33,10 +35,12 @@ class WorldServer:
         self,
         world: World,
         port: int = DEFAULT_PORT,
+        ws_port: int = DEFAULT_WS_PORT,
         tick_config: TickConfig | None = None,
     ):
         self.world = world
         self.port = port
+        self.ws_port = ws_port
         self.tick_config = tick_config or TickConfig()
 
         # Core components
@@ -59,6 +63,11 @@ class WorldServer:
             world, self.lease_manager
         )
 
+        # Viewer WebSocket service
+        self.viewer_ws_service = ViewerWebSocketService(
+            world, self.tick_config, port=ws_port
+        )
+
         # gRPC server
         self._server: grpc.Server | None = None
         self._tick_task: asyncio.Task | None = None
@@ -73,6 +82,9 @@ class WorldServer:
         # Agents can now submit intents for this tick
         self.observation_service.broadcast_observations(context)
 
+        # Broadcast to viewer WebSocket clients
+        self.viewer_ws_service.on_tick_start(context)
+
         logger.debug(
             "tick_start_broadcast",
             tick_id=context.tick_id,
@@ -83,6 +95,9 @@ class WorldServer:
         """Called after each tick completes."""
         # Cleanup expired leases periodically
         self.lease_manager.cleanup_expired()
+
+        # Broadcast to viewer WebSocket clients
+        self.viewer_ws_service.on_tick_complete(result)
 
         logger.debug(
             "tick_complete",
@@ -125,6 +140,9 @@ class WorldServer:
         self._server.start()
         logger.info("grpc_server_started", port=self.port)
 
+        # Start WebSocket server for viewers
+        await self.viewer_ws_service.start()
+
         # Start tick loop
         self._tick_task = asyncio.create_task(self.tick_loop.run())
         logger.info("tick_loop_started")
@@ -138,6 +156,9 @@ class WorldServer:
                 await asyncio.wait_for(self._tick_task, timeout=grace_period)
             except asyncio.TimeoutError:
                 self._tick_task.cancel()
+
+        # Stop WebSocket server
+        await self.viewer_ws_service.stop()
 
         # Stop gRPC server
         if self._server:
@@ -161,6 +182,7 @@ async def run_server(
     width: int = 100,
     height: int = 100,
     port: int = DEFAULT_PORT,
+    ws_port: int = DEFAULT_WS_PORT,
     tick_duration_ms: int = 1000,
     entities: list[Entity] | None = None,
 ) -> None:
@@ -170,6 +192,7 @@ async def run_server(
         width: World width in tiles
         height: World height in tiles
         port: gRPC port to listen on
+        ws_port: WebSocket port for viewer connections
         tick_duration_ms: Duration of each tick in milliseconds
         entities: Initial entities to add to the world
     """
@@ -179,7 +202,7 @@ async def run_server(
         intent_deadline_ms=tick_duration_ms // 2,
     )
 
-    server = WorldServer(world, port=port, tick_config=config)
+    server = WorldServer(world, port=port, ws_port=ws_port, tick_config=config)
 
     # Add initial entities
     if entities:
@@ -191,6 +214,7 @@ async def run_server(
         width=width,
         height=height,
         port=port,
+        ws_port=ws_port,
         tick_duration_ms=tick_duration_ms,
         entities=len(entities) if entities else 0,
     )
@@ -204,6 +228,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Bob's World Server")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="gRPC port")
+    parser.add_argument(
+        "--ws-port", type=int, default=DEFAULT_WS_PORT, help="WebSocket port for viewers"
+    )
     parser.add_argument("--width", type=int, default=100, help="World width")
     parser.add_argument("--height", type=int, default=100, help="World height")
     parser.add_argument(
@@ -251,6 +278,7 @@ def main() -> None:
             width=args.width,
             height=args.height,
             port=args.port,
+            ws_port=args.ws_port,
             tick_duration_ms=args.tick_duration,
             entities=entities,
         )

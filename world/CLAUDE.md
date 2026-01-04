@@ -196,7 +196,58 @@ def __getattr__(name: str):
     raise AttributeError(...)
 ```
 
-## Future Considerations (Milestone 4+)
+### Test Port Allocation
+
+Integration tests that start `WorldServer` must use unique ports for **both** gRPC and WebSocket to avoid "address already in use" errors when tests run in parallel:
+
+```python
+# WRONG - uses default ws_port=8765 which will conflict
+server = WorldServer(world, port=50099, tick_config=config)
+
+# CORRECT - unique ports for each test
+server = WorldServer(world, port=50099, ws_port=18765, tick_config=config)
+```
+
+Port ranges in use:
+- gRPC: 50051 (default), 50098-50099 (tests)
+- WebSocket: 8765 (default), 18765-18766 (tests)
+
+## Architecture Decisions (Milestone 4)
+
+### ViewerWebSocketService
+
+Chose WebSocket bridge over gRPC-Web for simplicity:
+
+```python
+# world/src/world/services/viewer_ws_service.py
+class ViewerWebSocketService:
+    """Embedded WebSocket server for viewer clients."""
+```
+
+**Design choices**:
+- Embedded in WorldServer (same process) for direct state access
+- JSON messages (not protobuf) for browser compatibility
+- Async broadcast queue for non-blocking event distribution
+- Uses `websockets` library for async WebSocket server
+
+**Message types**:
+- `snapshot` - Sent on connect with full world state
+- `tick_started` - Broadcast at tick start with timing info
+- `tick_completed` - Broadcast after processing with move results
+
+**Integration hooks**:
+- `on_tick_start()` called from WorldServer tick callback
+- `on_tick_complete()` called after movement resolution
+- `_generate_snapshot()` creates initial state for new clients
+
+### CLI Arguments
+
+Server now accepts `--ws-port` (default 8765):
+```bash
+uv run python -m world.server --spawn-entity bob:5,5 --ws-port 8765
+```
+
+## Future Considerations (Milestone 5+)
 
 ### Line-of-Sight (Milestone 8)
 
