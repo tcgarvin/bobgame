@@ -2,28 +2,48 @@
 
 This plan is organized into incremental milestones. Each milestone produces a working, demonstrable artifact.
 
+## Current Status
+
+| Status | Milestone |
+|--------|-----------|
+| ✓ | 0: Project Scaffolding |
+| ✓ | 1: Static Viewer |
+| ✓ | 2: World Core |
+| ✓ | 3: gRPC API & Basic Agent |
+| ✓ | 4: Live Viewer Integration |
+| **→** | **5a: Berry Foraging Foundation** |
+| | 5b: Simple Agent & Multi-Agent |
+| | 6: Runner & Process Management |
+| | 7: Logging & Replay |
+| | 8: LLM Agent Integration |
+
+---
+
 ## Overview
 
 ```
-Milestone 0: Project Scaffolding & Asset Prep
+Milestone 0: Project Scaffolding & Asset Prep        ✓
      │
      ▼
-Milestone 1: Static Viewer (Phaser renders tiles)
+Milestone 1: Static Viewer (Phaser renders tiles)    ✓
      │
      ▼
-Milestone 2: World Core (tick loop, state, movement)
+Milestone 2: World Core (tick loop, state, movement) ✓
      │
      ▼
-Milestone 3: gRPC API & Basic Agent
+Milestone 3: gRPC API & Basic Agent                  ✓
      │
      ▼
-Milestone 4: Live Viewer Integration
+Milestone 4: Live Viewer Integration                 ✓
      │
      ▼
-Milestone 5: Actions, Inventory, Objects
+Milestone 5a: Berry Foraging (objects, inventory, collect, eat)
      │
      ▼
-Milestone 6: Runner & Multi-Agent
+Milestone 5b: Simple Agent & Multi-Agent
+     │
+     ▼
+Milestone 6: Runner & Process Management
      │
      ▼
 Milestone 7: Logging & Replay
@@ -34,256 +54,135 @@ Milestone 8: LLM Agent Integration
 
 ---
 
-## Milestone 0: Project Scaffolding & Asset Preparation
+## Completed Milestones (0-4)
 
-**Goal**: Working project structure with processed tilesets
+<details>
+<summary><strong>Milestone 0: Project Scaffolding</strong> - Working project structure with processed tilesets</summary>
 
-### Tasks
+- Python projects: `world/`, `runner/`, `agents/` with uv
+- Viewer: Vite + TypeScript + Phaser 3
+- DawnLike tileset processing with atlas manifests
+- See `04_tileset_preparation.md` for tileset details
+</details>
 
-#### 0.1 Initialize Python Projects
-- [ ] Create `world/` with `uv init`, add core dependencies
-- [ ] Create `runner/` with `uv init`
-- [ ] Create `agents/` with `uv init`
-- [ ] Setup shared proto directory
+<details>
+<summary><strong>Milestone 1: Static Viewer</strong> - Render tile map with entities using Phaser</summary>
 
-#### 0.2 Initialize Viewer
-- [ ] Create Vite + TypeScript project
-- [ ] Install Phaser 3
-- [ ] Setup development server
+- TypeScript types for map/tile data
+- Floor and wall tile rendering
+- Entity sprites with 2-frame animation
+- Camera pan (WASD) and zoom (scroll wheel)
+</details>
 
-#### 0.3 Prepare DawnLike Tileset
-The tileset needs processing for Phaser:
+<details>
+<summary><strong>Milestone 2: World Core</strong> - Tick-based simulation with movement (84 tests)</summary>
 
-- [ ] Create tileset manifest (JSON) mapping sprite names to coordinates
-- [ ] Generate texture atlases for efficient loading:
-  - `characters.json` + `characters.png`
-  - `objects.json` + `objects.png`
-  - `items.json` + `items.png`
-  - `tiles.json` + `tiles.png` (floors, walls)
-- [ ] Write Python script to generate atlas manifests
-- [ ] Document sprite naming convention
+- Core data classes: `World`, `Entity`, `Tile`, `Position` in `world/src/world/`
+- Async tick loop at 1 Hz with 500ms deadline
+- Claim-resolve-enact movement pipeline
+- Conflict resolution: swaps fail, cycles fail, lexicographic winner for same destination
+- See `world/CLAUDE.md` for architecture decisions
+</details>
 
-See `04_tileset_preparation.md` for details.
+<details>
+<summary><strong>Milestone 3: gRPC API & Basic Agent</strong> - Agent controls entity via gRPC (126 tests)</summary>
 
-**Deliverable**: Projects initialize, tilesets load in Phaser test scene
+- Proto services: TickService, LeaseService, ObservationService, ActionService, EntityDiscoveryService
+- Lease management with 30s expiry
+- RandomAgent in `agents/src/agents/random_agent.py`
+- See `world/CLAUDE.md` for architecture decisions
+</details>
 
----
+<details>
+<summary><strong>Milestone 4: Live Viewer Integration</strong> - Viewer shows real-time world state (137 tests)</summary>
 
-## Milestone 1: Static Viewer
-
-**Goal**: Render a tile map with entities using Phaser
-
-### Tasks
-
-#### 1.1 Map Data Structure
-- [ ] Define TypeScript types for map/tile data
-- [ ] Create hardcoded test map (10x10 room)
-
-#### 1.2 Tile Rendering
-- [ ] Load tileset atlas
-- [ ] Render floor tiles
-- [ ] Render wall tiles with correct autotiling (or manual placement)
-
-#### 1.3 Entity Rendering
-- [ ] Load character sprites
-- [ ] Place entity sprite on map
-- [ ] Basic 2-frame animation toggle
-
-#### 1.4 Camera Controls
-- [ ] Pan with arrow keys or WASD
-- [ ] Zoom with scroll wheel
-
-**Deliverable**: Static dungeon room with animated character sprite
-
----
-
-## Milestone 2: World Core ✓
-
-**Goal**: Tick-based simulation with movement
-
-**Status**: Complete (84 tests passing)
-
-### Tasks
-
-#### 2.1 World State
-- [x] Define core data classes: `World`, `Entity`, `Tile`, `Position`
-- [x] Grid representation with walkability/opacity
-- [x] Entity registry
-
-#### 2.2 Tick Loop
-- [x] Async tick loop at 1 Hz
-- [x] Tick counter and timing
-- [x] Intent collection with deadline
-
-#### 2.3 Movement System
-- [x] Cardinal and diagonal movement
-- [x] Diagonal blocking rule
-- [x] Claim-resolve-enact pipeline
-- [x] Conflict resolution (priority-based)
-
-#### 2.4 Unit Tests
-- [x] Movement validation tests
-- [x] Conflict resolution tests (same destination, swaps, cycles)
-- [x] Diagonal blocking tests
-
-**Deliverable**: In-memory world that processes movement intents
-
-### Implementation Notes
-
-Files created in `world/src/world/`:
-- `types.py` - Position, Direction, constants
-- `state.py` - World, Entity, Tile with dual-indexed registry
-- `movement.py` - Claim-resolve-enact conflict resolution
-- `tick.py` - Async tick loop with deadline handling
-- `exceptions.py` - Custom exceptions
-
-See `world/CLAUDE.md` for detailed architecture decisions
-
----
-
-## Milestone 3: gRPC API & Basic Agent ✓
-
-**Goal**: Agent connects and controls entity via gRPC
-
-**Status**: Complete (126 tests passing)
-
-### Tasks
-
-#### 3.1 Protobuf Definitions
-- [x] Define `world.proto`:
-  - `TickService`: `StreamTicks`
-  - `LeaseService`: `AcquireLease`, `RenewLease`, `ReleaseLease`
-  - `ObservationService`: `StreamObservations`
-  - `ActionService`: `SubmitIntent`
-  - `EntityDiscoveryService`: `ListControllableEntities`
-- [x] Compile for Python
-
-#### 3.2 gRPC Server
-- [x] Implement tick streaming
-- [x] Implement lease management with expiry
-- [x] Implement observation generation (basic, no LOS yet)
-- [x] Implement intent submission
-- [x] Implement entity discovery service
-
-#### 3.3 Simple Test Agent
-- [x] gRPC client connecting to world
-- [x] Acquire lease
-- [x] Receive observations
-- [x] Submit random movement intents
-
-**Deliverable**: Agent moves entity via gRPC
-
-### Implementation Notes
-
-Files created in `world/src/world/`:
-- `conversion.py` - Proto type conversion functions
-- `lease.py` - Lease management with expiry tracking
-- `server.py` - Main WorldServer entry point
-- `services/` - gRPC service implementations:
-  - `lease_service.py` - LeaseServiceServicer
-  - `tick_service.py` - TickServiceServicer
-  - `action_service.py` - ActionServiceServicer
-  - `observation_service.py` - ObservationServiceServicer
-  - `discovery_service.py` - EntityDiscoveryServiceServicer
-
-Files created in `agents/src/agents/`:
-- `random_agent.py` - RandomAgent class for testing
-
-See `world/CLAUDE.md` for detailed architecture decisions
-
----
-
-## Milestone 4: Live Viewer Integration ✓
-
-**Goal**: Viewer shows real-time world state
-
-**Status**: Complete (137 tests passing)
-
-### Tasks
-
-#### 4.1 Viewer WebSocket Bridge
-Chose WebSocket bridge approach (simpler than gRPC-Web):
-- [x] WebSocket server embedded in WorldServer
-- [x] JSON message format for events
-- [x] Stream viewer events to frontend
-
-#### 4.2 Viewer Service
-- [x] Implement `ViewerWebSocketService` (Python)
-- [x] Snapshot on connect (entities, world size, tick info)
-- [x] `tick_started` and `tick_completed` events
-- [x] Entity position updates with move results
-
-#### 4.3 Viewer Updates
-- [x] TypeScript WebSocket client with reconnection
-- [x] `WorldState` class with interpolation
-- [x] Update entity positions on tick
-- [x] Smooth 60fps movement interpolation (ease-out curve)
-
-**Deliverable**: Viewer shows live entity movement
-
-### Implementation Notes
-
-Files created in `world/src/world/services/`:
-- `viewer_ws_service.py` - WebSocket server with snapshot/event broadcasting
-
-Files created in `viewer/src/network/`:
-- `types.ts` - Message type definitions
-- `WebSocketClient.ts` - Connection management with reconnection
-- `WorldState.ts` - Entity state with interpolation
-
-Modified files:
-- `world/src/world/server.py` - Integrated WebSocket service
-- `viewer/src/scenes/GameScene.ts` - Connected to live world state
+- WebSocket bridge (simpler than gRPC-Web) on port 8765
+- JSON messages: `snapshot`, `tick_started`, `tick_completed`
+- 60fps entity interpolation with ease-out curve
+- Files: `viewer_ws_service.py`, `WebSocketClient.ts`, `WorldState.ts`
 
 Usage:
 ```bash
-# Start world server (gRPC on 50051, WebSocket on 8765)
+./dev.sh  # Or manually:
 cd world && uv run python -m world.server --spawn-entity bob:5,5
-
-# Start random agent
 cd agents && uv run python -m agents.random_agent --entity bob
-
-# Start viewer (opens browser)
 cd viewer && npm run dev
 ```
+</details>
 
 ---
 
-## Milestone 5: Actions, Inventory, Objects
+## Milestone 5a: Berry Foraging Foundation
 
-**Goal**: Full action model with items
+**Goal**: Entities can collect berries from bushes into inventory and eat them
 
 ### Tasks
 
-#### 5.1 Inventory System
-- [ ] Multiset inventory data structure
-- [ ] Inventory in entity state
-- [ ] Inventory in observations
+#### 5a.1 Object System
+- [ ] `WorldObject` class with object_id, position, object_type, state
+- [ ] Object registry in World (`_objects`, `_object_positions`)
+- [ ] `get_objects_at(position)` for visibility
 
-#### 5.2 Objects
-- [ ] Object types: doors, chests, trees, items-on-ground
-- [ ] Object state (open/closed, progress)
-- [ ] Objects affect walkability/opacity
+#### 5a.2 Bush Object Type
+- [ ] `object_type: "bush"` with `berry_count` state (0-5)
+- [ ] Regeneration: +1 berry per N ticks when not full
+- [ ] Does NOT block movement (can walk through)
 
-#### 5.3 Actions
-- [ ] `Pickup` action
-- [ ] `Use` action
-- [ ] `Say` action (local speech)
-- [ ] `Wait` action
-- [ ] Partial-progress actions (tree chopping)
+#### 5a.3 Inventory System
+- [ ] Immutable `Inventory` class (multiset: item_type → count)
+- [ ] `add()`, `remove()`, `count()`, `has()` methods
+- [ ] Add `inventory` field to Entity model
+- [ ] Include inventory in proto Observation
 
-#### 5.4 Viewer Updates
-- [ ] Render objects
-- [ ] Object state changes
-- [ ] Speech bubbles
+#### 5a.4 Collect Action
+- [ ] `CollectIntent` targeting object at current position
+- [ ] Transfer berries from bush to entity inventory
+- [ ] Conflict resolution: first by entity_id wins
 
-**Deliverable**: Agents can interact with world objects
+#### 5a.5 Eat Action
+- [ ] `EatIntent` specifying item type from inventory
+- [ ] Remove item from inventory (no gameplay effect yet)
+
+#### 5a.6 Viewer Updates
+- [ ] Render bushes (Tree0.png has bush sprites)
+- [ ] Show berry count or berry state visually
+- [ ] Update on object state changes
+
+**Deliverable**: Entity can collect berries from bush and eat them
 
 ---
 
-## Milestone 6: Runner & Multi-Agent
+## Milestone 5b: Simple Agent & Multi-Agent
 
-**Goal**: Multiple agents managed by runner
+**Goal**: Two simple agents compete for berries
+
+### Tasks
+
+#### 5b.1 Simple Agent
+- [ ] Replace RandomAgent with SimpleAgent
+- [ ] State machine: WANDER → SEEK → COLLECT → WANDER
+- [ ] Wander: Move randomly when no berries visible
+- [ ] Seek: Path toward visible berries (greedy bee-line)
+- [ ] Collect: When at bush with berries, collect
+- [ ] Eat: Consume berries from inventory sometimes
+
+#### 5b.2 Multi-Agent Setup
+- [ ] World spawns multiple entities
+- [ ] Multiple SimpleAgents connect
+- [ ] Each claims different entity via lease
+
+#### 5b.3 Competition Behavior
+- [ ] Both agents see same bushes
+- [ ] Race to reach bushes first
+- [ ] Conflict resolution decides winner
+
+**Deliverable**: Two agents competing for berry resources
+
+---
+
+## Milestone 6: Runner & Process Management
+
+**Goal**: Runner orchestrates multiple agent processes
 
 ### Tasks
 
@@ -294,14 +193,9 @@ cd viewer && npm run dev
 - [ ] Environment variable setup
 
 #### 6.2 Process Management
-- [ ] Health monitoring
-- [ ] Restart with backoff
-- [ ] Fallback handling
-
-#### 6.3 Multi-Entity World
-- [ ] Multiple entities in world
-- [ ] Separate leases per entity
-- [ ] Conflict resolution with multiple movers
+- [ ] Health monitoring via lease renewal
+- [ ] Restart crashed agents with backoff
+- [ ] Graceful shutdown
 
 **Deliverable**: Runner manages multiple agent processes
 
@@ -314,11 +208,10 @@ cd viewer && npm run dev
 ### Tasks
 
 #### 7.1 Parquet Writer
-- [ ] `ticks.parquet` logging
-- [ ] `actor_state.parquet` logging
-- [ ] `action_results.parquet` logging
-- [ ] `utterances.parquet` logging
-- [ ] `object_deltas.parquet` logging
+- [ ] `ticks.parquet` - tick timing
+- [ ] `entity_state.parquet` - position, inventory per tick
+- [ ] `actions.parquet` - intents and results
+- [ ] `objects.parquet` - object state changes
 
 #### 7.2 Run Management
 - [ ] `run_id` generation
@@ -337,13 +230,13 @@ cd viewer && npm run dev
 
 ## Milestone 8: LLM Agent Integration
 
-**Goal**: Agents powered by LLMs
+**Goal**: Claude-powered agents with reasoning
 
 ### Tasks
 
 #### 8.1 Observation Formatting
 - [ ] Convert observations to text/JSON for LLM
-- [ ] Include visible entities, objects, events
+- [ ] Include visible bushes, entities, inventory
 - [ ] Memory/context management
 
 #### 8.2 LLM Integration
@@ -351,17 +244,25 @@ cd viewer && npm run dev
 - [ ] Prompt engineering for intent selection
 - [ ] Response parsing to intent
 
-#### 8.3 Agent Behaviors
-- [ ] Simple goal-seeking behavior
-- [ ] Memory of past observations
-- [ ] Speech generation
-
-#### 8.4 Line-of-Sight
+#### 8.3 Line-of-Sight (if needed)
 - [ ] Bresenham ray casting
 - [ ] Visibility filtering
 - [ ] Enter/leave visibility events
 
 **Deliverable**: LLM-controlled agents exploring world
+
+---
+
+## Future Extensions (Post-Milestone 8)
+
+These can be added incrementally as needed:
+
+- **Doors**: Toggle open/closed, affect walkability
+- **Chests**: Contain items, open to loot
+- **Trees**: Multi-tick chopping, yield wood
+- **Say Action**: Speech bubbles, local communication
+- **Hunger/Health**: Stats affected by eating
+- **Crafting**: Combine items
 
 ---
 
