@@ -13,13 +13,16 @@ logger = structlog.get_logger()
 
 @dataclass
 class CollectResult:
-    """Result of a collect action."""
+    """Result of a collect action.
+
+    Berry bushes have binary state: either has a berry or doesn't.
+    A successful collect always yields exactly 1 berry.
+    """
 
     entity_id: str
     success: bool
     object_id: str | None = None
     item_type: str | None = None
-    amount: int = 0
     failure_reason: str | None = None
 
 
@@ -115,15 +118,17 @@ def process_collect_phase(
         object_collectors.setdefault(target_object_id, []).append(intent)
 
     # Resolve conflicts per object (lexicographic entity_id wins)
+    # With binary berry state, only the first collector (sorted by entity_id) succeeds
     for object_id, collectors in object_collectors.items():
         obj = world.get_object(object_id)
-        berry_count = int(obj.get_state("berry_count", "0"))
+        has_berry = obj.get_state("berry_count", "0") == "1"
 
         # Sort by entity_id for deterministic winner
         collectors.sort(key=lambda i: i.entity_id)
 
+        berry_taken = False
         for intent in collectors:
-            if berry_count <= 0:
+            if not has_berry or berry_taken:
                 results.append(
                     CollectResult(
                         entity_id=intent.entity_id,
@@ -134,14 +139,12 @@ def process_collect_phase(
                 )
                 continue
 
-            # Collect berries (up to available)
-            collect_amount = min(intent.amount, berry_count)
-            old_count = berry_count
-            berry_count -= collect_amount
+            # Collect the single berry
+            berry_taken = True
 
             # Update entity inventory
             entity = world.get_entity(intent.entity_id)
-            new_inventory = entity.inventory.add("berry", collect_amount)
+            new_inventory = entity.inventory.add("berry", 1)
             world._entities[intent.entity_id] = entity.with_inventory(new_inventory)
 
             results.append(
@@ -150,7 +153,6 @@ def process_collect_phase(
                     success=True,
                     object_id=object_id,
                     item_type="berry",
-                    amount=collect_amount,
                 )
             )
 
@@ -158,8 +160,8 @@ def process_collect_phase(
                 ObjectChange(
                     object_id=object_id,
                     field="berry_count",
-                    old_value=str(old_count),
-                    new_value=str(berry_count),
+                    old_value="1",
+                    new_value="0",
                 )
             )
 
@@ -167,12 +169,11 @@ def process_collect_phase(
                 "collect_success",
                 entity_id=intent.entity_id,
                 object_id=object_id,
-                amount=collect_amount,
-                remaining=berry_count,
             )
 
-        # Update object state
-        world.update_object(obj.with_state("berry_count", str(berry_count)))
+        # Update object state if berry was taken
+        if berry_taken:
+            world.update_object(obj.with_state("berry_count", "0"))
 
     return results, object_changes
 
@@ -239,9 +240,12 @@ def process_regeneration(
     """
     Process bush regeneration.
 
+    Berry bushes have binary state: either has a berry (1) or doesn't (0).
+    At regeneration ticks, empty bushes grow a new berry.
+
     Args:
         world: World state
-        regen_rate: Ticks between regeneration (e.g., 10 = +1 berry every 10 ticks)
+        regen_rate: Ticks between regeneration (e.g., 10 = regrow every 10 ticks)
 
     Returns:
         List of object changes
@@ -255,26 +259,21 @@ def process_regeneration(
         if obj.object_type != "bush":
             continue
 
-        berry_count = int(obj.get_state("berry_count", "0"))
-        max_berries = int(obj.get_state("max_berries", "5"))
+        has_berry = obj.get_state("berry_count", "0") == "1"
 
-        if berry_count < max_berries:
-            old_count = berry_count
-            new_count = berry_count + 1
-            world.update_object(obj.with_state("berry_count", str(new_count)))
+        if not has_berry:
+            world.update_object(obj.with_state("berry_count", "1"))
             changes.append(
                 ObjectChange(
                     object_id=obj.object_id,
                     field="berry_count",
-                    old_value=str(old_count),
-                    new_value=str(new_count),
+                    old_value="0",
+                    new_value="1",
                 )
             )
             logger.debug(
                 "bush_regenerated",
                 object_id=obj.object_id,
-                old_count=old_count,
-                new_count=new_count,
             )
 
     return changes

@@ -1,5 +1,6 @@
 # Foraging test configuration
 # 10x10 world with multiple entities competing for berry bushes
+# Berry bushes have binary state: either has a berry or doesn't
 
 [world]
 width = 10
@@ -23,21 +24,18 @@ id = "bush1"
 type = "bush"
 x = 3
 y = 3
-berry_count = 5
-max_berries = 5
+has_berry = true
 
 [[objects]]
 id = "bush2"
 type = "bush"
 x = 7
 y = 7
-berry_count = 5
-max_berries = 5
+has_berry = true
 
 [[objects]]
 id = "bush3"
 type = "bush"
 x = 5
 y = 5
-berry_count = 5
-max_berries = 5
+has_berry = true

@@ -124,9 +124,9 @@ cd viewer && npm run dev
 - [ ] `get_objects_at(position)` for visibility
 
 #### 5a.2 Bush Object Type
-- [ ] `object_type: "bush"` with `berry_count` state (0-5)
-- [ ] Regeneration: +1 berry per N ticks when not full
-- [ ] Does NOT block movement (can walk through)
+- [x] `object_type: "bush"` with binary `berry_count` state ("0" or "1")
+- [x] Regeneration: regrows berry every N ticks when empty
+- [x] Does NOT block movement (can walk through)
 
 #### 5a.3 Inventory System
 - [ ] Immutable `Inventory` class (multiset: item_type → count)

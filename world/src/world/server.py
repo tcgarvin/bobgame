@@ -334,7 +334,7 @@ def main() -> None:
                 object_id=object_id,
                 position=Position(x=int(x), y=int(y)),
                 object_type="bush",
-                state=(("berry_count", "5"), ("max_berries", "5")),
+                state=(("berry_count", "1"),),  # Binary state: has berry
             )
         )
 

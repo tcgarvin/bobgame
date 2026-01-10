@@ -11,18 +11,20 @@ class TestWorldObject:
     """Tests for WorldObject model."""
 
     def test_create_bush(self) -> None:
-        """Create a bush object with state."""
+        """Create a bush object with state.
+
+        Berry bushes have binary state: either has a berry (1) or doesn't (0).
+        """
         bush = WorldObject(
             object_id="bush1",
             position=Position(x=5, y=5),
             object_type="bush",
-            state=(("berry_count", "5"), ("max_berries", "5")),
+            state=(("berry_count", "1"),),
         )
         assert bush.object_id == "bush1"
         assert bush.position == Position(x=5, y=5)
         assert bush.object_type == "bush"
-        assert bush.get_state("berry_count") == "5"
-        assert bush.get_state("max_berries") == "5"
+        assert bush.get_state("berry_count") == "1"
 
     def test_get_state_default(self) -> None:
         """get_state returns default for missing keys."""

@@ -176,9 +176,9 @@ export class GameScene extends Phaser.Scene {
     this.drawBushGraphics(graphics, obj);
     container.add(graphics);
 
-    // Add berry count text
-    const berryCount = parseInt(obj.state.berry_count || '0', 10);
-    const text = this.add.text(0, 0, berryCount.toString(), {
+    // Add berry indicator text (binary: has berry or not)
+    const hasBerry = obj.state.berry_count === '1';
+    const text = this.add.text(0, 0, hasBerry ? '🫐' : '', {
       fontFamily: 'monospace',
       fontSize: '12px',
       color: '#ffffff',
@@ -190,7 +190,7 @@ export class GameScene extends Phaser.Scene {
     container.add(text);
 
     this.objectSprites.set(obj.objectId, container);
-    console.log(`Created bush ${obj.objectId} at (${obj.position.x}, ${obj.position.y}) with ${berryCount} berries`);
+    console.log(`Created bush ${obj.objectId} at (${obj.position.x}, ${obj.position.y}) ${hasBerry ? 'with berry' : 'empty'}`);
   }
 
   private removeObjectSprite(objectId: string): void {
@@ -212,27 +212,20 @@ export class GameScene extends Phaser.Scene {
         this.drawBushGraphics(graphics, obj);
       }
 
-      // Update text
+      // Update text (binary: has berry or not)
       const text = container.getByName('berryText') as Phaser.GameObjects.Text;
       if (text) {
-        const berryCount = parseInt(obj.state.berry_count || '0', 10);
-        text.setText(berryCount.toString());
+        const hasBerry = obj.state.berry_count === '1';
+        text.setText(hasBerry ? '🫐' : '');
       }
     }
   }
 
   private drawBushGraphics(graphics: Phaser.GameObjects.Graphics, obj: TrackedObject): void {
-    const berryCount = parseInt(obj.state.berry_count || '0', 10);
-    const maxBerries = parseInt(obj.state.max_berries || '5', 10);
-    const ratio = maxBerries > 0 ? berryCount / maxBerries : 0;
+    const hasBerry = obj.state.berry_count === '1';
 
-    // Bush color based on berry count
-    let bushColor = 0x228b22; // Forest green (full)
-    if (ratio <= 0) {
-      bushColor = 0x556b2f; // Dark olive (empty)
-    } else if (ratio < 0.5) {
-      bushColor = 0x6b8e23; // Olive drab (low)
-    }
+    // Bush color based on whether it has a berry
+    const bushColor = hasBerry ? 0x228b22 : 0x556b2f; // Forest green (with berry) or dark olive (empty)
 
     const size = TILE_SIZE * SCALE * 0.8;
 
@@ -240,20 +233,11 @@ export class GameScene extends Phaser.Scene {
     graphics.fillStyle(bushColor, 1);
     graphics.fillCircle(0, 0, size / 2);
 
-    // Draw berry dots if bush has berries
-    if (berryCount > 0) {
-      graphics.fillStyle(0xff0000, 1); // Red berries
-      const berrySize = 4;
-      const positions = [
-        { x: -8, y: -6 },
-        { x: 6, y: -8 },
-        { x: -6, y: 6 },
-        { x: 8, y: 4 },
-        { x: 0, y: 8 },
-      ];
-      for (let i = 0; i < Math.min(berryCount, positions.length); i++) {
-        graphics.fillCircle(positions[i].x, positions[i].y, berrySize);
-      }
+    // Draw a single berry dot if bush has a berry
+    if (hasBerry) {
+      graphics.fillStyle(0xff0000, 1); // Red berry
+      const berrySize = 6;
+      graphics.fillCircle(0, 0, berrySize);
     }
   }
 

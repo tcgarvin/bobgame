@@ -25,8 +25,7 @@ class ObjectConfig(BaseModel):
     type: str
     x: int
     y: int
-    berry_count: int = 5
-    max_berries: int = 5
+    has_berry: bool = True  # For bush objects: whether it starts with a berry
 
 
 class WorldConfig(BaseModel):
@@ -131,15 +130,14 @@ def config_to_objects(config: Config) -> list[WorldObject]:
     objects = []
     for obj in config.objects:
         if obj.type == "bush":
+            # Binary berry state: "1" if has_berry, "0" otherwise
+            berry_count = "1" if obj.has_berry else "0"
             objects.append(
                 WorldObject(
                     object_id=obj.id,
                     position=Position(x=obj.x, y=obj.y),
                     object_type="bush",
-                    state=(
-                        ("berry_count", str(obj.berry_count)),
-                        ("max_berries", str(obj.max_berries)),
-                    ),
+                    state=(("berry_count", berry_count),),
                 )
             )
         else:

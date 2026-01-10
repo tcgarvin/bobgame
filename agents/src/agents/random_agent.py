@@ -302,7 +302,6 @@ class SimpleAgent:
                 collect=pb.CollectIntent(
                     object_id=self._target_object_id,
                     item_type="berry",
-                    amount=1,
                 )
             )
 

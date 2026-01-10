@@ -73,12 +73,14 @@ class MoveIntent(BaseModel, frozen=True):
 
 
 class CollectIntent(BaseModel, frozen=True):
-    """Intent to collect items from an object at the entity's position."""
+    """Intent to collect items from an object at the entity's position.
+
+    Berry bushes have binary state: collecting always takes the single berry.
+    """
 
     entity_id: str
     object_id: str | None = None  # If None, collect from any object at position
     item_type: str = "berry"
-    amount: int = 1
 
 
 class EatIntent(BaseModel, frozen=True):

@@ -17,7 +17,7 @@ Each tick, agents receive an `Observation` containing:
 - `visible_tiles` - Terrain information
 - `events` - What happened last tick
 
-**Key insight**: `visible_objects` includes state like `berry_count` for bushes. Check `obj.state.get("berry_count", "0")` to see how many berries are available.
+**Key insight**: `visible_objects` includes state like `berry_count` for bushes. Berry bushes have binary state: `"1"` means has a berry, `"0"` means empty. Check `obj.state.get("berry_count", "0") == "1"` to see if a berry is available.
 
 ### Intent Types
 
@@ -30,7 +30,7 @@ Available intents (defined in `proto/world.proto`):
 
 ### Foraging Pattern
 
-To collect berries from bushes:
+To collect berries from bushes (binary state: bush either has a berry or doesn't):
 
 ```python
 def _decide_action(self, observation: pb.Observation) -> pb.Intent:
@@ -40,17 +40,16 @@ def _decide_action(self, observation: pb.Observation) -> pb.Intent:
     for obj in observation.visible_objects:
         if obj.object_type == "bush":
             if obj.position.x == self_pos.x and obj.position.y == self_pos.y:
-                berry_count = int(obj.state.get("berry_count", "0"))
-                if berry_count > 0:
+                has_berry = obj.state.get("berry_count", "0") == "1"
+                if has_berry:
                     return pb.Intent(
                         collect=pb.CollectIntent(
                             object_id=obj.object_id,
                             item_type="berry",
-                            amount=1,
                         )
                     )
 
-    # No bush at position, do something else
+    # No bush with berry at position, do something else
     return pb.Intent(move=pb.MoveIntent(direction=...))
 ```
 
@@ -84,9 +83,9 @@ The `SimpleAgent` class (formerly `RandomAgent`, alias preserved for backward co
 ### States
 
 - **WANDER**: Move randomly when no berries visible
-- **SEEK**: Move toward the nearest visible bush with berries (greedy bee-line)
-- **COLLECT**: Collect berries when standing on a bush with berries
-- **EAT**: Occasionally consume berries from inventory (configurable probability)
+- **SEEK**: Move toward the nearest visible bush with a berry (greedy bee-line)
+- **COLLECT**: Collect the berry when standing on a bush that has one
+- **EAT**: Occasionally consume a berry from inventory (configurable probability)
 
 ### Configuration
 
