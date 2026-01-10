@@ -11,8 +11,8 @@ This plan is organized into incremental milestones. Each milestone produces a wo
 | ✓ | 2: World Core |
 | ✓ | 3: gRPC API & Basic Agent |
 | ✓ | 4: Live Viewer Integration |
-| **→** | **5a: Berry Foraging Foundation** |
-| | 5b: Simple Agent & Multi-Agent |
+| ✓ | 5a: Berry Foraging Foundation |
+| ✓ | 5b: Simple Agent & Multi-Agent |
 | | 6: Runner & Process Management |
 | | 7: Logging & Replay |
 | | 8: LLM Agent Integration |
@@ -37,13 +37,13 @@ Milestone 3: gRPC API & Basic Agent                  ✓
 Milestone 4: Live Viewer Integration                 ✓
      │
      ▼
-Milestone 5a: Berry Foraging (objects, inventory, collect, eat)
+Milestone 5a: Berry Foraging (objects, inventory, collect, eat) ✓
      │
      ▼
-Milestone 5b: Simple Agent & Multi-Agent
+Milestone 5b: Simple Agent & Multi-Agent             ✓
      │
      ▼
-Milestone 6: Runner & Process Management
+Milestone 6: Runner & Process Management             ← NEXT
      │
      ▼
 Milestone 7: Logging & Replay
@@ -152,29 +152,29 @@ cd viewer && npm run dev
 
 ---
 
-## Milestone 5b: Simple Agent & Multi-Agent
+## Milestone 5b: Simple Agent & Multi-Agent ✓
 
 **Goal**: Two simple agents compete for berries
 
 ### Tasks
 
 #### 5b.1 Simple Agent
-- [ ] Replace RandomAgent with SimpleAgent
-- [ ] State machine: WANDER → SEEK → COLLECT → WANDER
-- [ ] Wander: Move randomly when no berries visible
-- [ ] Seek: Path toward visible berries (greedy bee-line)
-- [ ] Collect: When at bush with berries, collect
-- [ ] Eat: Consume berries from inventory sometimes
+- [x] Replace RandomAgent with SimpleAgent
+- [x] State machine: WANDER → SEEK → COLLECT → EAT
+- [x] Wander: Move randomly when no berries visible
+- [x] Seek: Path toward visible berries (greedy bee-line)
+- [x] Collect: When at bush with berries, collect
+- [x] Eat: Consume berries from inventory sometimes
 
 #### 5b.2 Multi-Agent Setup
-- [ ] World spawns multiple entities
-- [ ] Multiple SimpleAgents connect
-- [ ] Each claims different entity via lease
+- [x] World spawns multiple entities (alice, bob)
+- [x] Multiple SimpleAgents connect
+- [x] Each claims different entity via lease
 
 #### 5b.3 Competition Behavior
-- [ ] Both agents see same bushes
-- [ ] Race to reach bushes first
-- [ ] Conflict resolution decides winner
+- [x] Both agents see same bushes
+- [x] Race to reach bushes first
+- [x] Conflict resolution decides winner
 
 **Deliverable**: Two agents competing for berry resources
 

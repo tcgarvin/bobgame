@@ -32,7 +32,17 @@ Entities are indexed by both ID and position for O(1) lookups:
 - `_entities: dict[str, Entity]` - lookup by ID
 - `_entity_positions: dict[Position, str]` - lookup by position
 
-Both indices must be updated atomically via `update_entity_position()`.
+**CRITICAL**: Both indices must be kept in sync. Use `update_entity_position()` for moves.
+
+**Safe to modify `_entities` directly** only when position is unchanged (e.g., inventory updates):
+```python
+# OK - position unchanged
+entity = world.get_entity(entity_id)
+world._entities[entity_id] = entity.with_inventory(new_inventory)
+
+# WRONG - use update_entity_position() instead
+world._entities[entity_id] = entity.with_position(new_pos)
+```
 
 ### Movement Conflict Resolution
 
@@ -47,6 +57,21 @@ The claim-resolve-enact pipeline handles conflicts deterministically:
 3. **Enact**: Apply winning moves simultaneously
 
 **Key insight**: Chains succeed (A→B, B→empty both move) because cycle detection only fails actual cycles, not chains.
+
+**CRITICAL - Chain Movement Atomicity**: When enacting moves, position index updates must be atomic across all moves. In a chain where A moves to B's position while B moves away:
+
+```
+# WRONG - sequential updates corrupt the index:
+1. A: delete old_pos(2,2), add new_pos(3,3) -> A
+2. B: delete old_pos(3,3)  <- DELETES A's NEW ENTRY!
+
+# CORRECT - atomic updates (implemented in enact_moves):
+1. Delete ALL old positions: (2,2), (3,3)
+2. Add ALL new positions: (3,3)->A, (4,4)->B
+3. Update entity objects
+```
+
+See `test_chain_preserves_position_index` for the regression test.
 
 ## Testing Patterns
 

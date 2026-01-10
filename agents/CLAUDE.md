@@ -54,24 +54,93 @@ def _decide_action(self, observation: pb.Observation) -> pb.Intent:
     return pb.Intent(move=pb.MoveIntent(direction=...))
 ```
 
-## RandomAgent
+## SimpleAgent
 
-The `RandomAgent` class is a minimal reference implementation:
-- Connects and acquires a lease
-- Streams observations
-- Makes decisions each tick (move or collect)
-- Handles lease renewal
+The `SimpleAgent` class (formerly `RandomAgent`, alias preserved for backward compatibility) implements a state machine for foraging behavior:
 
-**Note**: The random agent prioritizes collecting if standing on a bush with berries, otherwise moves randomly. It does not seek out bushes or manage inventory strategically.
+### State Machine
+
+```
+    ┌─────────┐
+    │ WANDER  │ ← No visible berries
+    └────┬────┘
+         │ sees bush with berries
+         ▼
+    ┌─────────┐
+    │  SEEK   │ → Move toward nearest bush
+    └────┬────┘
+         │ arrives at bush
+         ▼
+    ┌─────────┐
+    │ COLLECT │ → Collect berry from bush
+    └────┬────┘
+         │ bush empty or no bush here
+         ▼
+    ┌─────────┐
+    │   EAT   │ → Randomly eat berry (10% chance when idle)
+    └─────────┘
+```
+
+### States
+
+- **WANDER**: Move randomly when no berries visible
+- **SEEK**: Move toward the nearest visible bush with berries (greedy bee-line)
+- **COLLECT**: Collect berries when standing on a bush with berries
+- **EAT**: Occasionally consume berries from inventory (configurable probability)
+
+### Configuration
+
+```python
+agent = SimpleAgent(
+    server_address="localhost:50051",
+    entity_id="alice",
+    eat_probability=0.1,  # 10% chance to eat when idle with berries
+)
+```
+
+### Key Methods
+
+- `_update_state()` - Transitions between states based on observation
+- `_decide_action()` - Returns intent based on current state
+- `direction_toward()` - Computes best direction to move toward a target (greedy)
 
 ## Running Agents
 
 ```bash
+# Single agent
 cd agents
-uv run python -m agents.random_agent --entity bob --server localhost:50051
+uv run python -m agents.random_agent --entity alice --server localhost:50051
+
+# With custom eat probability
+uv run python -m agents.random_agent --entity bob --eat-probability 0.2
 ```
 
-Or use `./dev.sh` which starts world, agent, and viewer together.
+Or use `./dev.sh` which starts world, two agents (alice and bob), and viewer together.
+
+### Multi-Agent Setup
+
+The default foraging config spawns two entities (alice and bob) with three berry bushes:
+
+```
+alice (2,2)     bush1 (3,3)
+                          bush3 (5,5)
+                                    bush2 (7,7)     bob (8,8)
+```
+
+Run multiple agents in separate terminals:
+```bash
+# Terminal 1: Start world
+cd world && uv run python -m world.server --config foraging
+
+# Terminal 2: Agent alice
+cd agents && uv run python -m agents.random_agent --entity alice
+
+# Terminal 3: Agent bob
+cd agents && uv run python -m agents.random_agent --entity bob
+
+# Terminal 4: Viewer
+cd viewer && npm run dev
+```
 
 ## Testing Agents
 

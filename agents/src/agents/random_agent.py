@@ -1,8 +1,13 @@
-"""Simple random-movement agent for testing gRPC integration."""
+"""Simple foraging agent with state machine behavior.
+
+Originally a random-movement agent, now upgraded to seek out berries,
+collect them, and occasionally eat them.
+"""
 
 import random
 import threading
 import time
+from enum import Enum, auto
 from typing import Iterator
 
 import grpc
@@ -13,36 +18,97 @@ from . import world_pb2_grpc
 
 logger = structlog.get_logger()
 
+
+class AgentState(Enum):
+    """States for the agent's state machine."""
+
+    WANDER = auto()  # No berries visible, move randomly
+    SEEK = auto()  # Moving toward a visible bush with berries
+    COLLECT = auto()  # At a bush with berries, collecting
+    EAT = auto()  # Consuming berries from inventory
+
+
+# Direction vectors for movement
+DIRECTION_DELTAS = {
+    pb.NORTH: (0, -1),
+    pb.NORTHEAST: (1, -1),
+    pb.EAST: (1, 0),
+    pb.SOUTHEAST: (1, 1),
+    pb.SOUTH: (0, 1),
+    pb.SOUTHWEST: (-1, 1),
+    pb.WEST: (-1, 0),
+    pb.NORTHWEST: (-1, -1),
+}
+
 # All valid directions for random movement
-DIRECTIONS = [
-    pb.NORTH,
-    pb.NORTHEAST,
-    pb.EAST,
-    pb.SOUTHEAST,
-    pb.SOUTH,
-    pb.SOUTHWEST,
-    pb.WEST,
-    pb.NORTHWEST,
-]
+DIRECTIONS = list(DIRECTION_DELTAS.keys())
 
 
-class RandomAgent:
-    """An agent that moves randomly each tick."""
+def manhattan_distance(x1: int, y1: int, x2: int, y2: int) -> int:
+    """Calculate Manhattan distance between two positions."""
+    return abs(x2 - x1) + abs(y2 - y1)
+
+
+def direction_toward(from_x: int, from_y: int, to_x: int, to_y: int) -> pb.Direction:
+    """
+    Get the best direction to move from one position toward another.
+
+    Uses a greedy bee-line approach: picks the direction that minimizes
+    distance to the target.
+    """
+    best_direction = pb.NORTH
+    best_distance = float("inf")
+
+    for direction, (dx, dy) in DIRECTION_DELTAS.items():
+        new_x = from_x + dx
+        new_y = from_y + dy
+        distance = manhattan_distance(new_x, new_y, to_x, to_y)
+        if distance < best_distance:
+            best_distance = distance
+            best_direction = direction
+
+    return best_direction
+
+
+class SimpleAgent:
+    """An agent that seeks out berries, collects them, and eats them.
+
+    Uses a state machine with four states:
+    - WANDER: Move randomly when no berries visible
+    - SEEK: Move toward the nearest visible bush with berries
+    - COLLECT: Collect berries when standing on a bush
+    - EAT: Occasionally consume berries from inventory
+    """
 
     def __init__(
         self,
         server_address: str,
         entity_id: str,
         controller_id: str | None = None,
+        eat_probability: float = 0.1,
     ):
+        """
+        Initialize the agent.
+
+        Args:
+            server_address: gRPC server address (host:port)
+            entity_id: Entity to control
+            controller_id: Unique identifier for this controller
+            eat_probability: Chance to eat a berry each tick when idle with berries
+        """
         self.server_address = server_address
         self.entity_id = entity_id
-        self.controller_id = controller_id or f"random-agent-{entity_id}"
+        self.controller_id = controller_id or f"simple-agent-{entity_id}"
+        self.eat_probability = eat_probability
 
         self._channel: grpc.Channel | None = None
         self._lease_id: str | None = None
         self._running = False
         self._observation_thread: threading.Thread | None = None
+
+        # State machine
+        self._state = AgentState.WANDER
+        self._target_object_id: str | None = None
 
     def connect(self) -> bool:
         """Connect to the world server and acquire a lease."""
@@ -87,7 +153,7 @@ class RandomAgent:
         self._running = True
         start_time = time.time()
 
-        logger.info("agent_starting", entity_id=self.entity_id)
+        logger.info("agent_starting", entity_id=self.entity_id, agent_type="simple")
 
         try:
             self._process_observations(duration_seconds, start_time)
@@ -124,20 +190,22 @@ class RandomAgent:
                 logger.info("duration_limit_reached")
                 break
 
-            # Log current state
-            self_pos = observation.self.position
-            logger.debug(
-                "observation_received",
-                tick_id=observation.tick_id,
-                position=f"({self_pos.x}, {self_pos.y})",
-                visible_entities=len(observation.visible_entities),
-            )
-
-            # Decide what action to take
+            # Update state machine and decide action
+            self._update_state(observation)
             intent = self._decide_action(observation)
 
+            # Log current state
+            self_pos = observation.self.position
+            inventory_berries = self._get_berry_count(observation)
+            logger.debug(
+                "tick",
+                tick_id=observation.tick_id,
+                position=f"({self_pos.x}, {self_pos.y})",
+                state=self._state.name,
+                berries=inventory_berries,
+            )
+
             # Submit intent for the CURRENT tick
-            # (observation is sent at tick start, before deadline)
             response = action_stub.SubmitIntent(
                 pb.SubmitIntentRequest(
                     lease_id=self._lease_id,
@@ -148,20 +216,7 @@ class RandomAgent:
             )
 
             if response.accepted:
-                if intent.HasField("move"):
-                    logger.debug(
-                        "intent_submitted",
-                        tick_id=observation.tick_id,
-                        action="move",
-                        direction=pb.Direction.Name(intent.move.direction),
-                    )
-                elif intent.HasField("collect"):
-                    logger.debug(
-                        "intent_submitted",
-                        tick_id=observation.tick_id,
-                        action="collect",
-                        object_id=intent.collect.object_id,
-                    )
+                self._log_intent(observation.tick_id, intent)
             else:
                 logger.warning(
                     "intent_rejected",
@@ -169,40 +224,145 @@ class RandomAgent:
                     reason=response.reason,
                 )
 
-            # Renew lease periodically (every 10 seconds)
+            # Renew lease periodically
             self._maybe_renew_lease()
 
-    def _decide_action(self, observation: pb.Observation) -> pb.Intent:
-        """Decide what action to take based on observation.
+    def _get_berry_count(self, observation: pb.Observation) -> int:
+        """Get the number of berries in entity's inventory."""
+        for item in observation.self.inventory.items:
+            if item.kind == "berry":
+                return item.quantity
+        return 0
 
-        Priority:
-        1. If on a bush with berries, collect
-        2. Otherwise, move randomly
-        """
-        self_pos = observation.self.position
-
-        # Check for bushes at our position with berries
+    def _find_bushes_with_berries(
+        self, observation: pb.Observation
+    ) -> list[pb.WorldObject]:
+        """Find all visible bushes that have berries."""
+        bushes = []
         for obj in observation.visible_objects:
-            if obj.object_type == "bush" and obj.position.x == self_pos.x and obj.position.y == self_pos.y:
+            if obj.object_type == "bush":
                 berry_count = int(obj.state.get("berry_count", "0"))
                 if berry_count > 0:
-                    logger.info(
-                        "collecting_berries",
-                        object_id=obj.object_id,
-                        berry_count=berry_count,
-                        position=f"({self_pos.x}, {self_pos.y})",
-                    )
-                    return pb.Intent(
-                        collect=pb.CollectIntent(
-                            object_id=obj.object_id,
-                            item_type="berry",
-                            amount=1,
-                        )
-                    )
+                    bushes.append(obj)
+        return bushes
 
-        # No bush at position, move randomly
-        direction = random.choice(DIRECTIONS)
-        return pb.Intent(move=pb.MoveIntent(direction=direction))
+    def _find_bush_at_position(
+        self, observation: pb.Observation, x: int, y: int
+    ) -> pb.WorldObject | None:
+        """Find a bush with berries at the given position."""
+        for obj in observation.visible_objects:
+            if obj.object_type == "bush":
+                if obj.position.x == x and obj.position.y == y:
+                    berry_count = int(obj.state.get("berry_count", "0"))
+                    if berry_count > 0:
+                        return obj
+        return None
+
+    def _update_state(self, observation: pb.Observation) -> None:
+        """Update the state machine based on current observation."""
+        self_pos = observation.self.position
+        bushes_with_berries = self._find_bushes_with_berries(observation)
+        berry_count = self._get_berry_count(observation)
+
+        # Check if we're at a bush with berries
+        bush_here = self._find_bush_at_position(
+            observation, self_pos.x, self_pos.y
+        )
+
+        if bush_here:
+            # At a bush with berries -> COLLECT
+            self._state = AgentState.COLLECT
+            self._target_object_id = bush_here.object_id
+        elif bushes_with_berries:
+            # Can see bushes with berries -> SEEK the nearest one
+            nearest_bush = min(
+                bushes_with_berries,
+                key=lambda b: manhattan_distance(
+                    self_pos.x, self_pos.y, b.position.x, b.position.y
+                ),
+            )
+            self._state = AgentState.SEEK
+            self._target_object_id = nearest_bush.object_id
+        elif berry_count > 0 and random.random() < self.eat_probability:
+            # Have berries and randomly decided to eat
+            self._state = AgentState.EAT
+            self._target_object_id = None
+        else:
+            # Nothing to do, wander
+            self._state = AgentState.WANDER
+            self._target_object_id = None
+
+    def _decide_action(self, observation: pb.Observation) -> pb.Intent:
+        """Decide what action to take based on current state."""
+        self_pos = observation.self.position
+
+        if self._state == AgentState.COLLECT:
+            # Collect from the bush we're standing on
+            return pb.Intent(
+                collect=pb.CollectIntent(
+                    object_id=self._target_object_id,
+                    item_type="berry",
+                    amount=1,
+                )
+            )
+
+        elif self._state == AgentState.EAT:
+            # Eat a berry from inventory
+            return pb.Intent(
+                eat=pb.EatIntent(
+                    item_type="berry",
+                    amount=1,
+                )
+            )
+
+        elif self._state == AgentState.SEEK:
+            # Move toward the target bush
+            target_bush = None
+            for obj in observation.visible_objects:
+                if obj.object_id == self._target_object_id:
+                    target_bush = obj
+                    break
+
+            if target_bush:
+                direction = direction_toward(
+                    self_pos.x,
+                    self_pos.y,
+                    target_bush.position.x,
+                    target_bush.position.y,
+                )
+                return pb.Intent(move=pb.MoveIntent(direction=direction))
+            else:
+                # Target no longer visible, wander
+                direction = random.choice(DIRECTIONS)
+                return pb.Intent(move=pb.MoveIntent(direction=direction))
+
+        else:  # WANDER
+            direction = random.choice(DIRECTIONS)
+            return pb.Intent(move=pb.MoveIntent(direction=direction))
+
+    def _log_intent(self, tick_id: int, intent: pb.Intent) -> None:
+        """Log the submitted intent."""
+        if intent.HasField("move"):
+            logger.debug(
+                "intent",
+                tick_id=tick_id,
+                action="move",
+                direction=pb.Direction.Name(intent.move.direction),
+            )
+        elif intent.HasField("collect"):
+            logger.info(
+                "intent",
+                tick_id=tick_id,
+                action="collect",
+                object_id=intent.collect.object_id,
+            )
+        elif intent.HasField("eat"):
+            logger.info(
+                "intent",
+                tick_id=tick_id,
+                action="eat",
+                item=intent.eat.item_type,
+            )
 
     def _maybe_renew_lease(self) -> None:
         """Renew lease if needed."""
@@ -252,10 +412,10 @@ def discover_entities(server_address: str) -> list[pb.ControllableEntity]:
 
 
 def main() -> None:
-    """CLI entry point for the random agent."""
+    """CLI entry point for the simple agent."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Random Movement Agent")
+    parser = argparse.ArgumentParser(description="Simple Foraging Agent")
     parser.add_argument(
         "--server",
         type=str,
@@ -272,6 +432,12 @@ def main() -> None:
         type=float,
         default=None,
         help="Run duration in seconds (default: run forever)",
+    )
+    parser.add_argument(
+        "--eat-probability",
+        type=float,
+        default=0.1,
+        help="Probability of eating a berry when idle (default: 0.1)",
     )
 
     args = parser.parse_args()
@@ -307,7 +473,11 @@ def main() -> None:
         logger.info("selected_entity", entity_id=entity_id)
 
     # Create and run agent
-    agent = RandomAgent(args.server, entity_id)
+    agent = SimpleAgent(
+        args.server,
+        entity_id,
+        eat_probability=args.eat_probability,
+    )
 
     if not agent.connect():
         return
@@ -318,6 +488,10 @@ def main() -> None:
         logger.info("interrupted")
     finally:
         agent.disconnect()
+
+
+# Backward compatibility alias
+RandomAgent = SimpleAgent
 
 
 if __name__ == "__main__":

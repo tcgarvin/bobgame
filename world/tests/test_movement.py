@@ -341,3 +341,45 @@ class TestComplexScenarios:
         # All moved one tile east
         for i in range(5):
             assert empty_world.get_entity(f"e{i}").position == Position(x=i + 3, y=5)
+
+    def test_chain_preserves_position_index(self, empty_world: World):
+        """Chain movement preserves position index for subsequent lookups.
+
+        Regression test: without atomic position updates, a chain like
+        A(1,1)->B(2,2), B(2,2)->C(3,3) would corrupt the position index
+        because B's delete would remove A's newly added position.
+        """
+        # Set up chain: a at (2,2), b at (3,3)
+        empty_world.add_entity(Entity(entity_id="a", position=Position(x=2, y=2)))
+        empty_world.add_entity(Entity(entity_id="b", position=Position(x=3, y=3)))
+
+        # a moves to b's position, b moves away
+        results = process_movement_phase(
+            empty_world,
+            {
+                "a": Direction.SOUTHEAST,  # (2,2) -> (3,3)
+                "b": Direction.SOUTHEAST,  # (3,3) -> (4,4)
+            },
+        )
+
+        # Both succeed
+        assert len(results) == 2
+        assert all(r.success for r in results)
+
+        # Verify positions
+        assert empty_world.get_entity("a").position == Position(x=3, y=3)
+        assert empty_world.get_entity("b").position == Position(x=4, y=4)
+
+        # Verify position index is correct (this was the bug!)
+        assert empty_world.get_entity_at(Position(x=3, y=3)).entity_id == "a"
+        assert empty_world.get_entity_at(Position(x=4, y=4)).entity_id == "b"
+        assert empty_world.get_entity_at(Position(x=2, y=2)) is None
+
+        # Verify a can move again (this would fail with corrupted index)
+        results2 = process_movement_phase(
+            empty_world,
+            {"a": Direction.SOUTH},  # (3,3) -> (3,4)
+        )
+        assert len(results2) == 1
+        assert results2[0].success is True
+        assert empty_world.get_entity("a").position == Position(x=3, y=4)

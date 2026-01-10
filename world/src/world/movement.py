@@ -249,14 +249,35 @@ class MovementResolver:
         return failed
 
     def enact_moves(self, results: list[MoveResult]) -> None:
-        """Apply successful moves to world state."""
-        # Collect successful moves
-        moves = [(r.entity_id, r.to_pos) for r in results if r.success]
+        """Apply successful moves to world state.
 
-        # Apply all simultaneously by doing removes then adds
-        # (Position index handles this correctly via update_entity_position)
-        for entity_id, new_pos in moves:
-            self.world.update_entity_position(entity_id, new_pos)
+        Moves are applied atomically to handle chains correctly.
+        For example, if A moves from (1,1) to (2,2) and B moves from (2,2) to (3,3),
+        we must update the position index atomically to avoid B's delete
+        removing A's new position entry.
+        """
+        # Collect successful moves with their from/to positions
+        moves = [
+            (r.entity_id, r.from_pos, r.to_pos)
+            for r in results
+            if r.success
+        ]
+
+        if not moves:
+            return
+
+        # Phase 1: Remove all old positions from index
+        for entity_id, from_pos, _ in moves:
+            del self.world._entity_positions[from_pos]
+
+        # Phase 2: Add all new positions to index
+        for entity_id, _, to_pos in moves:
+            self.world._entity_positions[to_pos] = entity_id
+
+        # Phase 3: Update entity objects
+        for entity_id, _, to_pos in moves:
+            entity = self.world._entities[entity_id]
+            self.world._entities[entity_id] = entity.with_position(to_pos)
 
 
 def process_movement_phase(

@@ -4,8 +4,8 @@ Quick reference for AI agents working on this codebase.
 
 ## Current Status
 
-**Next Milestone**: 5a - Berry Foraging Foundation
-**Completed**: 0, 1, 2, 3, 4
+**Next Milestone**: 6 - Runner & Process Management
+**Completed**: 0, 1, 2, 3, 4, 5a, 5b
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)
 
 ## Project Structure
@@ -31,19 +31,20 @@ bobgame/
 ## Running the System
 
 ```bash
-./dev.sh              # Uses 'foraging' config by default (bob + berry bushes)
-./dev.sh default      # Minimal config (bob only, no objects)
+./dev.sh              # Uses 'foraging' config (alice + bob competing for berries)
+./dev.sh default      # Minimal config (single entity, no objects)
 ```
 
 Or manually:
 ```bash
 cd world && uv run python -m world.server --config foraging
-cd agents && uv run python -m agents.random_agent --entity bob
+cd agents && uv run python -m agents.random_agent --entity alice
+cd agents && uv run python -m agents.random_agent --entity bob  # In another terminal
 cd viewer && npm run dev
 ```
 
 **Configs** are in `world/configs/`:
-- `foraging.toml` - 10x10 world with bob at (5,5) and bushes at (3,3), (7,7)
+- `foraging.toml` - 10x10 world with alice (2,2), bob (8,8), and 3 bushes
 - `default.toml` - Minimal 10x10 world
 
 ## Key Files by Component
@@ -57,7 +58,7 @@ cd viewer && npm run dev
 - `services/` - gRPC service implementations
 
 **Agents** (`agents/src/agents/`):
-- `random_agent.py` - Reference agent that moves randomly and collects berries
+- `random_agent.py` - SimpleAgent with state machine (WANDER/SEEK/COLLECT/EAT)
 
 **Proto** (`proto/world.proto`):
 - Defines all gRPC services and message types
