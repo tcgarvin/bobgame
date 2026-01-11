@@ -2,6 +2,7 @@
 
 import asyncio
 from concurrent import futures
+from pathlib import Path
 
 import grpc
 import structlog
@@ -9,6 +10,8 @@ import structlog
 from . import world_pb2 as pb
 from . import world_pb2_grpc
 from .lease import LeaseManager
+from .logging import LogWriter
+from .run_manager import RunManager
 from .services import (
     ActionServiceServicer,
     EntityDiscoveryServiceServicer,
@@ -37,11 +40,20 @@ class WorldServer:
         port: int = DEFAULT_PORT,
         ws_port: int = DEFAULT_WS_PORT,
         tick_config: TickConfig | None = None,
+        log_dir: Path | str | None = "runs",
+        config_name: str = "unknown",
     ):
         self.world = world
         self.port = port
         self.ws_port = ws_port
         self.tick_config = tick_config or TickConfig()
+        self.config_name = config_name
+
+        # Logging components
+        self._run_manager: RunManager | None = None
+        self._log_writer: LogWriter | None = None
+        if log_dir is not None:
+            self._run_manager = RunManager(base_dir=log_dir)
 
         # Core components
         self.lease_manager = LeaseManager()
@@ -99,6 +111,17 @@ class WorldServer:
         # Broadcast to viewer WebSocket clients
         self.viewer_ws_service.on_tick_complete(result)
 
+        # Log tick data for replay
+        if self._log_writer is not None:
+            self._log_writer.log_tick(
+                tick_id=result.tick_id,
+                start_time_ms=result.start_time_ms,
+                deadline_ms=result.deadline_ms,
+                result=result,
+                entities=self.world.all_entities(),
+                objects=self.world.all_objects(),
+            )
+
         logger.debug(
             "tick_complete",
             tick_id=result.tick_id,
@@ -117,6 +140,21 @@ class WorldServer:
 
     async def start(self) -> None:
         """Start the gRPC server and tick loop."""
+        # Initialize logging if configured
+        if self._run_manager is not None:
+            entity_ids = list(self.world.all_entities().keys())
+            object_ids = list(self.world.all_objects().keys())
+            run_id = self._run_manager.start_run(
+                config_name=self.config_name,
+                world_width=self.world.width,
+                world_height=self.world.height,
+                tick_duration_ms=self.tick_config.tick_duration_ms,
+                entity_ids=entity_ids,
+                object_ids=object_ids,
+            )
+            self._log_writer = LogWriter(self._run_manager.run_dir)
+            logger.info("logging_started", run_id=run_id)
+
         # Create gRPC server with thread pool for handling requests
         self._server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
 
@@ -161,6 +199,13 @@ class WorldServer:
             except asyncio.TimeoutError:
                 self._tick_task.cancel()
 
+        # Close log writer and finalize run
+        if self._log_writer is not None:
+            self._log_writer.close()
+        if self._run_manager is not None:
+            self._run_manager.end_run(final_tick=self.world.tick)
+            logger.info("logging_stopped", run_id=self._run_manager.run_id)
+
         # Stop WebSocket server
         await self.viewer_ws_service.stop()
 
@@ -190,6 +235,8 @@ async def run_server(
     tick_duration_ms: int = 1000,
     entities: list[Entity] | None = None,
     objects: list[WorldObject] | None = None,
+    config_name: str = "default",
+    log_dir: Path | str | None = "runs",
 ) -> None:
     """Run a world server with the given configuration.
 
@@ -201,6 +248,8 @@ async def run_server(
         tick_duration_ms: Duration of each tick in milliseconds
         entities: Initial entities to add to the world
         objects: Initial objects (bushes, etc.) to add to the world
+        config_name: Name of the configuration for logging
+        log_dir: Directory to write run logs to (None to disable logging)
     """
     world = World(width=width, height=height)
     config = TickConfig(
@@ -208,7 +257,14 @@ async def run_server(
         intent_deadline_ms=tick_duration_ms // 2,
     )
 
-    server = WorldServer(world, port=port, ws_port=ws_port, tick_config=config)
+    server = WorldServer(
+        world,
+        port=port,
+        ws_port=ws_port,
+        tick_config=config,
+        config_name=config_name,
+        log_dir=log_dir,
+    )
 
     # Add initial entities
     if entities:
@@ -274,6 +330,17 @@ def main() -> None:
         nargs="*",
         default=[],
         help="Spawn bush at x,y (e.g., 'bush1:3,3') - adds to config objects",
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default="runs",
+        help="Directory for run logs (default: runs)",
+    )
+    parser.add_argument(
+        "--no-logging",
+        action="store_true",
+        help="Disable run logging",
     )
 
     args = parser.parse_args()
@@ -348,6 +415,9 @@ def main() -> None:
         wrapper_class=structlog.make_filtering_bound_logger(20),  # INFO level
     )
 
+    # Determine config name for logging
+    config_name = args.config if args.config else "default"
+
     asyncio.run(
         run_server(
             width=width,
@@ -357,6 +427,8 @@ def main() -> None:
             tick_duration_ms=tick_duration,
             entities=entities,
             objects=objects,
+            config_name=config_name,
+            log_dir=None if args.no_logging else args.log_dir,
         )
     )
 

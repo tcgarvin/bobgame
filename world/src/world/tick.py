@@ -114,6 +114,8 @@ class TickResult:
     eat_results: list[EatResult] = field(default_factory=list)
     object_changes: list[ObjectChange] = field(default_factory=list)
     duration_ms: float = 0.0
+    start_time_ms: int = 0
+    deadline_ms: int = 0
 
 
 # Type alias for tick callbacks
@@ -288,6 +290,8 @@ class TickLoop:
             eat_results=eat_results,
             object_changes=all_object_changes,
             duration_ms=elapsed_ms,
+            start_time_ms=ctx.start_time_ms,
+            deadline_ms=ctx.deadline_ms,
         )
 
     def stop(self) -> None:
@@ -355,6 +359,8 @@ async def run_ticks(
             eat_results=eat_results,
             object_changes=all_object_changes,
             duration_ms=elapsed_ms,
+            start_time_ms=ctx.start_time_ms,
+            deadline_ms=ctx.deadline_ms,
         )
         results.append(result)
 
