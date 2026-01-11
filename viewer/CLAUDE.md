@@ -57,9 +57,22 @@ Index format:
 
 Tile size is 16x16, scaled 3x for visibility (48px rendered).
 
-Spritesheets are organized in `assets/dawnlike-tileset/`:
+Spritesheets are symlinked from `assets/dawnlike-tileset/` to `viewer/public/assets/dawnlike/`:
 - `Characters/` - Player and NPC sprites (Player0.png, Player1.png for animation pairs)
 - `Objects/` - Tiles, terrain, vegetation (Floor.png, Ground0.png, Tree0.png, etc.)
+
+### Sprite Loading Flow
+
+1. **PreloadScene** loads `sprite-index.json` and identifies all required spritesheets
+2. Spritesheets are loaded from `assets/dawnlike/` (symlink to the tileset)
+3. Animations are auto-created for sprites with `animationFrames` (e.g., `actor-1-idle`)
+4. **GameScene** accesses the sprite index via `registry.get('spriteIndex')`
+
+Key sprite mappings:
+- Entities: `actor-1`, `actor-5`, etc. (assigned per entity ID in `ENTITY_SPRITE_MAP`)
+- Floor tiles: `grass-full`
+- Wall tiles: `dirt-full`
+- Bushes: `berry-bush-full`, `berry-bush-empty`
 
 ## Network Integration
 

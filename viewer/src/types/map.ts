@@ -94,7 +94,7 @@ export function createTestRoom(width: number, height: number): MapData {
   map.entities.push({
     id: 'player',
     position: { x: Math.floor(width / 2), y: Math.floor(height / 2) },
-    spriteKey: 'player0',
+    spriteKey: 'actor-1',
     spriteFrame: 0,
   });
 

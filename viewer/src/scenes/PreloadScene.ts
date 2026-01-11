@@ -1,6 +1,12 @@
 import Phaser from 'phaser';
+import type { SpriteIndex } from '../sprites';
+import { spritesheetToKey, getUniqueSpritesheets, getAnimationFrames } from '../sprites';
+
+const TILE_SIZE = 16;
 
 export class PreloadScene extends Phaser.Scene {
+  private spriteIndex?: SpriteIndex;
+
   constructor() {
     super({ key: 'PreloadScene' });
   }
@@ -34,42 +40,64 @@ export class PreloadScene extends Phaser.Scene {
       loadingText.destroy();
     });
 
-    // Load tilesets as spritesheets (16x16 tiles)
-    this.load.spritesheet('floor', 'assets/tiles/Floor.png', {
-      frameWidth: 16,
-      frameHeight: 16,
-    });
-
-    this.load.spritesheet('wall', 'assets/tiles/Wall.png', {
-      frameWidth: 16,
-      frameHeight: 16,
-    });
-
-    this.load.spritesheet('player0', 'assets/tiles/Player0.png', {
-      frameWidth: 16,
-      frameHeight: 16,
-    });
-
-    this.load.spritesheet('player1', 'assets/tiles/Player1.png', {
-      frameWidth: 16,
-      frameHeight: 16,
-    });
-
-    // Note: Bushes are rendered using Graphics objects, no sprite needed
+    // Load the sprite index JSON
+    this.load.json('sprite-index', 'assets/sprite-index.json');
   }
 
   create(): void {
-    // Create player idle animation (toggle between frame 0 of player0 and player1)
-    this.anims.create({
-      key: 'player-idle',
-      frames: [
-        { key: 'player0', frame: 0 },
-        { key: 'player1', frame: 0 },
-      ],
-      frameRate: 2,
-      repeat: -1,
+    // Get the sprite index
+    this.spriteIndex = this.cache.json.get('sprite-index') as SpriteIndex;
+
+    if (!this.spriteIndex) {
+      console.error('Failed to load sprite index');
+      this.scene.start('GameScene');
+      return;
+    }
+
+    // Store sprite index in registry for other scenes to access
+    this.registry.set('spriteIndex', this.spriteIndex);
+
+    // Get all unique spritesheets and load them
+    const spritesheets = getUniqueSpritesheets(this.spriteIndex);
+    console.log('Loading spritesheets:', spritesheets);
+
+    // Queue all spritesheets for loading
+    for (const sheet of spritesheets) {
+      const key = spritesheetToKey(sheet);
+      this.load.spritesheet(key, `assets/dawnlike/${sheet}`, {
+        frameWidth: TILE_SIZE,
+        frameHeight: TILE_SIZE,
+      });
+    }
+
+    // Load spritesheets and then create animations
+    this.load.once('complete', () => {
+      this.createAnimations();
+      this.scene.start('GameScene');
     });
 
-    this.scene.start('GameScene');
+    this.load.start();
+  }
+
+  private createAnimations(): void {
+    if (!this.spriteIndex) return;
+
+    // Create animations for all sprites with animation frames
+    let animCount = 0;
+    for (const spriteKey of Object.keys(this.spriteIndex)) {
+      const frames = getAnimationFrames(this.spriteIndex, spriteKey);
+      if (frames && frames.length > 0) {
+        const animKey = `${spriteKey}-idle`;
+        this.anims.create({
+          key: animKey,
+          frames: frames,
+          frameRate: 2,
+          repeat: -1,
+        });
+        animCount++;
+      }
+    }
+
+    console.log('Created animations:', animCount);
   }
 }

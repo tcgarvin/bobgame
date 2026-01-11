@@ -3,12 +3,21 @@ import type { MapData } from '../types/map';
 import { TileType, createTestRoom } from '../types/map';
 import { WebSocketClient, WorldState } from '../network';
 import type { ConnectionState, InterpolatedEntity, TrackedObject } from '../network';
+import type { SpriteIndex } from '../sprites';
+import { getSpriteFrame } from '../sprites';
 
 const TILE_SIZE = 16;
 const SCALE = 3; // Scale up for visibility (16 * 3 = 48px per tile)
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 3;
 const ZOOM_STEP = 0.1;
+
+// Actor sprite assignments for entities
+const ENTITY_SPRITE_MAP: Record<string, string> = {
+  alice: 'actor-1',
+  bob: 'actor-5',
+};
+const DEFAULT_ACTOR_SPRITE = 'actor-1';
 
 export class GameScene extends Phaser.Scene {
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -19,12 +28,13 @@ export class GameScene extends Phaser.Scene {
     D: Phaser.Input.Keyboard.Key;
   };
   private mapData?: MapData;
+  private spriteIndex?: SpriteIndex;
 
   // Network state
   private wsClient?: WebSocketClient;
   private worldState: WorldState = new WorldState();
   private entitySprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
-  private objectSprites: Map<string, Phaser.GameObjects.Container> = new Map();
+  private objectSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private connectionText?: Phaser.GameObjects.Text;
 
   constructor() {
@@ -32,6 +42,13 @@ export class GameScene extends Phaser.Scene {
   }
 
   create(): void {
+    // Get sprite index from registry
+    this.spriteIndex = this.registry.get('spriteIndex') as SpriteIndex;
+
+    if (!this.spriteIndex) {
+      console.error('Sprite index not found in registry');
+    }
+
     // Create the static test room for tiles (entities come from server)
     this.mapData = createTestRoom(10, 10);
     // Remove the hardcoded player entity - we'll get entities from the server
@@ -132,20 +149,27 @@ export class GameScene extends Phaser.Scene {
     const posX = entity.currentX * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
     const posY = entity.currentY * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
 
-    // Determine sprite key based on entity type
-    const spriteKey = entity.entityType === 'player' ? 'player0' : 'player0';
+    // Get sprite key for this entity (use entity ID to look up, or default)
+    const spriteKey = ENTITY_SPRITE_MAP[entity.entityId] || DEFAULT_ACTOR_SPRITE;
+    const spriteData = this.spriteIndex ? getSpriteFrame(this.spriteIndex, spriteKey) : null;
 
-    const sprite = this.add.sprite(posX, posY, spriteKey, 0);
+    if (!spriteData) {
+      console.warn(`No sprite found for key ${spriteKey}, using fallback`);
+      return;
+    }
+
+    const sprite = this.add.sprite(posX, posY, spriteData.textureKey, spriteData.frame);
     sprite.setScale(SCALE);
     sprite.setDepth(10); // Above tiles
 
     // Play idle animation if available
-    if (this.anims.exists('player-idle')) {
-      sprite.play('player-idle');
+    const animKey = `${spriteKey}-idle`;
+    if (this.anims.exists(animKey)) {
+      sprite.play(animKey);
     }
 
     this.entitySprites.set(entity.entityId, sprite);
-    console.log(`Created sprite for entity ${entity.entityId} at (${entity.currentX}, ${entity.currentY})`);
+    console.log(`Created sprite for entity ${entity.entityId} (${spriteKey}) at (${entity.currentX}, ${entity.currentY})`);
 
     // If this is the first entity, follow it with camera
     if (this.entitySprites.size === 1) {
@@ -166,83 +190,52 @@ export class GameScene extends Phaser.Scene {
     const posX = obj.position.x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
     const posY = obj.position.y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
 
-    // Create a container for the bush (graphics + text)
-    const container = this.add.container(posX, posY);
-    container.setDepth(5); // Between tiles and entities
-
-    // Draw bush as a green circle
-    const graphics = this.add.graphics();
-    graphics.setName('bushGraphics');
-    this.drawBushGraphics(graphics, obj);
-    container.add(graphics);
-
-    // Add berry indicator text (binary: has berry or not)
+    // Get the appropriate bush sprite based on state
     const hasBerry = obj.state.berry_count === '1';
-    const text = this.add.text(0, 0, hasBerry ? '🫐' : '', {
-      fontFamily: 'monospace',
-      fontSize: '12px',
-      color: '#ffffff',
-      stroke: '#000000',
-      strokeThickness: 2,
-    });
-    text.setName('berryText');
-    text.setOrigin(0.5, 0.5);
-    container.add(text);
+    const spriteKey = hasBerry ? 'berry-bush-full' : 'berry-bush-empty';
+    const spriteData = this.spriteIndex ? getSpriteFrame(this.spriteIndex, spriteKey) : null;
 
-    this.objectSprites.set(obj.objectId, container);
+    if (!spriteData) {
+      console.warn(`No sprite found for ${spriteKey}`);
+      return;
+    }
+
+    const sprite = this.add.sprite(posX, posY, spriteData.textureKey, spriteData.frame);
+    sprite.setScale(SCALE);
+    sprite.setDepth(5); // Between tiles and entities
+
+    this.objectSprites.set(obj.objectId, sprite);
     console.log(`Created bush ${obj.objectId} at (${obj.position.x}, ${obj.position.y}) ${hasBerry ? 'with berry' : 'empty'}`);
   }
 
   private removeObjectSprite(objectId: string): void {
-    const container = this.objectSprites.get(objectId);
-    if (container) {
-      container.destroy();
+    const sprite = this.objectSprites.get(objectId);
+    if (sprite) {
+      sprite.destroy();
       this.objectSprites.delete(objectId);
       console.log(`Removed object ${objectId}`);
     }
   }
 
   private updateObjectSprite(obj: TrackedObject): void {
-    const container = this.objectSprites.get(obj.objectId);
-    if (container && obj.objectType === 'bush') {
-      // Update graphics
-      const graphics = container.getByName('bushGraphics') as Phaser.GameObjects.Graphics;
-      if (graphics) {
-        graphics.clear();
-        this.drawBushGraphics(graphics, obj);
+    const sprite = this.objectSprites.get(obj.objectId);
+    if (sprite && obj.objectType === 'bush' && this.spriteIndex) {
+      // Get the appropriate bush sprite based on state
+      const hasBerry = obj.state.berry_count === '1';
+      const spriteKey = hasBerry ? 'berry-bush-full' : 'berry-bush-empty';
+      const spriteData = getSpriteFrame(this.spriteIndex, spriteKey);
+
+      if (spriteData) {
+        sprite.setTexture(spriteData.textureKey, spriteData.frame);
       }
-
-      // Update text (binary: has berry or not)
-      const text = container.getByName('berryText') as Phaser.GameObjects.Text;
-      if (text) {
-        const hasBerry = obj.state.berry_count === '1';
-        text.setText(hasBerry ? '🫐' : '');
-      }
-    }
-  }
-
-  private drawBushGraphics(graphics: Phaser.GameObjects.Graphics, obj: TrackedObject): void {
-    const hasBerry = obj.state.berry_count === '1';
-
-    // Bush color based on whether it has a berry
-    const bushColor = hasBerry ? 0x228b22 : 0x556b2f; // Forest green (with berry) or dark olive (empty)
-
-    const size = TILE_SIZE * SCALE * 0.8;
-
-    // Draw bush body (circle)
-    graphics.fillStyle(bushColor, 1);
-    graphics.fillCircle(0, 0, size / 2);
-
-    // Draw a single berry dot if bush has a berry
-    if (hasBerry) {
-      graphics.fillStyle(0xff0000, 1); // Red berry
-      const berrySize = 6;
-      graphics.fillCircle(0, 0, berrySize);
     }
   }
 
   private renderMap(): void {
     if (!this.mapData) return;
+
+    // Get grass sprite for floor tiles
+    const grassSprite = this.spriteIndex ? getSpriteFrame(this.spriteIndex, 'grass-full') : null;
 
     for (let y = 0; y < this.mapData.height; y++) {
       for (let x = 0; x < this.mapData.width; x++) {
@@ -250,9 +243,17 @@ export class GameScene extends Phaser.Scene {
         const posX = x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
         const posY = y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
 
-        const spriteKey = tile.type === TileType.WALL ? 'wall' : 'floor';
-        const sprite = this.add.sprite(posX, posY, spriteKey, tile.spriteIndex);
-        sprite.setScale(SCALE);
+        if (tile.type === TileType.FLOOR && grassSprite) {
+          const sprite = this.add.sprite(posX, posY, grassSprite.textureKey, grassSprite.frame);
+          sprite.setScale(SCALE);
+        } else if (tile.type === TileType.WALL) {
+          // Use dirt for walls for now (visible boundary)
+          const dirtSprite = this.spriteIndex ? getSpriteFrame(this.spriteIndex, 'dirt-full') : null;
+          if (dirtSprite) {
+            const sprite = this.add.sprite(posX, posY, dirtSprite.textureKey, dirtSprite.frame);
+            sprite.setScale(SCALE);
+          }
+        }
       }
     }
   }
