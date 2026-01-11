@@ -4,8 +4,8 @@ Quick reference for AI agents working on this codebase.
 
 ## Current Status
 
-**Next Milestone**: 6 - Runner & Process Management
-**Completed**: 0, 1, 2, 3, 4, 5a, 5b
+**Next Milestone**: 7 - Logging & Replay
+**Completed**: 0, 1, 2, 3, 4, 5a, 5b, 6
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)
 
 ## Project Structure
@@ -15,7 +15,7 @@ bobgame/
 ├── world/      # Python - Tick-based simulation engine (gRPC + WebSocket)
 ├── agents/     # Python - Agent implementations (currently RandomAgent)
 ├── viewer/     # TypeScript/Phaser 3 - Browser visualization
-├── runner/     # Python - Agent launcher (placeholder)
+├── runner/     # Python - Agent process manager (spawns, monitors, restarts)
 ├── proto/      # Protocol Buffer definitions (world.proto)
 ├── tools/      # Build scripts (proto compilation, atlas generation)
 └── docs/       # Architecture and design documentation

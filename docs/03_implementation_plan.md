@@ -13,7 +13,7 @@ This plan is organized into incremental milestones. Each milestone produces a wo
 | ✓ | 4: Live Viewer Integration |
 | ✓ | 5a: Berry Foraging Foundation |
 | ✓ | 5b: Simple Agent & Multi-Agent |
-| | 6: Runner & Process Management |
+| ✓ | 6: Runner & Process Management |
 | | 7: Logging & Replay |
 | | 8: LLM Agent Integration |
 
@@ -43,10 +43,10 @@ Milestone 5a: Berry Foraging (objects, inventory, collect, eat) ✓
 Milestone 5b: Simple Agent & Multi-Agent             ✓
      │
      ▼
-Milestone 6: Runner & Process Management             ← NEXT
+Milestone 6: Runner & Process Management             ✓
      │
      ▼
-Milestone 7: Logging & Replay
+Milestone 7: Logging & Replay                        ← NEXT
      │
      ▼
 Milestone 8: LLM Agent Integration
@@ -180,24 +180,41 @@ cd viewer && npm run dev
 
 ---
 
-## Milestone 6: Runner & Process Management
+## Milestone 6: Runner & Process Management ✓
 
 **Goal**: Runner orchestrates multiple agent processes
 
 ### Tasks
 
 #### 6.1 Runner Core
-- [ ] Entity discovery from world
-- [ ] YAML config parsing
-- [ ] Agent process launching
-- [ ] Environment variable setup
+- [x] Entity discovery from world via gRPC EntityDiscoveryService
+- [x] TOML config parsing (consistent with world/configs/*.toml)
+- [x] Agent process launching via subprocess
+- [x] Per-entity agent configuration with default fallback
 
 #### 6.2 Process Management
-- [ ] Health monitoring via lease renewal
-- [ ] Restart crashed agents with backoff
-- [ ] Graceful shutdown
+- [x] Health monitoring via process polling
+- [x] Restart crashed agents with exponential backoff
+- [x] Graceful shutdown (SIGTERM then SIGKILL)
+- [x] Signal handling (SIGINT, SIGTERM)
 
 **Deliverable**: Runner manages multiple agent processes
+
+**Key Files**:
+- `runner/src/runner/config.py` - TOML config parsing with Pydantic
+- `runner/src/runner/discovery.py` - gRPC entity discovery
+- `runner/src/runner/process.py` - AgentProcess wrapper
+- `runner/src/runner/manager.py` - ProcessManager with restart logic
+- `runner/configs/foraging.toml` - Example config
+
+**Usage**:
+```bash
+# Using runner directly
+cd runner && uv run python -m runner --config configs/foraging.toml
+
+# Or via dev.sh (now uses runner)
+./dev.sh
+```
 
 ---
 

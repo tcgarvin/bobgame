@@ -1,0 +1,36 @@
+# Runner configuration for foraging scenario
+# Corresponds to world/configs/foraging.toml
+
+[runner]
+# World server connection
+server = "localhost:50051"
+
+# How long to wait for world server before giving up (ms)
+connection_timeout_ms = 30000
+
+# Enable auto-discovery of entities (spawn agents for all discovered entities)
+auto_discover = true
+
+# Log directory (relative to working directory or absolute)
+log_dir = "logs"
+
+# Restart policy
+max_restart_attempts = 5
+initial_backoff_ms = 1000
+max_backoff_ms = 30000
+backoff_multiplier = 2.0
+
+[agents.default]
+# Default agent configuration (used when no entity-specific config exists)
+module = "agents.random_agent"
+args = ["--eat-probability", "0.1"]
+
+[agents.alice]
+# Alice is more likely to eat berries
+module = "agents.random_agent"
+args = ["--eat-probability", "0.2"]
+
+[agents.bob]
+# Bob is more cautious with berries
+module = "agents.random_agent"
+args = ["--eat-probability", "0.05"]

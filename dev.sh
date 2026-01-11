@@ -12,14 +12,14 @@
 #
 # Starts:
 #   - World server using the specified config
-#   - Simple agents (alice and bob by default)
+#   - Runner (manages agent processes with auto-restart)
 #   - Viewer dev server
 #
 # Logs are written to logs/ directory:
 #   logs/world.log
 #   logs/viewer.log
-#   logs/agent-alice.log
-#   logs/agent-bob.log
+#   logs/runner.log
+#   logs/agent-*.log (managed by runner)
 #
 # Press Ctrl+C to stop all components
 #
@@ -159,23 +159,19 @@ log_info "World Server started (PID: $WORLD_PID)"
 wait_for_port 50051 "World gRPC" || exit 1
 wait_for_port 8765 "World WebSocket" || exit 1
 
-# Start Agents (alice and bob)
-log_info "Starting Agent alice..."
-cd "$SCRIPT_DIR/agents"
-uv run python -m agents.random_agent \
-    --entity alice \
-    > "$LOG_DIR/agent-alice.log" 2>&1 &
-ALICE_PID=$!
-PIDS+=($ALICE_PID)
-log_info "Agent alice started (PID: $ALICE_PID)"
+# Start Runner (manages all agents)
+log_info "Starting Agent Runner..."
+cd "$SCRIPT_DIR/runner"
+uv run python -m runner \
+    --config "$SCRIPT_DIR/runner/configs/foraging.toml" \
+    --log-dir "$LOG_DIR" \
+    > "$LOG_DIR/runner.log" 2>&1 &
+RUNNER_PID=$!
+PIDS+=($RUNNER_PID)
+log_info "Agent Runner started (PID: $RUNNER_PID)"
 
-log_info "Starting Agent bob..."
-uv run python -m agents.random_agent \
-    --entity bob \
-    > "$LOG_DIR/agent-bob.log" 2>&1 &
-BOB_PID=$!
-PIDS+=($BOB_PID)
-log_info "Agent bob started (PID: $BOB_PID)"
+# Give runner a moment to spawn agents
+sleep 2
 
 # Start Viewer Dev Server
 log_info "Starting Viewer..."
@@ -193,7 +189,7 @@ echo ""
 log_info "All components started successfully!"
 echo ""
 echo -e "  ${CYAN}World Server${NC}:  http://localhost:50051 (gRPC), ws://localhost:8765 (WebSocket)"
-echo -e "  ${YELLOW}Agents${NC}:        alice, bob (competing for berries)"
+echo -e "  ${YELLOW}Runner${NC}:        Managing agents (with auto-restart)"
 echo -e "  ${MAGENTA}Viewer${NC}:        http://localhost:5173"
 echo ""
 echo -e "  ${BLUE}Logs${NC}:          $LOG_DIR/"
@@ -205,8 +201,7 @@ echo ""
 
 # Tail all logs
 tail_log "world" "$CYAN" "$LOG_DIR/world.log"
-tail_log "alice" "$YELLOW" "$LOG_DIR/agent-alice.log"
-tail_log "bob" "$GREEN" "$LOG_DIR/agent-bob.log"
+tail_log "runner" "$YELLOW" "$LOG_DIR/runner.log"
 tail_log "viewer" "$MAGENTA" "$LOG_DIR/viewer.log"
 
 # Wait for any process to exit
