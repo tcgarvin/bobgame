@@ -24,14 +24,42 @@ This applies to all interfaces and types that aren't used as values.
 
 ## Asset Loading
 
+### Sprite Index
+
+Sprites are defined in Tiled TSX files (`assets/dawnlike-tileset/`) and indexed via:
+```bash
+python tools/generate_sprite_index.py
+```
+
+Output: `viewer/public/assets/sprite-index.json`
+
+Index format:
+```json
+{
+  "actor-1": {
+    "spritesheet": "Characters/Player0.png",
+    "frame": 0,
+    "columns": 8,
+    "animationFrames": [
+      {"spritesheet": "Characters/Player0.png", "frame": 0},
+      {"spritesheet": "Characters/Player1.png", "frame": 0}
+    ]
+  },
+  "berry-bush-full": {
+    "spritesheet": "Objects/Ground0.png",
+    "frame": 35,
+    "columns": 8
+  }
+}
+```
+
 ### DawnLike Tileset
 
-Sprites are loaded as spritesheets in `PreloadScene.ts`:
-- `floor` - 3 frames (stone floor variants)
-- `wall` - 1 frame
-- `player0`, `player1` - 2-frame idle animation
-
 Tile size is 16x16, scaled 3x for visibility (48px rendered).
+
+Spritesheets are organized in `assets/dawnlike-tileset/`:
+- `Characters/` - Player and NPC sprites (Player0.png, Player1.png for animation pairs)
+- `Objects/` - Tiles, terrain, vegetation (Floor.png, Ground0.png, Tree0.png, etc.)
 
 ## Network Integration
 

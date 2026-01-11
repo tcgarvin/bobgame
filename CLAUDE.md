@@ -64,6 +64,11 @@ cd viewer && npm run dev
 - Defines all gRPC services and message types
 - Compile with `./tools/compile_proto.sh`
 
+**Assets** (`assets/dawnlike-tileset/`):
+- DawnLike tileset PNGs organized by type (Characters/, Objects/, etc.)
+- TSX files (Tiled tileset definitions) with `key` attributes for sprite mapping
+- Sprite index generated to `viewer/public/assets/sprite-index.json`
+
 **Viewer** (`viewer/src/`):
 - `scenes/GameScene.ts` - Main rendering
 - `network/WebSocketClient.ts` - Server connection
@@ -75,6 +80,19 @@ See component CLAUDE.md files for detailed architecture decisions:
 - `world/CLAUDE.md` - Simulation engine, tick loop, movement conflict resolution
 - `viewer/CLAUDE.md` - Phaser rendering, WebSocket integration
 - `agents/CLAUDE.md` - Agent implementation patterns, foraging, intent submission
+
+## Sprite Index
+
+Sprites are managed via Tiled TSX files with custom properties:
+- `key` (string): Sprite identifier (e.g., "bush.with_berry", "actor-1")
+- `two-frame-animation` (bool): If true, pairs with File1.png for 2-frame animation
+
+Generate the index after editing TSX files:
+```bash
+python tools/generate_sprite_index.py
+```
+
+Output: `viewer/public/assets/sprite-index.json`
 
 ## Tests
 

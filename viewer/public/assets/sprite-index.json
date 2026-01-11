@@ -1,0 +1,777 @@
+{
+  "actor-1": {
+    "animationFrames": [
+      {
+        "frame": 0,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 0,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 0,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-10": {
+    "animationFrames": [
+      {
+        "frame": 9,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 9,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 9,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-11": {
+    "animationFrames": [
+      {
+        "frame": 10,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 10,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 10,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-12": {
+    "animationFrames": [
+      {
+        "frame": 11,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 11,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 11,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-13": {
+    "animationFrames": [
+      {
+        "frame": 12,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 12,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 12,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-14": {
+    "animationFrames": [
+      {
+        "frame": 13,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 13,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 13,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-15": {
+    "animationFrames": [
+      {
+        "frame": 14,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 14,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 14,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-16": {
+    "animationFrames": [
+      {
+        "frame": 15,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 15,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 15,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-17": {
+    "animationFrames": [
+      {
+        "frame": 24,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 24,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 24,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-18": {
+    "animationFrames": [
+      {
+        "frame": 27,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 27,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 27,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-19": {
+    "animationFrames": [
+      {
+        "frame": 28,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 28,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 28,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-2": {
+    "animationFrames": [
+      {
+        "frame": 1,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 1,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 1,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-20": {
+    "animationFrames": [
+      {
+        "frame": 29,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 29,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 29,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-21": {
+    "animationFrames": [
+      {
+        "frame": 30,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 30,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 30,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-22": {
+    "animationFrames": [
+      {
+        "frame": 31,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 31,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 31,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-23": {
+    "animationFrames": [
+      {
+        "frame": 32,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 32,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 32,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-24": {
+    "animationFrames": [
+      {
+        "frame": 33,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 33,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 33,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-25": {
+    "animationFrames": [
+      {
+        "frame": 34,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 34,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 34,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-26": {
+    "animationFrames": [
+      {
+        "frame": 35,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 35,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 35,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-27": {
+    "animationFrames": [
+      {
+        "frame": 36,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 36,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 36,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-28": {
+    "animationFrames": [
+      {
+        "frame": 37,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 37,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 37,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-29": {
+    "animationFrames": [
+      {
+        "frame": 38,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 38,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 38,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-3": {
+    "animationFrames": [
+      {
+        "frame": 2,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 2,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 2,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-30": {
+    "animationFrames": [
+      {
+        "frame": 39,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 39,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 39,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-31": {
+    "animationFrames": [
+      {
+        "frame": 40,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 40,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 40,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-32": {
+    "animationFrames": [
+      {
+        "frame": 41,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 41,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 41,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-33": {
+    "animationFrames": [
+      {
+        "frame": 42,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 42,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 42,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-34": {
+    "animationFrames": [
+      {
+        "frame": 56,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 56,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 56,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-35": {
+    "animationFrames": [
+      {
+        "frame": 58,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 58,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 58,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-36": {
+    "animationFrames": [
+      {
+        "frame": 59,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 59,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 59,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-37": {
+    "animationFrames": [
+      {
+        "frame": 60,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 60,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 60,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-38": {
+    "animationFrames": [
+      {
+        "frame": 61,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 61,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 61,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-39": {
+    "animationFrames": [
+      {
+        "frame": 62,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 62,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 62,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-4": {
+    "animationFrames": [
+      {
+        "frame": 3,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 3,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 3,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-40": {
+    "animationFrames": [
+      {
+        "frame": 63,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 63,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 63,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-41": {
+    "animationFrames": [
+      {
+        "frame": 64,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 64,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 64,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-42": {
+    "animationFrames": [
+      {
+        "frame": 65,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 65,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 65,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-43": {
+    "animationFrames": [
+      {
+        "frame": 66,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 66,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 66,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-44": {
+    "animationFrames": [
+      {
+        "frame": 67,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 67,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 67,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-45": {
+    "animationFrames": [
+      {
+        "frame": 68,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 68,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 68,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-46": {
+    "animationFrames": [
+      {
+        "frame": 69,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 69,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 69,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-47": {
+    "animationFrames": [
+      {
+        "frame": 70,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 70,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 70,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-48": {
+    "animationFrames": [
+      {
+        "frame": 71,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 71,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 71,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-5": {
+    "animationFrames": [
+      {
+        "frame": 4,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 4,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 4,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-6": {
+    "animationFrames": [
+      {
+        "frame": 5,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 5,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 5,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-7": {
+    "animationFrames": [
+      {
+        "frame": 6,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 6,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 6,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-8": {
+    "animationFrames": [
+      {
+        "frame": 7,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 7,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 7,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "actor-9": {
+    "animationFrames": [
+      {
+        "frame": 8,
+        "spritesheet": "Characters/Player0.png"
+      },
+      {
+        "frame": 8,
+        "spritesheet": "Characters/Player1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 8,
+    "spritesheet": "Characters/Player0.png"
+  },
+  "berry-bush-empty": {
+    "columns": 8,
+    "frame": 34,
+    "spritesheet": "Objects/Ground0.png"
+  },
+  "berry-bush-full": {
+    "columns": 8,
+    "frame": 35,
+    "spritesheet": "Objects/Ground0.png"
+  },
+  "dirt-full": {
+    "columns": 21,
+    "frame": 400,
+    "spritesheet": "Objects/Floor.png"
+  },
+  "grass-flavor-1": {
+    "columns": 8,
+    "frame": 0,
+    "spritesheet": "Objects/Ground0.png"
+  },
+  "grass-flavor-2": {
+    "columns": 8,
+    "frame": 1,
+    "spritesheet": "Objects/Ground0.png"
+  },
+  "grass-flavor-3": {
+    "columns": 8,
+    "frame": 8,
+    "spritesheet": "Objects/Ground0.png"
+  },
+  "grass-flavor-4": {
+    "columns": 8,
+    "frame": 9,
+    "spritesheet": "Objects/Ground0.png"
+  },
+  "grass-full": {
+    "columns": 21,
+    "frame": 155,
+    "spritesheet": "Objects/Floor.png"
+  },
+  "oak-tree": {
+    "columns": 12,
+    "frame": 39,
+    "spritesheet": "Objects/Tree0.png"
+  },
+  "say-sleep": {
+    "columns": 16,
+    "frame": 74,
+    "spritesheet": "GUI/GUI0.png"
+  },
+  "wood-floor-full": {
+    "columns": 21,
+    "frame": 407,
+    "spritesheet": "Objects/Floor.png"
+  }
+}
