@@ -1,0 +1,26 @@
+# Island world configuration
+# Generates a procedural island with terrain, rivers, and natural objects
+#
+# On first run: generates 4000x4000 map and saves to saves/island.npz
+# On subsequent runs: loads existing map from saves/island.npz
+
+[world]
+width = 4000
+height = 4000
+tick_duration_ms = 1000
+generation_mode = "generate"
+terrain_seed = 12345
+map_save_path = "saves/island.npz"
+
+# Entity spawns near center (positions will be validated for walkability)
+[[entities]]
+id = "alice"
+type = "player"
+x = 2000
+y = 2000
+
+[[entities]]
+id = "bob"
+type = "player"
+x = 2010
+y = 2000

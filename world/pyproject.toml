@@ -10,8 +10,11 @@ requires-python = ">=3.13"
 dependencies = [
     "grpcio>=1.76.0",
     "grpcio-tools>=1.76.0",
+    "numpy>=2.0",
+    "opensimplex>=0.4",
     "pyarrow>=22.0.0",
     "pydantic>=2.12.5",
+    "scipy>=1.14",
     "structlog>=25.5.0",
     "websockets>=15.0",
 ]

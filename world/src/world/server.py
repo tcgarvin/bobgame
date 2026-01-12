@@ -2,6 +2,7 @@
 
 import asyncio
 from concurrent import futures
+from pathlib import Path
 
 import grpc
 import structlog
@@ -190,6 +191,7 @@ async def run_server(
     tick_duration_ms: int = 1000,
     entities: list[Entity] | None = None,
     objects: list[WorldObject] | None = None,
+    world: World | None = None,
 ) -> None:
     """Run a world server with the given configuration.
 
@@ -201,8 +203,10 @@ async def run_server(
         tick_duration_ms: Duration of each tick in milliseconds
         entities: Initial entities to add to the world
         objects: Initial objects (bushes, etc.) to add to the world
+        world: Pre-created world (overrides width/height if provided)
     """
-    world = World(width=width, height=height)
+    if world is None:
+        world = World(width=width, height=height)
     config = TickConfig(
         tick_duration_ms=tick_duration_ms,
         intent_deadline_ms=tick_duration_ms // 2,
@@ -348,6 +352,111 @@ def main() -> None:
         wrapper_class=structlog.make_filtering_bound_logger(20),  # INFO level
     )
 
+    # Handle terrain generation mode
+    world = None
+    generation_mode = getattr(config.world, "generation_mode", "empty")
+    map_save_path = getattr(config.world, "map_save_path", None)
+
+    if generation_mode == "generate":
+        from .terrain import (
+            TerrainConfig,
+            generate_and_save_world,
+            generate_world,
+            load_world,
+        )
+
+        terrain_seed = getattr(config.world, "terrain_seed", None) or 42
+
+        # Resolve save path relative to project root
+        if map_save_path:
+            # Find project root (parent of world/ directory)
+            project_root = Path(__file__).parent.parent.parent.parent
+            save_path = project_root / map_save_path
+
+            if save_path.exists():
+                # Load existing map
+                logger.info(
+                    "loading_saved_map",
+                    path=str(save_path),
+                )
+                world, terrain_objects = load_world(save_path)
+                objects.extend(terrain_objects)
+
+                logger.info(
+                    "map_loaded",
+                    tiles=width * height,
+                    objects=len(terrain_objects),
+                )
+            else:
+                # Generate and save new map
+                terrain_config = TerrainConfig(
+                    seed=terrain_seed, width=width, height=height
+                )
+
+                logger.info(
+                    "generating_terrain",
+                    width=width,
+                    height=height,
+                    seed=terrain_seed,
+                    save_path=str(save_path),
+                )
+
+                world, terrain_objects = generate_and_save_world(
+                    terrain_config, save_path
+                )
+                objects.extend(terrain_objects)
+
+                logger.info(
+                    "terrain_generated_and_saved",
+                    tiles=width * height,
+                    objects=len(terrain_objects),
+                    save_path=str(save_path),
+                )
+        else:
+            # No save path, just generate without saving
+            terrain_config = TerrainConfig(
+                seed=terrain_seed, width=width, height=height
+            )
+
+            logger.info(
+                "generating_terrain",
+                width=width,
+                height=height,
+                seed=terrain_seed,
+            )
+
+            world, terrain_objects = generate_world(terrain_config)
+            objects.extend(terrain_objects)
+
+            logger.info(
+                "terrain_generated",
+                tiles=width * height,
+                objects=len(terrain_objects),
+            )
+
+    elif generation_mode == "load":
+        from .terrain import load_world
+
+        if not map_save_path:
+            parser.error("generation_mode='load' requires map_save_path to be set")
+
+        project_root = Path(__file__).parent.parent.parent.parent
+        save_path = project_root / map_save_path
+
+        logger.info(
+            "loading_saved_map",
+            path=str(save_path),
+        )
+
+        world, terrain_objects = load_world(save_path)
+        objects.extend(terrain_objects)
+
+        logger.info(
+            "map_loaded",
+            tiles=width * height,
+            objects=len(terrain_objects),
+        )
+
     asyncio.run(
         run_server(
             width=width,
@@ -357,6 +466,7 @@ def main() -> None:
             tick_duration_ms=tick_duration,
             entities=entities,
             objects=objects,
+            world=world,
         )
     )
 

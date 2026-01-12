@@ -7,8 +7,11 @@
 #   ./dev.sh [config]
 #
 # Arguments:
-#   config - Optional config name (default: foraging)
-#            Available: default, foraging (see world/configs/)
+#   config - Optional config name (default: island)
+#            Available: default, foraging, island (see world/configs/)
+#
+# The island config generates a 4000x4000 procedural world on first run
+# and saves it to saves/island.npz. Subsequent runs load the existing map.
 #
 # Starts:
 #   - World server using the specified config
@@ -31,7 +34,7 @@ LOG_DIR="$SCRIPT_DIR/logs"
 PIDS=()
 
 # Default config
-CONFIG="${1:-foraging}"
+CONFIG="${1:-island}"
 
 # Parse arguments
 for arg in "$@"; do
@@ -40,12 +43,16 @@ for arg in "$@"; do
             echo "Usage: $0 [config]"
             echo ""
             echo "Arguments:"
-            echo "  config  Config name from world/configs/ (default: foraging)"
+            echo "  config  Config name from world/configs/ (default: island)"
             echo ""
             echo "Starts all components for development:"
             echo "  - World server (gRPC :50051, WebSocket :8765)"
             echo "  - Simple agents (alice and bob)"
             echo "  - Viewer (http://localhost:5173)"
+            echo ""
+            echo "The island config generates a 4000x4000 procedural world on first"
+            echo "run and saves it to saves/island.npz. Subsequent runs load the"
+            echo "existing map for faster startup."
             echo ""
             echo "Available configs:"
             for cfg in "$SCRIPT_DIR/world/configs"/*.toml; do
@@ -130,7 +137,7 @@ tail_log() {
 wait_for_port() {
     local port=$1
     local name=$2
-    local max_attempts=30
+    local max_attempts=${3:-30}
     local attempt=0
 
     log_info "Waiting for $name to be ready on port $port..."
@@ -147,6 +154,16 @@ wait_for_port() {
 
 # Start World Server
 log_info "Starting World Server with config '$CONFIG'..."
+
+# Check if this config might need terrain generation
+NEEDS_GENERATION=false
+if [ "$CONFIG" = "island" ] && [ ! -f "$SCRIPT_DIR/saves/island.npz" ]; then
+    NEEDS_GENERATION=true
+    log_warn "First run with island config - generating 4000x4000 terrain..."
+    log_warn "This may take 2-5 minutes. Progress will be shown below."
+    echo ""
+fi
+
 cd "$SCRIPT_DIR/world"
 uv run python -m world.server \
     --config "$CONFIG" \
@@ -155,9 +172,27 @@ WORLD_PID=$!
 PIDS+=($WORLD_PID)
 log_info "World Server started (PID: $WORLD_PID)"
 
-# Wait for world server to be ready
-wait_for_port 50051 "World gRPC" || exit 1
-wait_for_port 8765 "World WebSocket" || exit 1
+# If generating terrain, stream the log while waiting
+if [ "$NEEDS_GENERATION" = true ]; then
+    # Start tailing log in background
+    tail -f "$LOG_DIR/world.log" 2>/dev/null | while IFS= read -r line; do
+        echo -e "${CYAN}[world]${NC} $line"
+    done &
+    TAIL_PID=$!
+
+    # Wait for world server with longer timeout (5 minutes)
+    wait_for_port 50051 "World gRPC" 300 || { kill $TAIL_PID 2>/dev/null; exit 1; }
+    wait_for_port 8765 "World WebSocket" 30 || { kill $TAIL_PID 2>/dev/null; exit 1; }
+
+    # Stop the log tail
+    kill $TAIL_PID 2>/dev/null
+    echo ""
+    log_info "Terrain generation complete!"
+else
+    # Normal startup - 30 second timeout
+    wait_for_port 50051 "World gRPC" 30 || exit 1
+    wait_for_port 8765 "World WebSocket" 30 || exit 1
+fi
 
 # Start Runner (manages all agents)
 log_info "Starting Agent Runner..."

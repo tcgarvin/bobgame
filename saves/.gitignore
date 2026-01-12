@@ -1,0 +1,4 @@
+# Ignore all saved maps except this file
+*.npz
+!.gitkeep
+!.gitignore

@@ -11,6 +11,11 @@
    <property name="key" value="grass-full"/>
   </properties>
  </tile>
+ <tile id="162" type="bobtile">
+  <properties>
+   <property name="key" value="stone-ground"/>
+  </properties>
+ </tile>
  <tile id="400" type="bobtile">
   <properties>
    <property name="key" value="dirt-full"/>

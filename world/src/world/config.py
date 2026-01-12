@@ -35,6 +35,15 @@ class WorldConfig(BaseModel):
     height: int = 10
     tick_duration_ms: int = 1000
 
+    # Terrain generation mode: "empty", "generate", or "load"
+    generation_mode: str = "empty"
+    # Random seed for terrain generation (used when generation_mode="generate")
+    terrain_seed: int | None = None
+    # Path to saved map file for saving/loading (relative paths resolved from project root)
+    # When generation_mode="generate": load if exists, else generate and save
+    # When generation_mode="load": required, load from this path
+    map_save_path: str | None = None
+
 
 class Config(BaseModel):
     """Complete configuration for a world server."""
