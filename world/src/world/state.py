@@ -1,8 +1,26 @@
 """World state management."""
 
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
+import numpy as np
+from numpy.typing import NDArray
 from pydantic import BaseModel, PrivateAttr
+
+if TYPE_CHECKING:
+    from .terrain_types import FloorType
+
+
+# Floor value -> (walkable, opaque, floor_type_str)
+# Matches terrain/classification.py _floor_value mapping
+_FLOOR_VALUE_PROPERTIES: dict[int, tuple[bool, bool, str]] = {
+    0: (False, False, "deep_water"),  # DEEP_WATER - not walkable
+    1: (True, False, "shallow_water"),  # SHALLOW_WATER - walkable
+    2: (True, False, "sand"),  # SAND
+    3: (True, False, "grass"),  # GRASS
+    4: (True, False, "dirt"),  # DIRT
+    5: (False, True, "mountain"),  # MOUNTAIN - not walkable, opaque
+    6: (True, False, "stone"),  # STONE (default)
+}
 
 from .exceptions import (
     EntityAlreadyExistsError,
@@ -64,6 +82,31 @@ class Tile(BaseModel, frozen=True):
     opaque: bool = False
     floor_type: str = "stone"
 
+    @classmethod
+    def from_floor_type(
+        cls, position: Position, floor_type: "FloorType"
+    ) -> "Tile":
+        """Create a tile with properties derived from floor type.
+
+        Args:
+            position: Tile position.
+            floor_type: FloorType enum value.
+
+        Returns:
+            Tile with walkable/opaque properties set based on floor type.
+        """
+        from .terrain_types import FloorType as FT
+
+        if not isinstance(floor_type, FT):
+            raise TypeError(f"Expected FloorType, got {type(floor_type)}")
+
+        return cls(
+            position=position,
+            walkable=floor_type.walkable,
+            opaque=floor_type.opaque,
+            floor_type=floor_type.value,
+        )
+
 
 class Entity(BaseModel, frozen=True):
     """Immutable entity state."""
@@ -112,6 +155,7 @@ class World(BaseModel):
 
     Uses frozen models internally but allows replacing them.
     Grid is sparse: only non-default tiles are stored.
+    Floor array (if set) provides efficient bulk terrain storage.
     """
 
     width: int
@@ -119,7 +163,11 @@ class World(BaseModel):
     tick: int = 0
 
     # Private attributes for internal state
-    # Sparse tile storage: only tiles that differ from default
+    # Optional floor array for efficient terrain storage (from terrain generation)
+    # Shape: (height, width), dtype: uint8, values match _FLOOR_VALUE_PROPERTIES keys
+    _floor_array: NDArray[np.uint8] | None = PrivateAttr(default=None)
+
+    # Sparse tile storage: only tiles that differ from floor_array (or all tiles if no array)
     _tiles: dict[Position, Tile] = PrivateAttr(default_factory=dict)
 
     # Entity registry
@@ -134,19 +182,74 @@ class World(BaseModel):
 
     # --- Tile operations ---
 
+    def set_floor_array(self, floor_array: NDArray[np.uint8]) -> None:
+        """Set the floor array for efficient terrain storage.
+
+        Args:
+            floor_array: 2D array of floor type values, shape (height, width).
+                        Values must match _FLOOR_VALUE_PROPERTIES keys.
+        """
+        if floor_array.shape != (self.height, self.width):
+            raise ValueError(
+                f"Floor array shape {floor_array.shape} doesn't match "
+                f"world dimensions ({self.height}, {self.width})"
+            )
+        self._floor_array = floor_array
+
     def get_tile(self, position: Position) -> Tile:
-        """Get tile at position. Returns default walkable tile if not set."""
+        """Get tile at position.
+
+        Priority: sparse _tiles dict > floor_array > default tile.
+        """
         if not self.in_bounds(position):
             return Tile(position=position, walkable=False, opaque=True)
-        return self._tiles.get(position, Tile(position=position))
+
+        # Check sparse overrides first
+        if position in self._tiles:
+            return self._tiles[position]
+
+        # Check floor array if available
+        if self._floor_array is not None:
+            floor_value = int(self._floor_array[position.y, position.x])
+            walkable, opaque, floor_type = _FLOOR_VALUE_PROPERTIES.get(
+                floor_value, (True, False, "stone")
+            )
+            return Tile(
+                position=position,
+                walkable=walkable,
+                opaque=opaque,
+                floor_type=floor_type,
+            )
+
+        # Default tile
+        return Tile(position=position)
 
     def set_tile(self, tile: Tile) -> None:
-        """Set tile properties."""
+        """Set tile properties (stored in sparse dict, overrides floor_array)."""
         self._tiles[tile.position] = tile
 
     def is_walkable(self, position: Position) -> bool:
-        """Check if position is walkable."""
-        return self.get_tile(position).walkable
+        """Check if position is walkable.
+
+        Optimized to avoid creating Tile objects when using floor_array.
+        """
+        if not self.in_bounds(position):
+            return False
+
+        # Check sparse overrides first
+        if position in self._tiles:
+            return self._tiles[position].walkable
+
+        # Check floor array if available
+        if self._floor_array is not None:
+            floor_value = int(self._floor_array[position.y, position.x])
+            walkable, _, _ = _FLOOR_VALUE_PROPERTIES.get(
+                floor_value, (True, False, "stone")
+            )
+            return walkable
+
+        # Default is walkable
+        return True
 
     def in_bounds(self, position: Position) -> bool:
         """Check if position is within world bounds."""
