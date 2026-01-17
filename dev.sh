@@ -84,11 +84,12 @@ log_error() {
     echo -e "${RED}[dev]${NC} $1"
 }
 
-# Cleanup function - kill all spawned processes
+# Cleanup function - kill all spawned processes and their children
 cleanup() {
     echo ""
     log_info "Shutting down all components..."
 
+    # First, send TERM to tracked PIDs
     for pid in "${PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             log_info "Stopping process $pid"
@@ -99,13 +100,11 @@ cleanup() {
     # Wait a moment for graceful shutdown
     sleep 1
 
-    # Force kill any remaining processes
-    for pid in "${PIDS[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            log_warn "Force killing process $pid"
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    done
+    # Kill all remaining child processes of this script
+    # This catches any processes spawned via pipes (like tail | while)
+    pkill -TERM -P $$ 2>/dev/null || true
+    sleep 0.5
+    pkill -9 -P $$ 2>/dev/null || true
 
     log_info "All components stopped"
     exit 0

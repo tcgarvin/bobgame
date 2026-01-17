@@ -380,6 +380,67 @@ class World(BaseModel):
         """Return number of objects in the world."""
         return len(self._objects)
 
+    # --- Chunk operations ---
+
+    def get_terrain_chunk(
+        self, chunk_x: int, chunk_y: int, chunk_size: int = 32
+    ) -> NDArray[np.uint8]:
+        """Extract terrain data for a chunk region.
+
+        Returns a chunk_size x chunk_size array of floor values.
+        Out-of-bounds areas are filled with 0 (deep water).
+        Sparse tile overrides are applied on top of floor_array data.
+
+        Args:
+            chunk_x: Chunk x coordinate.
+            chunk_y: Chunk y coordinate.
+            chunk_size: Size of chunk (default 32).
+
+        Returns:
+            2D uint8 array of floor values, shape (chunk_size, chunk_size).
+        """
+        x_start = chunk_x * chunk_size
+        y_start = chunk_y * chunk_size
+
+        # Initialize chunk with default stone (6)
+        chunk = np.full((chunk_size, chunk_size), 6, dtype=np.uint8)
+
+        if self._floor_array is not None:
+            # Calculate valid region within world bounds
+            x_end = min(x_start + chunk_size, self.width)
+            y_end = min(y_start + chunk_size, self.height)
+
+            # Only copy if there's valid overlap
+            if x_start < self.width and y_start < self.height:
+                valid_w = max(0, x_end - x_start)
+                valid_h = max(0, y_end - y_start)
+
+                if valid_w > 0 and valid_h > 0:
+                    chunk[:valid_h, :valid_w] = self._floor_array[
+                        y_start:y_end, x_start:x_end
+                    ]
+
+        # Apply sparse tile overrides
+        for pos, tile in self._tiles.items():
+            local_x = pos.x - x_start
+            local_y = pos.y - y_start
+            if 0 <= local_x < chunk_size and 0 <= local_y < chunk_size:
+                # Map floor_type string back to numeric value
+                floor_type_to_value = {
+                    "deep_water": 0,
+                    "shallow_water": 1,
+                    "sand": 2,
+                    "grass": 3,
+                    "dirt": 4,
+                    "mountain": 5,
+                    "stone": 6,
+                }
+                chunk[local_y, local_x] = floor_type_to_value.get(
+                    tile.floor_type, 6
+                )
+
+        return chunk
+
     # --- Tick operations ---
 
     def advance_tick(self) -> None:

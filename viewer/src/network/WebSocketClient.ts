@@ -163,4 +163,35 @@ export class WebSocketClient {
       this.reconnectTimeout = null;
     }
   }
+
+  /**
+   * Send a message to the server.
+   */
+  private send(message: object): boolean {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Subscribe to specific chunks.
+   */
+  subscribeChunks(chunks: Array<[number, number]>): boolean {
+    return this.send({
+      type: 'subscribe_chunks',
+      chunks: chunks,
+    });
+  }
+
+  /**
+   * Subscribe to chunks covering a viewport region.
+   */
+  subscribeViewport(x: number, y: number, width: number, height: number): boolean {
+    return this.send({
+      type: 'subscribe_viewport',
+      viewport: { x, y, width, height },
+    });
+  }
 }

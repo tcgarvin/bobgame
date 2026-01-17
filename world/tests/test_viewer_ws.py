@@ -35,22 +35,19 @@ def tick_config() -> TickConfig:
 class TestSnapshotGeneration:
     """Tests for snapshot generation."""
 
-    def test_generate_snapshot_includes_all_entities(
+    def test_generate_snapshot_metadata_only(
         self, world_with_entity: World, tick_config: TickConfig
     ) -> None:
-        """Snapshot should include all entities with positions."""
+        """Snapshot should contain world metadata, not entities/objects (those come via chunks)."""
         service = ViewerWebSocketService(world_with_entity, tick_config)
         snapshot = service._generate_snapshot()
 
         assert snapshot["type"] == "snapshot"
-        assert len(snapshot["entities"]) == 1
-
-        entity = snapshot["entities"][0]
-        assert entity["entity_id"] == "bob"
-        assert entity["position"]["x"] == 5
-        assert entity["position"]["y"] == 5
-        assert entity["entity_type"] == "player"
-        assert entity["tags"] == ["test"]
+        # Entities and objects are now sent via chunk subscriptions
+        assert "entities" not in snapshot
+        assert "objects" not in snapshot
+        # But chunk_size should be present
+        assert snapshot["chunk_size"] == 32
 
     def test_generate_snapshot_includes_world_dimensions(
         self, world_with_entity: World, tick_config: TickConfig
@@ -75,14 +72,14 @@ class TestSnapshotGeneration:
         assert snapshot["tick_id"] == 2
         assert snapshot["tick_duration_ms"] == 1000
 
-    def test_generate_snapshot_empty_objects(
+    def test_chunk_manager_initialized(
         self, world_with_entity: World, tick_config: TickConfig
     ) -> None:
-        """Snapshot should include empty objects array for now."""
+        """Service should have a chunk manager with entities indexed."""
         service = ViewerWebSocketService(world_with_entity, tick_config)
-        snapshot = service._generate_snapshot()
 
-        assert snapshot["objects"] == []
+        # Entity should be indexed in chunk (0, 0) since it's at position (5, 5)
+        assert service.chunk_manager.get_entity_chunk("bob") == (0, 0)
 
 
 class TestEventGeneration:

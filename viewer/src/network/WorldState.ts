@@ -11,6 +11,9 @@ import type {
   TickCompletedMessage,
   EntitySpawnedMessage,
   EntityDespawnedMessage,
+  ChunkDataMessage,
+  TerrainUpdateMessage,
+  ChunkUnloadMessage,
   ViewerMessage,
 } from './types';
 import {
@@ -19,6 +22,9 @@ import {
   isTickCompletedMessage,
   isEntitySpawnedMessage,
   isEntityDespawnedMessage,
+  isChunkDataMessage,
+  isTerrainUpdateMessage,
+  isChunkUnloadMessage,
 } from './types';
 
 /**
@@ -60,6 +66,18 @@ export type ObjectChangeHandler = (
 ) => void;
 
 /**
+ * Chunk change handler types
+ */
+export type ChunkChangeHandler = (
+  action: 'loaded' | 'unloaded' | 'terrain_updated',
+  chunkX: number,
+  chunkY: number,
+  terrain?: string,
+  version?: number,
+  changes?: Array<{ x: number; y: number; floor_type: number }>
+) => void;
+
+/**
  * Ease-out quadratic function for smoother movement feel
  */
 function easeOutQuad(t: number): number {
@@ -73,9 +91,11 @@ export class WorldState {
   private tickDurationMs: number = 1000;
   private tickStartTime: number = 0;
   private worldSize: { width: number; height: number } = { width: 100, height: 100 };
+  private chunkSize: number = 32;
   private initialized: boolean = false;
   private entityChangeHandler: EntityChangeHandler | null = null;
   private objectChangeHandler: ObjectChangeHandler | null = null;
+  private chunkChangeHandler: ChunkChangeHandler | null = null;
 
   /**
    * Set handler for entity add/remove events
@@ -92,6 +112,13 @@ export class WorldState {
   }
 
   /**
+   * Set handler for chunk load/unload/update events
+   */
+  onChunkChange(handler: ChunkChangeHandler): void {
+    this.chunkChangeHandler = handler;
+  }
+
+  /**
    * Check if world state has been initialized with a snapshot
    */
   isInitialized(): boolean {
@@ -103,6 +130,13 @@ export class WorldState {
    */
   getWorldSize(): { width: number; height: number } {
     return { ...this.worldSize };
+  }
+
+  /**
+   * Get chunk size
+   */
+  getChunkSize(): number {
+    return this.chunkSize;
   }
 
   /**
@@ -154,14 +188,22 @@ export class WorldState {
       this.handleEntitySpawned(message);
     } else if (isEntityDespawnedMessage(message)) {
       this.handleEntityDespawned(message);
+    } else if (isChunkDataMessage(message)) {
+      this.handleChunkData(message);
+    } else if (isTerrainUpdateMessage(message)) {
+      this.handleTerrainUpdate(message);
+    } else if (isChunkUnloadMessage(message)) {
+      this.handleChunkUnload(message);
     }
   }
 
   /**
-   * Initialize world state from snapshot
+   * Initialize world state from snapshot (metadata only, no entities/objects)
    */
   private handleSnapshot(msg: SnapshotMessage): void {
-    console.log(`Received snapshot: tick=${msg.tick_id}, entities=${msg.entities.length}, objects=${msg.objects.length}`);
+    console.log(
+      `Received snapshot: tick=${msg.tick_id}, world=${msg.world_size.width}x${msg.world_size.height}, chunk_size=${msg.chunk_size}`
+    );
 
     // Clear existing entities
     for (const entity of this.entities.values()) {
@@ -179,23 +221,73 @@ export class WorldState {
     this.currentTickId = msg.tick_id;
     this.tickDurationMs = msg.tick_duration_ms;
     this.worldSize = msg.world_size;
+    this.chunkSize = msg.chunk_size;
     this.tickStartTime = performance.now();
 
-    // Add entities from snapshot
-    for (const entityState of msg.entities) {
-      const entity = this.createInterpolatedEntity(entityState);
-      this.entities.set(entity.entityId, entity);
-      this.entityChangeHandler?.('added', entity);
-    }
-
-    // Add objects from snapshot
-    for (const objState of msg.objects) {
-      const obj = this.createTrackedObject(objState);
-      this.objects.set(obj.objectId, obj);
-      this.objectChangeHandler?.('added', obj);
-    }
-
+    // Note: Entities and objects now come via chunk_data messages
     this.initialized = true;
+  }
+
+  /**
+   * Handle chunk data from server
+   */
+  private handleChunkData(msg: ChunkDataMessage): void {
+    console.log(
+      `Received chunk (${msg.chunk_x}, ${msg.chunk_y}) v${msg.version}: ${msg.entities.length} entities, ${msg.objects.length} objects`
+    );
+
+    // Notify chunk manager to load terrain
+    this.chunkChangeHandler?.(
+      'loaded',
+      msg.chunk_x,
+      msg.chunk_y,
+      msg.terrain,
+      msg.version
+    );
+
+    // Add entities from this chunk
+    for (const entityState of msg.entities) {
+      if (!this.entities.has(entityState.entity_id)) {
+        const entity = this.createInterpolatedEntity(entityState);
+        this.entities.set(entity.entityId, entity);
+        this.entityChangeHandler?.('added', entity);
+      }
+    }
+
+    // Add objects from this chunk
+    for (const objState of msg.objects) {
+      if (!this.objects.has(objState.object_id)) {
+        const obj = this.createTrackedObject(objState);
+        this.objects.set(obj.objectId, obj);
+        this.objectChangeHandler?.('added', obj);
+      }
+    }
+  }
+
+  /**
+   * Handle terrain update within a chunk
+   */
+  private handleTerrainUpdate(msg: TerrainUpdateMessage): void {
+    this.chunkChangeHandler?.(
+      'terrain_updated',
+      msg.chunk_x,
+      msg.chunk_y,
+      undefined,
+      msg.version,
+      msg.changes
+    );
+  }
+
+  /**
+   * Handle chunk unload notification
+   */
+  private handleChunkUnload(msg: ChunkUnloadMessage): void {
+    console.log(`Unloading chunk (${msg.chunk_x}, ${msg.chunk_y})`);
+    this.chunkChangeHandler?.('unloaded', msg.chunk_x, msg.chunk_y);
+
+    // Note: We don't remove entities/objects here because they may still be
+    // visible in other chunks or moving between chunks. The tick_completed
+    // updates will handle entity positions regardless of chunk subscriptions.
   }
 
   /**

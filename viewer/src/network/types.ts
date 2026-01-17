@@ -36,14 +36,19 @@ export interface ObjectChange {
   new_value: string;
 }
 
+export interface TerrainChange {
+  x: number;
+  y: number;
+  floor_type: number;
+}
+
 // Message types
 
 export interface SnapshotMessage {
   type: 'snapshot';
   tick_id: number;
-  entities: EntityState[];
-  objects: ObjectState[];
   world_size: { width: number; height: number };
+  chunk_size: number;
   tick_duration_ms: number;
 }
 
@@ -75,12 +80,39 @@ export interface EntityDespawnedMessage {
   entity_id: string;
 }
 
+export interface ChunkDataMessage {
+  type: 'chunk_data';
+  chunk_x: number;
+  chunk_y: number;
+  version: number;
+  terrain: string; // Base64-encoded RLE terrain data
+  entities: EntityState[];
+  objects: ObjectState[];
+}
+
+export interface TerrainUpdateMessage {
+  type: 'terrain_update';
+  chunk_x: number;
+  chunk_y: number;
+  version: number;
+  changes: TerrainChange[];
+}
+
+export interface ChunkUnloadMessage {
+  type: 'chunk_unload';
+  chunk_x: number;
+  chunk_y: number;
+}
+
 export type ViewerMessage =
   | SnapshotMessage
   | TickStartedMessage
   | TickCompletedMessage
   | EntitySpawnedMessage
-  | EntityDespawnedMessage;
+  | EntityDespawnedMessage
+  | ChunkDataMessage
+  | TerrainUpdateMessage
+  | ChunkUnloadMessage;
 
 /**
  * Type guard for checking message types
@@ -103,4 +135,16 @@ export function isEntitySpawnedMessage(msg: ViewerMessage): msg is EntitySpawned
 
 export function isEntityDespawnedMessage(msg: ViewerMessage): msg is EntityDespawnedMessage {
   return msg.type === 'entity_despawned';
+}
+
+export function isChunkDataMessage(msg: ViewerMessage): msg is ChunkDataMessage {
+  return msg.type === 'chunk_data';
+}
+
+export function isTerrainUpdateMessage(msg: ViewerMessage): msg is TerrainUpdateMessage {
+  return msg.type === 'terrain_update';
+}
+
+export function isChunkUnloadMessage(msg: ViewerMessage): msg is ChunkUnloadMessage {
+  return msg.type === 'chunk_unload';
 }

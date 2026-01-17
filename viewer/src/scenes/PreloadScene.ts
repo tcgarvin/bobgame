@@ -70,6 +70,14 @@ export class PreloadScene extends Phaser.Scene {
       });
     }
 
+    // Always load Floor.png for terrain chunks (may already be in spritesheets)
+    if (!spritesheets.includes('Objects/Floor.png')) {
+      this.load.spritesheet('Objects-Floor', 'assets/dawnlike/Objects/Floor.png', {
+        frameWidth: TILE_SIZE,
+        frameHeight: TILE_SIZE,
+      });
+    }
+
     // Load spritesheets and then create animations
     this.load.once('complete', () => {
       this.createAnimations();

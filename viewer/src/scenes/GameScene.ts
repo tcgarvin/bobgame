@@ -1,10 +1,9 @@
 import Phaser from 'phaser';
-import type { MapData } from '../types/map';
-import { TileType, createTestRoom } from '../types/map';
 import { WebSocketClient, WorldState } from '../network';
 import type { ConnectionState, InterpolatedEntity, TrackedObject } from '../network';
 import type { SpriteIndex } from '../sprites';
 import { getSpriteFrame } from '../sprites';
+import { ChunkManager, ViewportTracker } from '../terrain';
 
 const TILE_SIZE = 16;
 const SCALE = 3; // Scale up for visibility (16 * 3 = 48px per tile)
@@ -27,7 +26,6 @@ export class GameScene extends Phaser.Scene {
     S: Phaser.Input.Keyboard.Key;
     D: Phaser.Input.Keyboard.Key;
   };
-  private mapData?: MapData;
   private spriteIndex?: SpriteIndex;
 
   // Network state
@@ -36,6 +34,11 @@ export class GameScene extends Phaser.Scene {
   private entitySprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private objectSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private connectionText?: Phaser.GameObjects.Text;
+
+  // Chunk-based terrain
+  private chunkManager?: ChunkManager;
+  private viewportTracker?: ViewportTracker;
+  private worldInitialized: boolean = false;
 
   constructor() {
     super({ key: 'GameScene' });
@@ -48,15 +51,6 @@ export class GameScene extends Phaser.Scene {
     if (!this.spriteIndex) {
       console.error('Sprite index not found in registry');
     }
-
-    // Create the static test room for tiles (entities come from server)
-    this.mapData = createTestRoom(10, 10);
-    // Remove the hardcoded player entity - we'll get entities from the server
-    this.mapData.entities = [];
-    this.renderMap();
-
-    // Setup camera controls
-    this.setupCamera();
 
     // Setup keyboard controls
     this.setupKeyboardControls();
@@ -108,9 +102,29 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
+    // Handle chunk changes
+    this.worldState.onChunkChange((action, chunkX, chunkY, terrain, version, changes) => {
+      if (!this.chunkManager) return;
+
+      if (action === 'loaded' && terrain && version !== undefined) {
+        this.chunkManager.loadChunk(chunkX, chunkY, terrain, version);
+      } else if (action === 'unloaded') {
+        this.chunkManager.unloadChunk(chunkX, chunkY);
+      } else if (action === 'terrain_updated' && changes) {
+        for (const change of changes) {
+          this.chunkManager.updateTile(chunkX, chunkY, change.x, change.y, change.floor_type);
+        }
+      }
+    });
+
     // Create WebSocket client
     this.wsClient = new WebSocketClient((message) => {
       this.worldState.handleMessage(message);
+
+      // Initialize world after first snapshot
+      if (!this.worldInitialized && this.worldState.isInitialized()) {
+        this.initializeWorld();
+      }
     });
 
     // Handle connection state changes
@@ -120,6 +134,34 @@ export class GameScene extends Phaser.Scene {
 
     // Connect
     this.wsClient.connect();
+  }
+
+  private initializeWorld(): void {
+    const worldSize = this.worldState.getWorldSize();
+    const chunkSize = this.worldState.getChunkSize();
+
+    console.log(`Initializing world: ${worldSize.width}x${worldSize.height}, chunk_size=${chunkSize}`);
+
+    // Initialize chunk manager
+    this.chunkManager = new ChunkManager(this, chunkSize);
+
+    // Setup camera bounds
+    const worldWidth = worldSize.width * TILE_SIZE * SCALE;
+    const worldHeight = worldSize.height * TILE_SIZE * SCALE;
+    this.cameras.main.setBounds(0, 0, worldWidth, worldHeight);
+
+    // Center camera on world (entities are typically near center)
+    this.cameras.main.centerOn(worldWidth / 2, worldHeight / 2);
+
+    // Initialize viewport tracker for chunk subscriptions
+    this.viewportTracker = new ViewportTracker(this, chunkSize, (chunks) => {
+      this.wsClient?.subscribeChunks(chunks);
+    });
+
+    // Request initial chunks for current viewport
+    this.viewportTracker.forceUpdate();
+
+    this.worldInitialized = true;
   }
 
   private updateConnectionStatus(state: ConnectionState): void {
@@ -169,7 +211,9 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.entitySprites.set(entity.entityId, sprite);
-    console.log(`Created sprite for entity ${entity.entityId} (${spriteKey}) at (${entity.currentX}, ${entity.currentY})`);
+    console.log(
+      `Created sprite for entity ${entity.entityId} (${spriteKey}) at (${entity.currentX}, ${entity.currentY})`
+    );
 
     // If this is the first entity, follow it with camera
     if (this.entitySprites.size === 1) {
@@ -205,7 +249,9 @@ export class GameScene extends Phaser.Scene {
     sprite.setDepth(5); // Between tiles and entities
 
     this.objectSprites.set(obj.objectId, sprite);
-    console.log(`Created bush ${obj.objectId} at (${obj.position.x}, ${obj.position.y}) ${hasBerry ? 'with berry' : 'empty'}`);
+    console.log(
+      `Created bush ${obj.objectId} at (${obj.position.x}, ${obj.position.y}) ${hasBerry ? 'with berry' : 'empty'}`
+    );
   }
 
   private removeObjectSprite(objectId: string): void {
@@ -229,42 +275,6 @@ export class GameScene extends Phaser.Scene {
         sprite.setTexture(spriteData.textureKey, spriteData.frame);
       }
     }
-  }
-
-  private renderMap(): void {
-    if (!this.mapData) return;
-
-    // Get grass sprite for floor tiles
-    const grassSprite = this.spriteIndex ? getSpriteFrame(this.spriteIndex, 'grass-full') : null;
-
-    for (let y = 0; y < this.mapData.height; y++) {
-      for (let x = 0; x < this.mapData.width; x++) {
-        const tile = this.mapData.tiles[y][x];
-        const posX = x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
-        const posY = y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
-
-        if (tile.type === TileType.FLOOR && grassSprite) {
-          const sprite = this.add.sprite(posX, posY, grassSprite.textureKey, grassSprite.frame);
-          sprite.setScale(SCALE);
-        } else if (tile.type === TileType.WALL) {
-          // Use dirt for walls for now (visible boundary)
-          const dirtSprite = this.spriteIndex ? getSpriteFrame(this.spriteIndex, 'dirt-full') : null;
-          if (dirtSprite) {
-            const sprite = this.add.sprite(posX, posY, dirtSprite.textureKey, dirtSprite.frame);
-            sprite.setScale(SCALE);
-          }
-        }
-      }
-    }
-  }
-
-  private setupCamera(): void {
-    if (!this.mapData) return;
-
-    const worldWidth = this.mapData.width * TILE_SIZE * SCALE;
-    const worldHeight = this.mapData.height * TILE_SIZE * SCALE;
-
-    this.cameras.main.setBounds(0, 0, worldWidth, worldHeight);
   }
 
   private setupKeyboardControls(): void {
@@ -317,6 +327,9 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
+    // Update viewport tracker (requests new chunks when camera moves)
+    this.viewportTracker?.update();
+
     // Camera panning
     const camSpeed = 5;
 
@@ -357,6 +370,10 @@ export class GameScene extends Phaser.Scene {
     // Cleanup network on scene shutdown
     if (this.wsClient) {
       this.wsClient.disconnect();
+    }
+    // Cleanup terrain chunks
+    if (this.chunkManager) {
+      this.chunkManager.clear();
     }
   }
 }

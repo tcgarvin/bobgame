@@ -1,0 +1,16 @@
+# Small island for testing
+# 500x500 map - generates quickly
+
+[world]
+width = 500
+height = 500
+tick_duration_ms = 1000
+generation_mode = "generate"
+terrain_seed = 12345
+map_save_path = "saves/island_small.npz"
+
+[[entities]]
+id = "alice"
+type = "player"
+x = 250
+y = 250
