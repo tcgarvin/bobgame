@@ -113,6 +113,14 @@ cleanup() {
 # Set up signal handlers
 trap cleanup SIGINT SIGTERM EXIT
 
+# Load API keys for agents (TYPESAFE_API_KEY, OPENROUTER_API_KEY)
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/.env"
+    set +a
+fi
+
 # Create logs directory
 mkdir -p "$LOG_DIR"
 
@@ -194,10 +202,15 @@ else
 fi
 
 # Start Runner (manages all agents)
-log_info "Starting Agent Runner..."
+# Use a runner config matching the world config name when one exists.
+RUNNER_CONFIG="$SCRIPT_DIR/runner/configs/$CONFIG.toml"
+if [ ! -f "$RUNNER_CONFIG" ]; then
+    RUNNER_CONFIG="$SCRIPT_DIR/runner/configs/foraging.toml"
+fi
+log_info "Starting Agent Runner with $(basename "$RUNNER_CONFIG")..."
 cd "$SCRIPT_DIR/runner"
 uv run python -m runner \
-    --config "$SCRIPT_DIR/runner/configs/foraging.toml" \
+    --config "$RUNNER_CONFIG" \
     --log-dir "$LOG_DIR" \
     > "$LOG_DIR/runner.log" 2>&1 &
 RUNNER_PID=$!

@@ -8,11 +8,50 @@ export interface Position {
   y: number;
 }
 
-export interface EntityState {
+/**
+ * Per-entity stats. All fields are optional so the viewer keeps working
+ * against older servers that do not send them yet.
+ */
+export interface EntityStats {
+  health?: number;
+  max_health?: number;
+  hunger?: number;
+  max_hunger?: number;
+  wielded?: string;
+  alive?: boolean;
+  inventory?: Record<string, number>;
+}
+
+export interface EntityState extends EntityStats {
   entity_id: string;
   position: Position;
   entity_type: string;
   tags: string[];
+}
+
+/**
+ * Sent for every entity, every tick, inside `tick_completed.entity_updates`.
+ */
+export interface EntityUpdate extends EntityStats {
+  entity_id: string;
+  position: Position;
+  entity_type: string;
+}
+
+export interface ActionEvent {
+  entity_id: string;
+  action_type: string;
+  success: boolean;
+  details: string;
+}
+
+export type UtteranceChannel = 'local' | 'thought';
+
+export interface UtteranceEvent {
+  speaker_id: string;
+  channel: UtteranceChannel | string;
+  text: string;
+  position: Position;
 }
 
 export interface MoveResult {
@@ -50,6 +89,8 @@ export interface SnapshotMessage {
   world_size: { width: number; height: number };
   chunk_size: number;
   tick_duration_ms: number;
+  /** Settlement centre; absent on servers without the settlement feature. */
+  settlement?: Position;
 }
 
 export interface TickStartedMessage {
@@ -66,6 +107,50 @@ export interface TickCompletedMessage {
   moves: MoveResult[];
   object_changes: ObjectChange[];
   actions_processed: number;
+  /** Full stat/position state for every entity. Optional on older servers. */
+  entity_updates?: EntityUpdate[];
+  actions?: ActionEvent[];
+  utterances?: UtteranceEvent[];
+  objects_added?: ObjectState[];
+  objects_removed?: string[];
+}
+
+/**
+ * One Jev decision, as reported by the agent. Field names are treated
+ * leniently because the stint JSON is produced by the agent track.
+ */
+export interface StintOptionProbability {
+  option: string;
+  probability: number;
+}
+
+export interface AgentStint {
+  tick?: number;
+  action?: string;
+  /**
+   * Top options by probability, highest first. The agent currently sends
+   * `[option, probability]` pairs; objects are accepted too.
+   */
+  top?: Array<StintOptionProbability | [string, number]>;
+  eject?: number;
+  danger?: number;
+  options?: number;
+  latency_ms?: number;
+  intent_result?: string;
+  result?: string;
+  ticks_left?: number;
+  [key: string]: unknown;
+}
+
+export type AgentMode = 'planning' | 'stint' | 'idle' | string;
+
+export interface AgentStatusMessage {
+  type: 'agent_status';
+  entity_id: string;
+  mode: AgentMode;
+  brief: string;
+  planner_thought: string;
+  stint: AgentStint | null;
 }
 
 export interface EntitySpawnedMessage {
@@ -112,7 +197,8 @@ export type ViewerMessage =
   | EntityDespawnedMessage
   | ChunkDataMessage
   | TerrainUpdateMessage
-  | ChunkUnloadMessage;
+  | ChunkUnloadMessage
+  | AgentStatusMessage;
 
 /**
  * Type guard for checking message types
@@ -147,4 +233,8 @@ export function isTerrainUpdateMessage(msg: ViewerMessage): msg is TerrainUpdate
 
 export function isChunkUnloadMessage(msg: ViewerMessage): msg is ChunkUnloadMessage {
   return msg.type === 'chunk_unload';
+}
+
+export function isAgentStatusMessage(msg: ViewerMessage): msg is AgentStatusMessage {
+  return msg.type === 'agent_status';
 }

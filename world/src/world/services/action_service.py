@@ -8,9 +8,157 @@ from .. import world_pb2_grpc
 from ..conversion import direction_from_proto
 from ..lease import LeaseManager
 from ..tick import TickLoop
-from ..types import CollectIntent, EatIntent
+from ..types import (
+    AttackIntent,
+    CollectIntent,
+    CraftIntent,
+    DepositIntent,
+    DropIntent,
+    EatIntent,
+    EntityIntent,
+    EquipIntent,
+    ExtractIntent,
+    MoveIntent,
+    PickupIntent,
+    PlaceIntent,
+    SayIntent,
+    WaitIntent,
+    WithdrawIntent,
+    WriteNoteIntent,
+)
 
 logger = structlog.get_logger()
+
+
+class IntentConversionError(Exception):
+    """Raised when a proto intent cannot become an internal intent model."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def intent_from_proto(entity_id: str, intent: pb.Intent) -> EntityIntent:
+    """Convert a proto Intent into the matching internal intent model.
+
+    Raises:
+        IntentConversionError: If the action is unknown or malformed.
+    """
+    action = intent.WhichOneof("action")
+
+    if action == "move":
+        direction = direction_from_proto(intent.move.direction)
+        if direction is None:
+            raise IntentConversionError("invalid_direction")
+        return MoveIntent(entity_id=entity_id, direction=direction)
+
+    if action == "collect":
+        return CollectIntent(
+            entity_id=entity_id,
+            object_id=intent.collect.object_id or None,
+            item_type=intent.collect.item_type or "berry",
+        )
+
+    if action == "eat":
+        if not intent.eat.item_type:
+            raise IntentConversionError("missing_item_type")
+        return EatIntent(
+            entity_id=entity_id,
+            item_type=intent.eat.item_type,
+            amount=intent.eat.amount or 1,
+        )
+
+    if action == "attack":
+        if not intent.attack.target_entity_id:
+            raise IntentConversionError("missing_target")
+        return AttackIntent(
+            entity_id=entity_id,
+            target_entity_id=intent.attack.target_entity_id,
+        )
+
+    if action == "extract":
+        if not intent.extract.object_id:
+            raise IntentConversionError("missing_object_id")
+        return ExtractIntent(entity_id=entity_id, object_id=intent.extract.object_id)
+
+    if action == "pickup":
+        if not intent.pickup.kind:
+            raise IntentConversionError("missing_kind")
+        return PickupIntent(
+            entity_id=entity_id,
+            kind=intent.pickup.kind,
+            amount=intent.pickup.amount or 1,
+        )
+
+    if action == "withdraw":
+        if not intent.withdraw.object_id or not intent.withdraw.kind:
+            raise IntentConversionError("missing_object_id_or_kind")
+        return WithdrawIntent(
+            entity_id=entity_id,
+            object_id=intent.withdraw.object_id,
+            kind=intent.withdraw.kind,
+            amount=intent.withdraw.amount or 1,
+        )
+
+    if action == "drop":
+        if not intent.drop.kind:
+            raise IntentConversionError("missing_kind")
+        return DropIntent(
+            entity_id=entity_id,
+            kind=intent.drop.kind,
+            amount=intent.drop.amount or 1,
+        )
+
+    if action == "deposit":
+        if not intent.deposit.object_id or not intent.deposit.kind:
+            raise IntentConversionError("missing_object_id_or_kind")
+        return DepositIntent(
+            entity_id=entity_id,
+            object_id=intent.deposit.object_id,
+            kind=intent.deposit.kind,
+            amount=intent.deposit.amount or 1,
+        )
+
+    if action == "craft":
+        if not intent.craft.recipe:
+            raise IntentConversionError("missing_recipe")
+        return CraftIntent(entity_id=entity_id, recipe=intent.craft.recipe)
+
+    if action == "equip":
+        return EquipIntent(entity_id=entity_id, kind=intent.equip.kind)
+
+    if action == "place":
+        direction = direction_from_proto(intent.place.direction)
+        if direction is None:
+            raise IntentConversionError("invalid_direction")
+        if not intent.place.kind:
+            raise IntentConversionError("missing_kind")
+        return PlaceIntent(
+            entity_id=entity_id, kind=intent.place.kind, direction=direction
+        )
+
+    if action == "write_note":
+        if not intent.write_note.object_id:
+            raise IntentConversionError("missing_object_id")
+        return WriteNoteIntent(
+            entity_id=entity_id,
+            object_id=intent.write_note.object_id,
+            slot=intent.write_note.slot,
+            title=intent.write_note.title,
+            text=intent.write_note.text,
+        )
+
+    if action == "say":
+        return SayIntent(
+            entity_id=entity_id,
+            text=intent.say.text,
+            channel=intent.say.channel or "local",
+        )
+
+    if action == "wait":
+        return WaitIntent(entity_id=entity_id)
+
+    raise IntentConversionError("unknown_action")
 
 
 class ActionServiceServicer(world_pb2_grpc.ActionServiceServicer):
@@ -27,9 +175,7 @@ class ActionServiceServicer(world_pb2_grpc.ActionServiceServicer):
         lease_id = request.lease_id
         entity_id = request.entity_id
         tick_id = request.tick_id
-        intent = request.intent
 
-        # Validate lease
         if not self.lease_manager.is_valid_lease(lease_id, entity_id):
             logger.debug(
                 "intent_rejected_invalid_lease",
@@ -38,7 +184,6 @@ class ActionServiceServicer(world_pb2_grpc.ActionServiceServicer):
             )
             return pb.SubmitIntentResponse(accepted=False, reason="invalid_lease")
 
-        # Check tick
         current_ctx = self.tick_loop.current_context
         if current_ctx is None:
             return pb.SubmitIntentResponse(accepted=False, reason="no_tick_in_progress")
@@ -51,106 +196,22 @@ class ActionServiceServicer(world_pb2_grpc.ActionServiceServicer):
             )
             return pb.SubmitIntentResponse(accepted=False, reason="wrong_tick")
 
-        # Handle the specific intent type
-        action_type = intent.WhichOneof("action")
-
-        if action_type == "move":
-            return self._handle_move_intent(entity_id, intent.move)
-        elif action_type == "collect":
-            return self._handle_collect_intent(entity_id, intent.collect)
-        elif action_type == "eat":
-            return self._handle_eat_intent(entity_id, intent.eat)
-        elif action_type == "wait":
-            # Wait is a no-op, always accepted
-            return pb.SubmitIntentResponse(accepted=True)
-        elif action_type in ("pickup", "use", "say"):
-            # Not implemented yet
-            return pb.SubmitIntentResponse(
-                accepted=False, reason=f"{action_type}_not_implemented"
+        try:
+            intent = intent_from_proto(entity_id, request.intent)
+        except IntentConversionError as exc:
+            logger.debug(
+                "intent_rejected_conversion", entity_id=entity_id, reason=exc.reason
             )
-        else:
-            return pb.SubmitIntentResponse(accepted=False, reason="unknown_action")
+            return pb.SubmitIntentResponse(accepted=False, reason=exc.reason)
 
-    def _handle_move_intent(
-        self, entity_id: str, move_intent: pb.MoveIntent
-    ) -> pb.SubmitIntentResponse:
-        """Handle a move intent submission."""
-        direction = direction_from_proto(move_intent.direction)
-
-        if direction is None:
-            return pb.SubmitIntentResponse(
-                accepted=False, reason="invalid_direction"
-            )
-
-        accepted = self.tick_loop.submit_move_intent(entity_id, direction)
-
+        accepted, reason = current_ctx.submit_intent(entity_id, intent)
         if not accepted:
-            return pb.SubmitIntentResponse(accepted=False, reason="late_or_duplicate")
+            return pb.SubmitIntentResponse(accepted=False, reason=reason)
 
         logger.debug(
-            "move_intent_accepted",
+            "intent_accepted",
             entity_id=entity_id,
-            direction=direction.name,
+            kind=type(intent).__name__,
+            tick_id=tick_id,
         )
-
-        return pb.SubmitIntentResponse(accepted=True)
-
-    def _handle_collect_intent(
-        self, entity_id: str, collect_intent: pb.CollectIntent
-    ) -> pb.SubmitIntentResponse:
-        """Handle a collect intent submission."""
-        intent = CollectIntent(
-            entity_id=entity_id,
-            object_id=collect_intent.object_id or None,
-            item_type=collect_intent.item_type or "berry",
-            amount=collect_intent.amount or 1,
-        )
-
-        ctx = self.tick_loop.current_context
-        if ctx is None:
-            return pb.SubmitIntentResponse(accepted=False, reason="no_tick_in_progress")
-
-        accepted = ctx.submit_collect_intent(intent)
-
-        if not accepted:
-            return pb.SubmitIntentResponse(accepted=False, reason="late_or_duplicate")
-
-        logger.debug(
-            "collect_intent_accepted",
-            entity_id=entity_id,
-            object_id=intent.object_id,
-            item_type=intent.item_type,
-        )
-
-        return pb.SubmitIntentResponse(accepted=True)
-
-    def _handle_eat_intent(
-        self, entity_id: str, eat_intent: pb.EatIntent
-    ) -> pb.SubmitIntentResponse:
-        """Handle an eat intent submission."""
-        if not eat_intent.item_type:
-            return pb.SubmitIntentResponse(accepted=False, reason="missing_item_type")
-
-        intent = EatIntent(
-            entity_id=entity_id,
-            item_type=eat_intent.item_type,
-            amount=eat_intent.amount or 1,
-        )
-
-        ctx = self.tick_loop.current_context
-        if ctx is None:
-            return pb.SubmitIntentResponse(accepted=False, reason="no_tick_in_progress")
-
-        accepted = ctx.submit_eat_intent(intent)
-
-        if not accepted:
-            return pb.SubmitIntentResponse(accepted=False, reason="late_or_duplicate")
-
-        logger.debug(
-            "eat_intent_accepted",
-            entity_id=entity_id,
-            item_type=intent.item_type,
-            amount=intent.amount,
-        )
-
         return pb.SubmitIntentResponse(accepted=True)

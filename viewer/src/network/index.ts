@@ -5,5 +5,16 @@
 export * from './types';
 export { WebSocketClient } from './WebSocketClient';
 export type { WebSocketClientConfig, ConnectionState, MessageHandler, StateChangeHandler } from './WebSocketClient';
-export { WorldState } from './WorldState';
-export type { InterpolatedEntity, EntityChangeHandler, TrackedObject, ObjectChangeHandler, ChunkChangeHandler } from './WorldState';
+export { WorldState, ENTITY_LOG_SIZE } from './WorldState';
+export type {
+  InterpolatedEntity,
+  EntityChangeHandler,
+  EntityLogEntry,
+  EntityStatsHandler,
+  TrackedObject,
+  ObjectChangeHandler,
+  ChunkChangeHandler,
+  UtteranceHandler,
+  StateUpdateHandler,
+  SelectionHandler,
+} from './WorldState';

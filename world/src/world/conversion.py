@@ -56,6 +56,12 @@ def entity_to_proto(entity: Entity) -> pb.Entity:
         tags=list(entity.tags),
         status_bits=entity.status_bits,
         inventory=inventory_to_proto(entity.inventory),
+        health=entity.health,
+        max_health=entity.max_health,
+        hunger=entity.hunger,
+        max_hunger=entity.max_hunger,
+        wielded=entity.wielded,
+        alive=entity.alive,
     )
 
 
@@ -68,6 +74,12 @@ def entity_from_proto(proto_entity: pb.Entity) -> Entity:
         tags=tuple(proto_entity.tags),
         status_bits=proto_entity.status_bits,
         inventory=inventory_from_proto(proto_entity.inventory),
+        health=proto_entity.health,
+        max_health=proto_entity.max_health,
+        hunger=proto_entity.hunger,
+        max_hunger=proto_entity.max_hunger,
+        wielded=proto_entity.wielded,
+        alive=proto_entity.alive,
     )
 
 

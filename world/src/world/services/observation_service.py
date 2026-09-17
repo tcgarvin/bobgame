@@ -11,12 +11,23 @@ import structlog
 from .. import world_pb2 as pb
 from .. import world_pb2_grpc
 from ..conversion import entity_to_proto, object_to_proto, tile_to_proto
+from ..events import ActionResult
 from ..lease import LeaseManager
-from ..state import World
-from ..tick import TickContext, TickLoop
+from ..state import Entity, World
+from ..tick import TickContext, TickLoop, TickResult
 from ..types import Position
 
 logger = structlog.get_logger()
+
+# View radius in tiles (Chebyshev) for tiles, objects and entities.
+VIEW_RADIUS = 8
+# Earshot for `local` utterances.
+HEARING_RADIUS = 10
+
+
+def _within(a: Position, b: Position, radius: int) -> bool:
+    """Chebyshev distance test."""
+    return abs(a.x - b.x) <= radius and abs(a.y - b.y) <= radius
 
 
 @dataclass
@@ -41,6 +52,13 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
         self.tick_loop = tick_loop
         self.lease_manager = lease_manager
         self._subscribers: dict[str, ObservationSubscriber] = {}
+        # Events from the tick that just finished, replayed into the next
+        # tick's observations.
+        self._last_result: TickResult | None = None
+
+    def on_tick_complete(self, result: TickResult) -> None:
+        """Store the finished tick's events for the next observation round."""
+        self._last_result = result
 
     def StreamObservations(
         self, request: pb.StreamObservationsRequest, context: grpc.ServicerContext
@@ -112,37 +130,29 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
     ) -> pb.Observation | None:
         """Generate an observation for an entity.
 
-        For Milestone 3, this is a basic implementation without line-of-sight.
-        All entities and tiles are visible.
+        Dead entities still get observations: they need to see `self.alive`
+        is false and that they will respawn.
         """
         try:
             entity = self.world.get_entity(entity_id)
         except Exception:
             return None
 
-        # Get self entity as proto
-        self_proto = entity_to_proto(entity)
+        centre = entity.position
 
-        # For Milestone 3: include all entities (no LOS filtering)
+        self_proto = _entity_proto(entity)
+
         visible_entities = [
-            entity_to_proto(e)
-            for e in self.world.all_entities().values()
-            if e.entity_id != entity_id
+            _entity_proto(other)
+            for other in self.world.all_entities().values()
+            if other.entity_id != entity_id
+            and _within(other.position, centre, VIEW_RADIUS)
         ]
 
-        # For Milestone 3: include nearby tiles (simple radius)
-        # In future milestones, this will use line-of-sight
-        visible_tiles = self._get_nearby_tiles(entity.position, radius=5)
+        visible_tiles = self._get_nearby_tiles(centre, radius=VIEW_RADIUS)
+        visible_objects = self._get_nearby_objects(centre, radius=VIEW_RADIUS)
+        events = self._build_events(entity_id, centre)
 
-        # Include visible objects (within radius)
-        visible_objects = self._get_nearby_objects(entity.position, radius=5)
-
-        # No events at tick start (events would be from previous tick)
-        # Future: could include last tick's movement results here
-        events: list[pb.ObservationEvent] = []
-
-        # Note: 'self' is a Python keyword, so we need to construct message
-        # and then set the field using setattr or pass via **kwargs
         observation = pb.Observation(
             tick_id=context.tick_id,
             deadline_ms=context.deadline_ms,
@@ -151,24 +161,184 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
             visible_objects=visible_objects,
             events=events,
         )
-        # Set 'self' field (Python keyword) using CopyFrom
+        # 'self' is a Python keyword, so the field is set via CopyFrom.
         observation.self.CopyFrom(self_proto)
         return observation
 
+    def _build_events(
+        self, entity_id: str, centre: Position
+    ) -> list[pb.ObservationEvent]:
+        """Build the previous tick's events this entity could perceive."""
+        result = self._last_result
+        if result is None:
+            return []
+
+        events: list[pb.ObservationEvent] = []
+
+        for move in result.move_results:
+            if not move.success:
+                continue
+            visible = (
+                move.entity_id == entity_id
+                or _within(move.to_pos, centre, VIEW_RADIUS)
+                or _within(move.from_pos, centre, VIEW_RADIUS)
+            )
+            if visible:
+                moved = pb.EntityMoved(
+                    entity_id=move.entity_id,
+                    to=pb.Position(x=move.to_pos.x, y=move.to_pos.y),
+                )
+                # `from` is a Python keyword, so it cannot be a kwarg.
+                getattr(moved, "from").CopyFrom(
+                    pb.Position(x=move.from_pos.x, y=move.from_pos.y)
+                )
+                events.append(pb.ObservationEvent(entity_moved=moved))
+
+        for action in result.action_results:
+            if action.entity_id == entity_id or self._actor_in_view(action, centre):
+                events.append(
+                    pb.ObservationEvent(
+                        entity_acted=pb.EntityActed(
+                            entity_id=action.entity_id,
+                            action_type=action.action_type,
+                            success=action.success,
+                            details=action.details,
+                        )
+                    )
+                )
+
+        for utterance in result.utterances:
+            # `thought` never reaches another agent's observation.
+            if utterance.channel != "local":
+                continue
+            if not _within(utterance.position, centre, HEARING_RADIUS):
+                continue
+            events.append(
+                pb.ObservationEvent(
+                    utterance=pb.Utterance(
+                        speaker_id=utterance.speaker_id,
+                        channel=utterance.channel,
+                        text=utterance.text,
+                        position=pb.Position(
+                            x=utterance.position.x, y=utterance.position.y
+                        ),
+                    )
+                )
+            )
+
+        for damage in result.damage_events:
+            if damage.entity_id == entity_id or _within(
+                damage.position, centre, VIEW_RADIUS
+            ):
+                events.append(
+                    pb.ObservationEvent(
+                        entity_damaged=pb.EntityDamaged(
+                            entity_id=damage.entity_id,
+                            attacker_id=damage.attacker_id,
+                            amount=damage.amount,
+                            remaining_health=damage.remaining_health,
+                        )
+                    )
+                )
+
+        for death in result.deaths:
+            if death.entity_id == entity_id or _within(
+                death.position, centre, VIEW_RADIUS
+            ):
+                events.append(
+                    pb.ObservationEvent(
+                        entity_died=pb.EntityDied(
+                            entity_id=death.entity_id,
+                            killer_id=death.killer_id,
+                            position=pb.Position(
+                                x=death.position.x, y=death.position.y
+                            ),
+                        )
+                    )
+                )
+
+        for respawn in result.respawns:
+            if respawn.entity_id == entity_id or _within(
+                respawn.position, centre, VIEW_RADIUS
+            ):
+                events.append(
+                    pb.ObservationEvent(
+                        entity_respawned=pb.EntityRespawned(
+                            entity_id=respawn.entity_id,
+                            position=pb.Position(
+                                x=respawn.position.x, y=respawn.position.y
+                            ),
+                        )
+                    )
+                )
+
+        for added in result.objects_added:
+            if _within(added.obj.position, centre, VIEW_RADIUS):
+                events.append(
+                    pb.ObservationEvent(
+                        object_added=pb.ObjectAdded(object=object_to_proto(added.obj))
+                    )
+                )
+
+        for removed in result.objects_removed:
+            if _within(removed.position, centre, VIEW_RADIUS):
+                events.append(
+                    pb.ObservationEvent(
+                        object_removed=pb.ObjectRemoved(
+                            object_id=removed.object_id,
+                            position=pb.Position(
+                                x=removed.position.x, y=removed.position.y
+                            ),
+                        )
+                    )
+                )
+
+        for change in result.object_changes:
+            if not self._object_in_view(change.object_id, centre):
+                continue
+            events.append(
+                pb.ObservationEvent(
+                    object_changed=pb.ObjectChanged(
+                        object_id=change.object_id,
+                        field=change.field,
+                        old_value=change.old_value,
+                        new_value=change.new_value,
+                    )
+                )
+            )
+
+        return events
+
+    def _actor_in_view(self, action: ActionResult, centre: Position) -> bool:
+        """Whether the acting entity is currently within view of centre."""
+        try:
+            actor = self.world.get_entity(action.entity_id)
+        except Exception:
+            return False
+        return _within(actor.position, centre, VIEW_RADIUS)
+
+    def _object_in_view(self, object_id: str, centre: Position) -> bool:
+        """Whether an object is still present and within view of centre."""
+        try:
+            obj = self.world.get_object(object_id)
+        except Exception:
+            return False
+        return _within(obj.position, centre, VIEW_RADIUS)
+
     def _get_nearby_objects(
-        self, center: Position, radius: int = 5
+        self, center: Position, radius: int = VIEW_RADIUS
     ) -> list[pb.WorldObject]:
         """Get objects within a radius of the center position."""
         objects = []
-        for obj in self.world.all_objects().values():
-            dx = abs(obj.position.x - center.x)
-            dy = abs(obj.position.y - center.y)
-            if dx <= radius and dy <= radius:
-                objects.append(object_to_proto(obj))
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                pos = Position(x=center.x + dx, y=center.y + dy)
+                for obj in self.world.get_objects_at(pos):
+                    objects.append(object_to_proto(obj))
         return objects
 
     def _get_nearby_tiles(
-        self, center: Position, radius: int = 5
+        self, center: Position, radius: int = VIEW_RADIUS
     ) -> list[pb.Tile]:
         """Get tiles within a radius of the center position."""
         tiles = []
@@ -180,3 +350,18 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
                     tiles.append(tile_to_proto(tile))
         return tiles
 
+
+def _entity_proto(entity: Entity) -> pb.Entity:
+    """Convert an entity, making sure the stat fields are populated.
+
+    `conversion.entity_to_proto` is owned by the mechanics track; until it maps
+    the new stat fields this fills them in so observations always carry them.
+    """
+    proto = entity_to_proto(entity)
+    proto.health = entity.health
+    proto.max_health = entity.max_health
+    proto.hunger = entity.hunger
+    proto.max_hunger = entity.max_hunger
+    proto.wielded = entity.wielded
+    proto.alive = entity.alive
+    return proto

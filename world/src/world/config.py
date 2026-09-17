@@ -3,10 +3,13 @@
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from .state import Entity, WorldObject
 from .types import Position
+
+
+VALID_SPAWN_MODES = frozenset({"positions", "settlement"})
 
 
 class EntityConfig(BaseModel):
@@ -43,6 +46,29 @@ class WorldConfig(BaseModel):
     # When generation_mode="generate": load if exists, else generate and save
     # When generation_mode="load": required, load from this path
     map_save_path: str | None = None
+
+    # How entities are placed: "positions" uses each entity's configured x/y,
+    # "settlement" spawns everyone near the computed settlement centre.
+    spawn_mode: str = "positions"
+    # Intent deadline within a tick. None means half the tick duration.
+    intent_deadline_ms: int | None = None
+    # Whether the world simulates wolves.
+    wolves: bool = False
+
+    @field_validator("spawn_mode")
+    @classmethod
+    def _check_spawn_mode(cls, value: str) -> str:
+        if value not in VALID_SPAWN_MODES:
+            raise ValueError(
+                f"spawn_mode must be one of {sorted(VALID_SPAWN_MODES)}, got {value!r}"
+            )
+        return value
+
+    def resolved_intent_deadline_ms(self) -> int:
+        """Intent deadline in ms, defaulting to half the tick duration."""
+        if self.intent_deadline_ms is None:
+            return self.tick_duration_ms // 2
+        return self.intent_deadline_ms
 
 
 class Config(BaseModel):

@@ -1,11 +1,15 @@
 /**
  * Synchronized world state with smooth interpolation between server ticks.
- * Manages entity positions and provides interpolated coordinates for rendering.
+ * Manages entity positions, per-entity stats, agent status and selection,
+ * and provides interpolated coordinates for rendering.
  */
 
 import type {
+  AgentStatusMessage,
   EntityState,
+  EntityUpdate,
   ObjectState,
+  Position,
   SnapshotMessage,
   TickStartedMessage,
   TickCompletedMessage,
@@ -14,6 +18,7 @@ import type {
   ChunkDataMessage,
   TerrainUpdateMessage,
   ChunkUnloadMessage,
+  UtteranceEvent,
   ViewerMessage,
 } from './types';
 import {
@@ -25,7 +30,11 @@ import {
   isChunkDataMessage,
   isTerrainUpdateMessage,
   isChunkUnloadMessage,
+  isAgentStatusMessage,
 } from './types';
+
+/** How many action/utterance log entries are kept per entity. */
+export const ENTITY_LOG_SIZE = 10;
 
 /**
  * Entity with interpolation state for smooth rendering
@@ -43,12 +52,42 @@ export interface InterpolatedEntity {
   // Position at tick start (for interpolation origin)
   startX: number;
   startY: number;
+  // Stats (defaults are used until the server reports real values)
+  health: number;
+  maxHealth: number;
+  hunger: number;
+  maxHunger: number;
+  wielded: string;
+  alive: boolean;
+  inventory: Record<string, number>;
+}
+
+/** One line in an entity's recent action/utterance log. */
+export interface EntityLogEntry {
+  tick: number;
+  kind: 'action' | 'utterance';
+  text: string;
+  success: boolean;
+  channel: string;
 }
 
 export type EntityChangeHandler = (
   action: 'added' | 'removed',
   entity: InterpolatedEntity
 ) => void;
+
+/** Called when an entity's stats change, with the health delta for this tick. */
+export type EntityStatsHandler = (
+  entity: InterpolatedEntity,
+  healthDelta: number
+) => void;
+
+export type UtteranceHandler = (utterance: UtteranceEvent) => void;
+
+/** Called after any message that changes data the UI overlays display. */
+export type StateUpdateHandler = () => void;
+
+export type SelectionHandler = (entityId: string) => void;
 
 /**
  * Tracked world object (bushes, etc.)
@@ -84,9 +123,16 @@ function easeOutQuad(t: number): number {
   return t * (2 - t);
 }
 
+const DEFAULT_MAX_HEALTH = 20;
+const DEFAULT_MAX_HUNGER = 100;
+
 export class WorldState {
   private entities: Map<string, InterpolatedEntity> = new Map();
   private objects: Map<string, TrackedObject> = new Map();
+  private entityLogs: Map<string, EntityLogEntry[]> = new Map();
+  private agentStatuses: Map<string, AgentStatusMessage> = new Map();
+  private selectedEntityId: string = '';
+  private settlement: Position | null = null;
   private currentTickId: number = 0;
   private tickDurationMs: number = 1000;
   private tickStartTime: number = 0;
@@ -96,6 +142,10 @@ export class WorldState {
   private entityChangeHandler: EntityChangeHandler | null = null;
   private objectChangeHandler: ObjectChangeHandler | null = null;
   private chunkChangeHandler: ChunkChangeHandler | null = null;
+  private entityStatsHandler: EntityStatsHandler | null = null;
+  private utteranceHandler: UtteranceHandler | null = null;
+  private stateUpdateHandler: StateUpdateHandler | null = null;
+  private selectionHandler: SelectionHandler | null = null;
 
   /**
    * Set handler for entity add/remove events
@@ -116,6 +166,26 @@ export class WorldState {
    */
   onChunkChange(handler: ChunkChangeHandler): void {
     this.chunkChangeHandler = handler;
+  }
+
+  /** Set handler called once per entity per tick when stats arrive. */
+  onEntityStats(handler: EntityStatsHandler): void {
+    this.entityStatsHandler = handler;
+  }
+
+  /** Set handler for utterances (both channels). */
+  onUtterance(handler: UtteranceHandler): void {
+    this.utteranceHandler = handler;
+  }
+
+  /** Set handler called after any message that changes overlay data. */
+  onStateUpdate(handler: StateUpdateHandler): void {
+    this.stateUpdateHandler = handler;
+  }
+
+  /** Set handler called when the selected entity changes. */
+  onSelectionChange(handler: SelectionHandler): void {
+    this.selectionHandler = handler;
   }
 
   /**
@@ -146,6 +216,11 @@ export class WorldState {
     return this.currentTickId;
   }
 
+  /** Settlement centre, or null if the server never sent one. */
+  getSettlement(): Position | null {
+    return this.settlement ? { ...this.settlement } : null;
+  }
+
   /**
    * Get all entities (for rendering)
    */
@@ -174,6 +249,35 @@ export class WorldState {
     return this.objects.get(objectId);
   }
 
+  /** Last 10 actions/utterances for an entity, newest first. */
+  getEntityLog(entityId: string): EntityLogEntry[] {
+    const log = this.entityLogs.get(entityId);
+    if (!log) return [];
+    return log.slice().reverse();
+  }
+
+  /** Latest agent status for an entity, or null if none has arrived. */
+  getAgentStatus(entityId: string): AgentStatusMessage | null {
+    return this.agentStatuses.get(entityId) ?? null;
+  }
+
+  /** Currently selected entity id, or '' when nothing is selected. */
+  getSelectedEntityId(): string {
+    return this.selectedEntityId;
+  }
+
+  getSelectedEntity(): InterpolatedEntity | undefined {
+    return this.selectedEntityId ? this.entities.get(this.selectedEntityId) : undefined;
+  }
+
+  /** Select an entity (pass '' to clear). Notifies the selection handler. */
+  setSelectedEntity(entityId: string): void {
+    if (this.selectedEntityId === entityId) return;
+    this.selectedEntityId = entityId;
+    this.selectionHandler?.(entityId);
+    this.stateUpdateHandler?.();
+  }
+
   /**
    * Handle incoming WebSocket message
    */
@@ -194,6 +298,8 @@ export class WorldState {
       this.handleTerrainUpdate(message);
     } else if (isChunkUnloadMessage(message)) {
       this.handleChunkUnload(message);
+    } else if (isAgentStatusMessage(message)) {
+      this.handleAgentStatus(message);
     }
   }
 
@@ -210,6 +316,7 @@ export class WorldState {
       this.entityChangeHandler?.('removed', entity);
     }
     this.entities.clear();
+    this.entityLogs.clear();
 
     // Clear existing objects
     for (const obj of this.objects.values()) {
@@ -222,10 +329,12 @@ export class WorldState {
     this.tickDurationMs = msg.tick_duration_ms;
     this.worldSize = msg.world_size;
     this.chunkSize = msg.chunk_size;
+    this.settlement = msg.settlement ? { ...msg.settlement } : null;
     this.tickStartTime = performance.now();
 
     // Note: Entities and objects now come via chunk_data messages
     this.initialized = true;
+    this.stateUpdateHandler?.();
   }
 
   /**
@@ -262,6 +371,8 @@ export class WorldState {
         this.objectChangeHandler?.('added', obj);
       }
     }
+
+    this.stateUpdateHandler?.();
   }
 
   /**
@@ -307,10 +418,11 @@ export class WorldState {
   }
 
   /**
-   * Handle tick completion - update entity target positions
+   * Handle tick completion - update entity target positions, stats, log entries
+   * and object additions/removals.
    */
   private handleTickCompleted(msg: TickCompletedMessage): void {
-    for (const move of msg.moves) {
+    for (const move of msg.moves ?? []) {
       const entity = this.entities.get(move.entity_id);
       if (entity && move.success) {
         // Update target position for interpolation
@@ -322,6 +434,12 @@ export class WorldState {
       }
     }
 
+    // Full per-entity state (positions + stats). Also covers entities that
+    // appeared without an explicit entity_spawned message.
+    for (const update of msg.entity_updates ?? []) {
+      this.applyEntityUpdate(update);
+    }
+
     // Apply object changes
     for (const change of msg.object_changes ?? []) {
       const obj = this.objects.get(change.object_id);
@@ -331,17 +449,107 @@ export class WorldState {
       }
     }
 
+    for (const objState of msg.objects_added ?? []) {
+      const obj = this.createTrackedObject(objState);
+      const existing = this.objects.get(obj.objectId);
+      this.objects.set(obj.objectId, obj);
+      this.objectChangeHandler?.(existing ? 'updated' : 'added', obj);
+    }
+
+    for (const objectId of msg.objects_removed ?? []) {
+      const obj = this.objects.get(objectId);
+      if (obj) {
+        this.objects.delete(objectId);
+        this.objectChangeHandler?.('removed', obj);
+      }
+    }
+
+    for (const action of msg.actions ?? []) {
+      const detail = action.details ? ` ${action.details}` : '';
+      this.appendLog(action.entity_id, {
+        tick: msg.tick_id,
+        kind: 'action',
+        text: `${action.action_type}${detail}`,
+        success: action.success,
+        channel: '',
+      });
+    }
+
+    for (const utterance of msg.utterances ?? []) {
+      this.appendLog(utterance.speaker_id, {
+        tick: msg.tick_id,
+        kind: 'utterance',
+        text: utterance.text,
+        success: true,
+        channel: utterance.channel,
+      });
+      this.utteranceHandler?.(utterance);
+    }
+
     // Reset tick start time for movement interpolation
     this.tickStartTime = performance.now();
+    this.stateUpdateHandler?.();
+  }
+
+  /**
+   * Apply one entity_updates entry, creating the entity if it is new.
+   * Reports the health delta so the renderer can flash damaged entities.
+   */
+  private applyEntityUpdate(update: EntityUpdate): void {
+    let entity = this.entities.get(update.entity_id);
+    if (!entity) {
+      entity = this.createInterpolatedEntity({ ...update, tags: [] });
+      this.entities.set(entity.entityId, entity);
+      this.entityChangeHandler?.('added', entity);
+    }
+
+    entity.entityType = update.entity_type;
+
+    if (entity.targetX !== update.position.x || entity.targetY !== update.position.y) {
+      entity.targetX = update.position.x;
+      entity.targetY = update.position.y;
+      entity.startX = entity.currentX;
+      entity.startY = entity.currentY;
+    }
+
+    const previousHealth = entity.health;
+    if (update.max_health !== undefined) entity.maxHealth = update.max_health;
+    if (update.health !== undefined) entity.health = update.health;
+    if (update.max_hunger !== undefined) entity.maxHunger = update.max_hunger;
+    if (update.hunger !== undefined) entity.hunger = update.hunger;
+    if (update.wielded !== undefined) entity.wielded = update.wielded;
+    if (update.alive !== undefined) entity.alive = update.alive;
+    if (update.inventory !== undefined) entity.inventory = { ...update.inventory };
+
+    this.entityStatsHandler?.(entity, entity.health - previousHealth);
+  }
+
+  private appendLog(entityId: string, entry: EntityLogEntry): void {
+    let log = this.entityLogs.get(entityId);
+    if (!log) {
+      log = [];
+      this.entityLogs.set(entityId, log);
+    }
+    log.push(entry);
+    if (log.length > ENTITY_LOG_SIZE) {
+      log.splice(0, log.length - ENTITY_LOG_SIZE);
+    }
   }
 
   /**
    * Handle new entity spawn
    */
   private handleEntitySpawned(msg: EntitySpawnedMessage): void {
+    const existing = this.entities.get(msg.entity.entity_id);
+    if (existing) {
+      // Respawn of a known entity: reset its stats and position in place.
+      this.entities.delete(existing.entityId);
+      this.entityChangeHandler?.('removed', existing);
+    }
     const entity = this.createInterpolatedEntity(msg.entity);
     this.entities.set(entity.entityId, entity);
     this.entityChangeHandler?.('added', entity);
+    this.stateUpdateHandler?.();
   }
 
   /**
@@ -353,6 +561,17 @@ export class WorldState {
       this.entities.delete(msg.entity_id);
       this.entityChangeHandler?.('removed', entity);
     }
+    this.entityLogs.delete(msg.entity_id);
+    this.agentStatuses.delete(msg.entity_id);
+    if (this.selectedEntityId === msg.entity_id) {
+      this.setSelectedEntity('');
+    }
+    this.stateUpdateHandler?.();
+  }
+
+  private handleAgentStatus(msg: AgentStatusMessage): void {
+    this.agentStatuses.set(msg.entity_id, msg);
+    this.stateUpdateHandler?.();
   }
 
   /**
@@ -377,16 +596,25 @@ export class WorldState {
    * Create an interpolated entity from server state
    */
   private createInterpolatedEntity(state: EntityState): InterpolatedEntity {
+    const maxHealth = state.max_health ?? DEFAULT_MAX_HEALTH;
+    const maxHunger = state.max_hunger ?? DEFAULT_MAX_HUNGER;
     return {
       entityId: state.entity_id,
       entityType: state.entity_type,
-      tags: state.tags,
+      tags: state.tags ?? [],
       currentX: state.position.x,
       currentY: state.position.y,
       targetX: state.position.x,
       targetY: state.position.y,
       startX: state.position.x,
       startY: state.position.y,
+      health: state.health ?? maxHealth,
+      maxHealth,
+      hunger: state.hunger ?? maxHunger,
+      maxHunger,
+      wielded: state.wielded ?? '',
+      alive: state.alive ?? true,
+      inventory: { ...(state.inventory ?? {}) },
     };
   }
 

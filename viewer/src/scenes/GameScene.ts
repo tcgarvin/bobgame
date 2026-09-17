@@ -1,9 +1,15 @@
 import Phaser from 'phaser';
 import { WebSocketClient, WorldState } from '../network';
-import type { ConnectionState, InterpolatedEntity, TrackedObject } from '../network';
+import type {
+  ConnectionState,
+  InterpolatedEntity,
+  TrackedObject,
+  UtteranceEvent,
+} from '../network';
 import type { SpriteIndex } from '../sprites';
 import { getSpriteFrame } from '../sprites';
 import { ChunkManager, ViewportTracker } from '../terrain';
+import { OverlayUI } from '../ui';
 
 const TILE_SIZE = 16;
 const SCALE = 3; // Scale up for visibility (16 * 3 = 48px per tile)
@@ -11,12 +17,44 @@ const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 3;
 const ZOOM_STEP = 0.1;
 
+const PLAYER_TYPE = 'player';
+const WOLF_TYPE = 'wolf';
+const WOLF_SPRITE = 'wolf';
+
+/** Sprite keys available for actors, used by name and by the hash fallback. */
+const ACTOR_SPRITES = [
+  'actor-1',
+  'actor-2',
+  'actor-3',
+  'actor-4',
+  'actor-5',
+  'actor-6',
+  'actor-7',
+  'actor-8',
+  'actor-9',
+  'actor-10',
+  'actor-11',
+  'actor-12',
+];
+
 // Actor sprite assignments for entities
 const ENTITY_SPRITE_MAP: Record<string, string> = {
   alice: 'actor-1',
   bob: 'actor-5',
+  // The twelve settlers.
+  ada: 'actor-1',
+  bram: 'actor-2',
+  cleo: 'actor-3',
+  dov: 'actor-4',
+  esme: 'actor-5',
+  finn: 'actor-6',
+  greta: 'actor-7',
+  hale: 'actor-8',
+  iris: 'actor-9',
+  jory: 'actor-10',
+  kai: 'actor-11',
+  lena: 'actor-12',
 };
-const DEFAULT_ACTOR_SPRITE = 'actor-1';
 
 /**
  * Object type to sprite key mapping.
@@ -24,16 +62,38 @@ const DEFAULT_ACTOR_SPRITE = 'actor-1';
  */
 const OBJECT_SPRITE_MAP: Record<string, string> = {
   tree: 'oak-tree',
-  // Rocks not yet defined in TSX - add keys when sprites are identified
-  // rock_small: 'rock-small',
-  // rock_medium: 'rock-medium',
-  // rock_large: 'rock-large',
-  // boulder: 'boulder',
+  rock_small: 'rock-small',
+  rock_medium: 'rock-medium',
+  rock_large: 'rock-large',
+  boulder: 'boulder',
+  chest: 'chest-closed',
+  message_board: 'message-board',
+  item_pile: 'item-pile',
 };
 
 // Bush sprites are special - they have state-dependent sprites
 const BUSH_SPRITE_FULL = 'berry-bush-full';
 const BUSH_SPRITE_EMPTY = 'berry-bush-empty';
+
+const BAR_WIDTH = TILE_SIZE * SCALE - 8;
+const HEALTH_BAR_HEIGHT = 4;
+const HUNGER_BAR_HEIGHT = 2;
+const SPEECH_BUBBLE_MS = 3000;
+const DAMAGE_FLASH_MS = 350;
+
+/** Deterministic fallback sprite for entity ids we have no mapping for. */
+function hashToActorSprite(entityId: string): string {
+  let hash = 0;
+  for (let i = 0; i < entityId.length; i++) {
+    hash = (hash * 31 + entityId.charCodeAt(i)) >>> 0;
+  }
+  return ACTOR_SPRITES[hash % ACTOR_SPRITES.length];
+}
+
+function spriteKeyForEntity(entity: InterpolatedEntity): string {
+  if (entity.entityType === WOLF_TYPE) return WOLF_SPRITE;
+  return ENTITY_SPRITE_MAP[entity.entityId] ?? hashToActorSprite(entity.entityId);
+}
 
 export class GameScene extends Phaser.Scene {
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -50,7 +110,10 @@ export class GameScene extends Phaser.Scene {
   private worldState: WorldState = new WorldState();
   private entitySprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private objectSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
+  private speechBubbles: Map<string, Phaser.GameObjects.Text> = new Map();
+  private damageFlashUntil: Map<string, number> = new Map();
   private connectionText?: Phaser.GameObjects.Text;
+  private statusBars?: Phaser.GameObjects.Graphics;
 
   // Chunk-based terrain
   private chunkManager?: ChunkManager;
@@ -61,6 +124,9 @@ export class GameScene extends Phaser.Scene {
   private cameraFollowing: boolean = true;
   private followTarget?: Phaser.GameObjects.Sprite;
   private positionText?: Phaser.GameObjects.Text;
+
+  // HTML overlay
+  private overlay?: OverlayUI;
 
   constructor() {
     super({ key: 'GameScene' });
@@ -82,11 +148,16 @@ export class GameScene extends Phaser.Scene {
 
     // Display instructions and connection status
     this.add
-      .text(10, 10, 'Arrow keys/WASD: pan | Scroll: zoom | F: toggle follow | 1-5: jump to location', {
-        fontFamily: 'monospace',
-        fontSize: '12px',
-        color: '#ffffff',
-      })
+      .text(
+        10,
+        10,
+        'Arrows/WASD: pan | Scroll: zoom | F: follow | P: panel | 0: settlement | 1-5: jump',
+        {
+          fontFamily: 'monospace',
+          fontSize: '12px',
+          color: '#ffffff',
+        }
+      )
       .setScrollFactor(0)
       .setDepth(100);
 
@@ -108,11 +179,41 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(100);
 
+    // Graphics layer for health/hunger bars and the selection ring
+    this.statusBars = this.add.graphics();
+    this.statusBars.setDepth(15);
+
     // Setup camera dev tools
     this.setupCameraControls();
 
+    // HTML overlay (entity picker + agent panel)
+    this.setupOverlay();
+
     // Setup network
     this.setupNetwork();
+  }
+
+  private setupOverlay(): void {
+    this.overlay = new OverlayUI(this.worldState, {
+      onSelectEntity: (entityId) => this.selectEntity(entityId),
+    });
+    this.overlay.setFollowing(this.cameraFollowing);
+    this.overlay.refresh();
+  }
+
+  /**
+   * Select an entity: updates the panel, makes it the follow target and
+   * starts camera follow.
+   */
+  private selectEntity(entityId: string): void {
+    this.worldState.setSelectedEntity(entityId);
+
+    const sprite = entityId ? this.entitySprites.get(entityId) : undefined;
+    if (sprite) {
+      this.followTarget = sprite;
+      this.toggleCameraFollow(true);
+    }
+    this.overlay?.refresh();
   }
 
   private setupNetwork(): void {
@@ -124,6 +225,20 @@ export class GameScene extends Phaser.Scene {
         this.removeEntitySprite(entity.entityId);
       }
     });
+
+    // Flash entities red when they lose health
+    this.worldState.onEntityStats((entity, healthDelta) => {
+      if (healthDelta < 0) {
+        this.damageFlashUntil.set(entity.entityId, this.time.now + DAMAGE_FLASH_MS);
+        this.entitySprites.get(entity.entityId)?.setTint(0xff4444);
+      }
+    });
+
+    // Speech bubbles for local utterances
+    this.worldState.onUtterance((utterance) => this.showSpeechBubble(utterance));
+
+    // Keep the HTML overlay in sync
+    this.worldState.onStateUpdate(() => this.overlay?.refresh());
 
     // Handle object changes
     this.worldState.onObjectChange((action, obj) => {
@@ -184,8 +299,16 @@ export class GameScene extends Phaser.Scene {
     const worldHeight = worldSize.height * TILE_SIZE * SCALE;
     this.cameras.main.setBounds(0, 0, worldWidth, worldHeight);
 
-    // Center camera on world (entities are typically near center)
-    this.cameras.main.centerOn(worldWidth / 2, worldHeight / 2);
+    // Center on the settlement when the server knows one, else on the world
+    const settlement = this.worldState.getSettlement();
+    if (settlement) {
+      this.cameras.main.centerOn(
+        settlement.x * TILE_SIZE * SCALE,
+        settlement.y * TILE_SIZE * SCALE
+      );
+    } else {
+      this.cameras.main.centerOn(worldWidth / 2, worldHeight / 2);
+    }
 
     // Initialize viewport tracker for chunk subscriptions
     this.viewportTracker = new ViewportTracker(this, chunkSize, (chunks) => {
@@ -225,8 +348,7 @@ export class GameScene extends Phaser.Scene {
     const posX = entity.currentX * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
     const posY = entity.currentY * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
 
-    // Get sprite key for this entity (use entity ID to look up, or default)
-    const spriteKey = ENTITY_SPRITE_MAP[entity.entityId] || DEFAULT_ACTOR_SPRITE;
+    const spriteKey = spriteKeyForEntity(entity);
     const spriteData = this.spriteIndex ? getSpriteFrame(this.spriteIndex, spriteKey) : null;
 
     if (!spriteData) {
@@ -237,6 +359,7 @@ export class GameScene extends Phaser.Scene {
     const sprite = this.add.sprite(posX, posY, spriteData.textureKey, spriteData.frame);
     sprite.setScale(SCALE);
     sprite.setDepth(10); // Above tiles
+    sprite.setVisible(entity.alive);
 
     // Play idle animation if available
     const animKey = `${spriteKey}-idle`;
@@ -244,13 +367,25 @@ export class GameScene extends Phaser.Scene {
       sprite.play(animKey);
     }
 
+    // Clicking a sprite selects that entity
+    sprite.setInteractive({ useHandCursor: true });
+    sprite.on('pointerdown', () => this.selectEntity(entity.entityId));
+
     this.entitySprites.set(entity.entityId, sprite);
     console.log(
       `Created sprite for entity ${entity.entityId} (${spriteKey}) at (${entity.currentX}, ${entity.currentY})`
     );
 
     // If this is the first entity, set it as follow target
-    if (this.entitySprites.size === 1) {
+    if (!this.followTarget) {
+      this.followTarget = sprite;
+      if (this.cameraFollowing) {
+        this.cameras.main.startFollow(sprite, true, 0.1, 0.1);
+      }
+    }
+
+    // Re-attach the camera if this sprite belongs to the selected entity
+    if (this.worldState.getSelectedEntityId() === entity.entityId) {
       this.followTarget = sprite;
       if (this.cameraFollowing) {
         this.cameras.main.startFollow(sprite, true, 0.1, 0.1);
@@ -261,28 +396,54 @@ export class GameScene extends Phaser.Scene {
   private removeEntitySprite(entityId: string): void {
     const sprite = this.entitySprites.get(entityId);
     if (sprite) {
+      if (this.followTarget === sprite) {
+        this.cameras.main.stopFollow();
+        this.followTarget = undefined;
+      }
       sprite.destroy();
       this.entitySprites.delete(entityId);
       console.log(`Removed sprite for entity ${entityId}`);
     }
+    this.speechBubbles.get(entityId)?.destroy();
+    this.speechBubbles.delete(entityId);
+    this.damageFlashUntil.delete(entityId);
+  }
+
+  /** Show a `local` utterance above the speaker for a few seconds. */
+  private showSpeechBubble(utterance: UtteranceEvent): void {
+    if (utterance.channel !== 'local') return;
+
+    const existing = this.speechBubbles.get(utterance.speaker_id);
+    if (existing) {
+      existing.destroy();
+    }
+
+    const text = this.add.text(0, 0, utterance.text, {
+      fontFamily: 'monospace',
+      fontSize: '12px',
+      color: '#ffffff',
+      backgroundColor: '#000000cc',
+      padding: { x: 4, y: 2 },
+      wordWrap: { width: 180 },
+      align: 'center',
+    });
+    text.setOrigin(0.5, 1);
+    text.setDepth(30);
+
+    this.speechBubbles.set(utterance.speaker_id, text);
+    this.time.delayedCall(SPEECH_BUBBLE_MS, () => {
+      if (this.speechBubbles.get(utterance.speaker_id) === text) {
+        this.speechBubbles.delete(utterance.speaker_id);
+      }
+      text.destroy();
+    });
   }
 
   private createObjectSprite(obj: TrackedObject): void {
     const posX = obj.position.x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
     const posY = obj.position.y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
 
-    // Determine sprite key based on object type
-    let spriteKey: string | null = null;
-
-    if (obj.objectType === 'bush') {
-      // Bushes have state-dependent sprites
-      const hasBerry = obj.state.berry_count === '1';
-      spriteKey = hasBerry ? BUSH_SPRITE_FULL : BUSH_SPRITE_EMPTY;
-    } else {
-      // Look up sprite key from object type mapping
-      spriteKey = OBJECT_SPRITE_MAP[obj.objectType] ?? null;
-    }
-
+    const spriteKey = this.objectSpriteKey(obj);
     if (!spriteKey) {
       console.warn(`No sprite mapping for object type: ${obj.objectType}`);
       return;
@@ -295,14 +456,29 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    const existing = this.objectSprites.get(obj.objectId);
+    if (existing) {
+      existing.destroy();
+    }
+
     const sprite = this.add.sprite(posX, posY, spriteData.textureKey, spriteData.frame);
     sprite.setScale(SCALE);
     sprite.setDepth(5); // Between tiles and entities
 
+    const animKey = `${spriteKey}-idle`;
+    if (this.anims.exists(animKey)) {
+      sprite.play(animKey);
+    }
+
     this.objectSprites.set(obj.objectId, sprite);
-    console.log(
-      `Created ${obj.objectType} ${obj.objectId} at (${obj.position.x}, ${obj.position.y})`
-    );
+  }
+
+  private objectSpriteKey(obj: TrackedObject): string | null {
+    if (obj.objectType === 'bush') {
+      // Bushes have state-dependent sprites
+      return obj.state.berry_count === '1' ? BUSH_SPRITE_FULL : BUSH_SPRITE_EMPTY;
+    }
+    return OBJECT_SPRITE_MAP[obj.objectType] ?? null;
   }
 
   private removeObjectSprite(objectId: string): void {
@@ -310,25 +486,24 @@ export class GameScene extends Phaser.Scene {
     if (sprite) {
       sprite.destroy();
       this.objectSprites.delete(objectId);
-      console.log(`Removed object ${objectId}`);
     }
   }
 
   private updateObjectSprite(obj: TrackedObject): void {
     const sprite = this.objectSprites.get(obj.objectId);
-    if (!sprite || !this.spriteIndex) return;
-
-    // Only bushes have state-dependent sprite changes currently
-    if (obj.objectType === 'bush') {
-      const hasBerry = obj.state.berry_count === '1';
-      const spriteKey = hasBerry ? BUSH_SPRITE_FULL : BUSH_SPRITE_EMPTY;
-      const spriteData = getSpriteFrame(this.spriteIndex, spriteKey);
-
-      if (spriteData) {
-        sprite.setTexture(spriteData.textureKey, spriteData.frame);
-      }
+    if (!sprite || !this.spriteIndex) {
+      // The object may have been added by tick_completed before we saw it.
+      this.createObjectSprite(obj);
+      return;
     }
-    // Trees and rocks don't have state-dependent sprites (yet)
+
+    const spriteKey = this.objectSpriteKey(obj);
+    if (!spriteKey) return;
+
+    const spriteData = getSpriteFrame(this.spriteIndex, spriteKey);
+    if (spriteData) {
+      sprite.setTexture(spriteData.textureKey, spriteData.frame);
+    }
   }
 
   private setupKeyboardControls(): void {
@@ -354,8 +529,14 @@ export class GameScene extends Phaser.Scene {
       this.toggleCameraFollow();
     });
 
+    // P key toggles the agent panel
+    this.input.keyboard.on('keydown-P', () => {
+      this.overlay?.togglePanel();
+    });
+
     // Number keys for quick navigation
-    // 1: Top-left, 2: Top-right, 3: Bottom-left, 4: Bottom-right, 5: Center
+    // 0: settlement, 1: Top-left, 2: Top-right, 3: Bottom-left, 4: Bottom-right, 5: Center
+    this.input.keyboard.on('keydown-ZERO', () => this.jumpToSettlement());
     this.input.keyboard.on('keydown-ONE', () => this.jumpToCorner('top-left'));
     this.input.keyboard.on('keydown-TWO', () => this.jumpToCorner('top-right'));
     this.input.keyboard.on('keydown-THREE', () => this.jumpToCorner('bottom-left'));
@@ -367,6 +548,8 @@ export class GameScene extends Phaser.Scene {
       goto: (tileX: number, tileY: number) => this.gotoTile(tileX, tileY),
       follow: () => this.toggleCameraFollow(true),
       free: () => this.toggleCameraFollow(false),
+      select: (entityId: string) => this.selectEntity(entityId),
+      settlement: () => this.jumpToSettlement(),
       zoom: (level: number) => {
         this.cameras.main.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, level));
       },
@@ -389,11 +572,19 @@ export class GameScene extends Phaser.Scene {
 
     if (this.cameraFollowing && this.followTarget) {
       this.cameras.main.startFollow(this.followTarget, true, 0.1, 0.1);
-      console.log('Camera: following entity');
     } else {
       this.cameras.main.stopFollow();
-      console.log('Camera: free mode');
     }
+    this.overlay?.setFollowing(this.cameraFollowing);
+  }
+
+  private jumpToSettlement(): void {
+    const settlement = this.worldState.getSettlement();
+    if (!settlement) {
+      console.warn('No settlement position known for this world');
+      return;
+    }
+    this.gotoTile(settlement.x, settlement.y);
   }
 
   private jumpToCorner(corner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'center'): void {
@@ -465,12 +656,35 @@ export class GameScene extends Phaser.Scene {
     // Update world state interpolation
     this.worldState.update(delta);
 
+    const selectedId = this.worldState.getSelectedEntityId();
+    this.statusBars?.clear();
+
     // Update entity sprite positions from interpolated state
     for (const entity of this.worldState.getEntities()) {
       const sprite = this.entitySprites.get(entity.entityId);
-      if (sprite) {
-        sprite.x = entity.currentX * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
-        sprite.y = entity.currentY * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+      if (!sprite) continue;
+
+      const x = entity.currentX * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+      const y = entity.currentY * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+      sprite.x = x;
+      sprite.y = y;
+      sprite.setVisible(entity.alive);
+
+      // Clear the damage flash once it has run its course
+      const flashUntil = this.damageFlashUntil.get(entity.entityId);
+      if (flashUntil !== undefined && this.time.now >= flashUntil) {
+        this.damageFlashUntil.delete(entity.entityId);
+        sprite.clearTint();
+      }
+
+      const bubble = this.speechBubbles.get(entity.entityId);
+      if (bubble) {
+        bubble.x = x;
+        bubble.y = y - (TILE_SIZE * SCALE) / 2 - 14;
+      }
+
+      if (entity.alive) {
+        this.drawEntityBars(entity, x, y, entity.entityId === selectedId);
       }
     }
 
@@ -521,6 +735,47 @@ export class GameScene extends Phaser.Scene {
       if (this.wasdKeys.S.isDown) {
         this.cameras.main.scrollY += camSpeed;
       }
+    }
+  }
+
+  /**
+   * Draw the health bar (and, for players, the thin hunger bar) above an
+   * entity, plus a selection outline for the currently selected one.
+   */
+  private drawEntityBars(
+    entity: InterpolatedEntity,
+    x: number,
+    y: number,
+    selected: boolean
+  ): void {
+    const g = this.statusBars;
+    if (!g) return;
+
+    const left = x - BAR_WIDTH / 2;
+    const top = y - (TILE_SIZE * SCALE) / 2 - HEALTH_BAR_HEIGHT - 3;
+
+    const healthRatio =
+      entity.maxHealth > 0 ? Math.max(0, Math.min(1, entity.health / entity.maxHealth)) : 0;
+
+    g.fillStyle(0x7a1f1f, 1);
+    g.fillRect(left, top, BAR_WIDTH, HEALTH_BAR_HEIGHT);
+    g.fillStyle(0x3fbf5f, 1);
+    g.fillRect(left, top, BAR_WIDTH * healthRatio, HEALTH_BAR_HEIGHT);
+
+    if (entity.entityType === PLAYER_TYPE) {
+      const hungerRatio =
+        entity.maxHunger > 0 ? Math.max(0, Math.min(1, entity.hunger / entity.maxHunger)) : 0;
+      const hungerTop = top + HEALTH_BAR_HEIGHT + 1;
+      g.fillStyle(0x3a2a14, 1);
+      g.fillRect(left, hungerTop, BAR_WIDTH, HUNGER_BAR_HEIGHT);
+      g.fillStyle(0xe0913a, 1);
+      g.fillRect(left, hungerTop, BAR_WIDTH * hungerRatio, HUNGER_BAR_HEIGHT);
+    }
+
+    if (selected) {
+      const size = TILE_SIZE * SCALE;
+      g.lineStyle(2, 0xffe066, 1);
+      g.strokeRect(x - size / 2, y - size / 2, size, size);
     }
   }
 

@@ -16,7 +16,9 @@ def chunk_coords(x: int, y: int) -> tuple[int, int]:
     return (x // CHUNK_SIZE, y // CHUNK_SIZE)
 
 
-def world_coords(chunk_x: int, chunk_y: int, local_x: int, local_y: int) -> tuple[int, int]:
+def world_coords(
+    chunk_x: int, chunk_y: int, local_x: int, local_y: int
+) -> tuple[int, int]:
     """Convert chunk + local offset to world coordinates."""
     return (chunk_x * CHUNK_SIZE + local_x, chunk_y * CHUNK_SIZE + local_y)
 
@@ -173,6 +175,26 @@ class ChunkManager:
         chunk.entities.add(entity_id)
         chunk.increment_version()
         return (cx, cy)
+
+    def sync_entity_position(
+        self, entity_id: str, position: Position
+    ) -> tuple[int, int]:
+        """Re-index an entity at a known position (teleports, respawns).
+
+        Unlike update_entity_position this does not need the old position: the
+        entity is removed from whichever chunk currently tracks it.
+
+        Returns:
+            Chunk coordinates where the entity now lives.
+        """
+        old_chunk_key = self._entity_chunks.get(entity_id)
+        cx, cy = chunk_coords(position.x, position.y)
+        if old_chunk_key is not None and old_chunk_key != (cx, cy):
+            old_chunk = self._chunks.get(old_chunk_key)
+            if old_chunk:
+                old_chunk.entities.discard(entity_id)
+                old_chunk.increment_version()
+        return self.add_entity(entity_id, position)
 
     def remove_entity(self, entity_id: str) -> tuple[int, int] | None:
         """Remove entity from chunk tracking.

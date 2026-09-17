@@ -362,3 +362,102 @@ observation and viewer services: `move_results`, `action_results`
 ## Deviations
 
 (Tracks append here.)
+
+### Viewer
+
+- **Sprite keys / TSX files.** Added `Items/Rock.tsx`, `Items/ShortWep.tsx` and
+  `Characters/Dog.tsx`; extended `Objects/Chest.tsx` and `Objects/Decor.tsx`.
+  Keys and frames: `chest-closed` (Items/Chest0 #0, 2-frame with Chest1),
+  `item-pile` (Items/Chest0 #16 sack, 2-frame), `message-board`
+  (Objects/Decor0 #41, a notice board on a post), `rock-small` /
+  `rock-medium` / `rock-large` / `boulder` (Items/Rock #9 / #2 / #8 / #10 —
+  a size progression), `wolf` (Characters/Dog0 #32, grey wolf, 2-frame with
+  Dog1), `sword` / `axe` / `pickaxe` (Items/ShortWep #8 / #24 / #26). The
+  rock sprites come from the Items sheet rather than an Objects sheet because
+  DawnLike's Objects sheets have no free-standing rocks, only ore veins and
+  hills.
+- **`agent_status.stint`.** The panel reads the top-probability list from
+  `stint.top`, `stint.top_probabilities` or `stint.probabilities`, accepting
+  either a list of `{option, probability}` or an object of
+  `option -> probability`. `AgentStint` has an index signature, so extra
+  fields the agent track adds are ignored rather than rejected.
+- **Tolerance for old servers.** Every field added to `snapshot` and
+  `tick_completed` is optional in `viewer/src/network/types.ts`; stats default
+  to full health / full hunger / alive until the server reports them.
+- **Entity creation from `entity_updates`.** An `entity_updates` entry for an
+  unknown entity creates it, so wolves and respawns still appear if an
+  `entity_spawned` message is missed.
+- **Sprite assignment.** `ENTITY_SPRITE_MAP` maps the twelve settler ids to
+  `actor-1`..`actor-12`; unknown ids hash deterministically into the same
+  twelve. `alice`/`bob` keep their previous sprites.
+- **Keys.** `P` toggles the agent panel, `0` jumps to the settlement (a no-op
+  with a console warning when the snapshot carried no `settlement`). The
+  camera also centres on the settlement on first connect when one is known.
+- The picker is blurred after a selection so the arrow keys keep panning
+  the camera rather than cycling the dropdown.
+
+### World services track
+
+- `settlement.py` reads `World._floor_array` directly (via a `floor_array_of`
+  helper) because `World` exposes no public accessor for the terrain array and
+  per-tile `get_tile` calls are far too slow on 4000x4000. Small worlds without
+  a floor array are rebuilt tile by tile. If `state.py` ever grows a public
+  accessor, `floor_array_of` should use it.
+- `settlement.py` defines its own `BLOCKING_OBJECT_TYPES`
+  (`tree`, `rock_*`, `boulder`) for spawn-tile selection, and its own
+  `nearest_free_walkable` / `is_free_walkable`, rather than a
+  `World.find_free_tile_near` helper on `state.py` (owned by the mechanics
+  track). If the mechanics track adds such a helper, `settlement.py` should
+  delegate to it. Respawn placement should call
+  `settlement.nearest_free_walkable(world, world.settlement)`.
+- The site search is exact at the chosen tile but the first-pass filter is a
+  coarse 16-tile grid of candidate centres with integral images: a candidate
+  centre is the grass/dirt tile nearest each cell centre, and only the best 400
+  candidates are re-counted exactly. On `saves/island.npz` this takes ~0.8 s.
+- `TickLoop` has no wolves flag yet, so `run_server` sets
+  `tick_loop.wolves_enabled` with `setattr`. The mechanics track should turn
+  this into a real field on `TickConfig` or `TickLoop` and `server.py` will
+  pass it properly.
+- `observation_service` sets the new `Entity` stat fields on the proto after
+  `conversion.entity_to_proto`, in case the mechanics track has not mapped them
+  yet. That local `_entity_proto` helper can be deleted once `conversion.py`
+  carries health/hunger/wielded/alive.
+- `TickResult.object_changes` (the existing foraging change list) is also
+  replayed into observations as `ObjectChanged` events for objects currently
+  within view radius.
+- `EntityDied` does not remove the entity from the viewer chunk index; the
+  viewer learns about death from `entity_updates` (`alive: false`).
+  `EntityRespawned` re-indexes the entity and emits `entity_spawned`.
+- `WorldServer.add_entity` now also registers the entity with the chunk
+  manager; previously entities added after construction only appeared to
+  viewers after their first move.
+
+### World mechanics track
+
+- `TickContext` moved to `world/src/world/tick_context.py` so `wolves.py` can
+  submit intents without importing `tick.py`. `world.tick.TickContext` still
+  works (re-exported) and remains the canonical import path.
+- `TickContext.submit_intent(entity_id, intent, enforce_deadline=True)` takes a
+  third argument; the wolf simulation passes `enforce_deadline=False` because
+  it runs after the deadline, inside tick processing.
+- `TickContext.world` is optional. Without it the `dead` rejection cannot be
+  evaluated and is skipped; the tick loop always supplies it.
+- The wolf step (despawn, spawn, intent submission) all happens at the start of
+  `_process_tick` rather than spawning during the phase-12 bookkeeping. A wolf
+  spawned this tick therefore acts from the next tick on.
+- Trees and rocks do not block movement today (nothing in terrain generation or
+  config marks their tiles unwalkable), so extraction removing an object does
+  not need to restore walkability. `settlement.is_free_walkable` still treats
+  them as blocking for spawn/respawn placement, and the wolf simulation uses
+  the same helper when choosing tiles.
+- Respawn emits a `RespawnEvent` only; the viewer's `entity_spawned` is derived
+  from `TickResult.respawns` by the services track. `entities_spawned` /
+  `entities_despawned` carry wolves.
+- `pickup` and `withdraw` take as much as is available (up to the requested
+  amount) instead of failing on a partial amount; they only fail when nothing
+  of that kind is there. Dropping or depositing the last copy of a wielded item
+  unequips it.
+- Eating an item with no food value fails with `not_edible`; only `berry` is
+  edible (20 hunger per unit).
+- `run_ticks()` accepts an optional `wolf_simulator`; `TickLoop` has
+  `wolves_enabled: bool = False` plus `wolf_seed: int = 1337`.

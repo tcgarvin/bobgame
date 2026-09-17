@@ -1,12 +1,24 @@
-"""Foraging action processing (collect, eat, regeneration)."""
+"""Foraging action processing (collect, eat, extract, regeneration)."""
 
 from dataclasses import dataclass
+from typing import Mapping
 
 import structlog
 
+from .events import ObjectChange, ObjectRemovedEvent, TickEvents
 from .exceptions import EntityNotFoundError, ObjectNotFoundError
+from .items import (
+    EXTRACT_THRESHOLD,
+    EXTRACT_TOOL,
+    EXTRACT_WORK_BARE,
+    EXTRACT_WORK_WITH_TOOL,
+    EXTRACT_YIELD,
+    EXTRACTABLE_TYPES,
+    default_remaining,
+)
 from .state import World
-from .types import CollectIntent, EatIntent
+from .stats import hunger_restored
+from .types import CollectIntent, EatIntent, ExtractIntent, is_same_or_adjacent
 
 logger = structlog.get_logger()
 
@@ -35,16 +47,6 @@ class EatResult:
     item_type: str | None = None
     amount: int = 0
     failure_reason: str | None = None
-
-
-@dataclass
-class ObjectChange:
-    """Record of an object state change."""
-
-    object_id: str
-    field: str
-    old_value: str
-    new_value: str
 
 
 def process_collect_phase(
@@ -145,7 +147,7 @@ def process_collect_phase(
             # Update entity inventory
             entity = world.get_entity(intent.entity_id)
             new_inventory = entity.inventory.add("berry", 1)
-            world._entities[intent.entity_id] = entity.with_inventory(new_inventory)
+            world.set_entity(entity.with_inventory(new_inventory))
 
             results.append(
                 CollectResult(
@@ -180,12 +182,13 @@ def process_collect_phase(
 
 def process_eat_phase(
     world: World,
-    intents: dict[str, EatIntent],
+    intents: Mapping[str, EatIntent],
 ) -> list[EatResult]:
-    """Process eat intents for a tick."""
+    """Process eat intents for a tick, restoring hunger."""
     results: list[EatResult] = []
 
-    for entity_id, intent in intents.items():
+    for entity_id in sorted(intents):
+        intent = intents[entity_id]
         try:
             entity = world.get_entity(entity_id)
         except EntityNotFoundError:
@@ -195,6 +198,29 @@ def process_eat_phase(
                     success=False,
                     item_type=intent.item_type,
                     failure_reason="entity_not_found",
+                )
+            )
+            continue
+
+        if intent.amount < 1:
+            results.append(
+                EatResult(
+                    entity_id=entity_id,
+                    success=False,
+                    item_type=intent.item_type,
+                    failure_reason="invalid_amount",
+                )
+            )
+            continue
+
+        restored = hunger_restored(intent.item_type, intent.amount)
+        if restored <= 0:
+            results.append(
+                EatResult(
+                    entity_id=entity_id,
+                    success=False,
+                    item_type=intent.item_type,
+                    failure_reason="not_edible",
                 )
             )
             continue
@@ -210,9 +236,15 @@ def process_eat_phase(
             )
             continue
 
-        # Remove from inventory
-        new_inventory = entity.inventory.remove(intent.item_type, intent.amount)
-        world._entities[entity_id] = entity.with_inventory(new_inventory)
+        updated = entity.with_inventory(
+            entity.inventory.remove(intent.item_type, intent.amount)
+        )
+        updated = updated.with_hunger(updated.hunger + restored)
+        if updated.wielded == intent.item_type and not updated.inventory.has(
+            intent.item_type
+        ):
+            updated = updated.with_wielded("")
+        world.set_entity(updated)
 
         results.append(
             EatResult(
@@ -228,9 +260,128 @@ def process_eat_phase(
             entity_id=entity_id,
             item_type=intent.item_type,
             amount=intent.amount,
+            hunger=updated.hunger,
         )
 
     return results
+
+
+def object_remaining(obj_type: str, raw_remaining: str) -> int:
+    """Units left in an extractable object, defaulting lazily by type."""
+    if raw_remaining == "":
+        return default_remaining(obj_type)
+    try:
+        return int(raw_remaining)
+    except ValueError:
+        return default_remaining(obj_type)
+
+
+def extract_work(wielded: str, object_type: str) -> int:
+    """Work units one extract action contributes."""
+    if wielded and wielded == EXTRACT_TOOL.get(object_type, ""):
+        return EXTRACT_WORK_WITH_TOOL
+    return EXTRACT_WORK_BARE
+
+
+def process_extract_phase(
+    world: World,
+    intents: Mapping[str, ExtractIntent],
+    events: TickEvents,
+) -> None:
+    """Chop trees and mine rocks.
+
+    Several entities may work the same object in one tick; work is applied in
+    lexicographic entity_id order, so that id wins a contested threshold.
+    """
+    by_object: dict[str, list[str]] = {}
+
+    for entity_id in sorted(intents):
+        intent = intents[entity_id]
+        entity = world.get_entity(entity_id)
+        try:
+            obj = world.get_object(intent.object_id)
+        except ObjectNotFoundError:
+            events.acted(entity_id, "extract", False, f"no object {intent.object_id}")
+            continue
+        if obj.object_type not in EXTRACTABLE_TYPES:
+            events.acted(
+                entity_id,
+                "extract",
+                False,
+                f"{obj.object_id} cannot be extracted",
+            )
+            continue
+        if not is_same_or_adjacent(entity.position, obj.position):
+            events.acted(
+                entity_id, "extract", False, f"{obj.object_id} is not adjacent"
+            )
+            continue
+        by_object.setdefault(obj.object_id, []).append(entity_id)
+
+    for object_id in sorted(by_object):
+        obj = world.get_object(object_id)
+        yielded = EXTRACT_YIELD[obj.object_type]
+        old_progress = obj.get_state("progress", "0")
+        old_remaining_raw = obj.get_state("remaining", "")
+        progress = int(old_progress or "0")
+        remaining = object_remaining(obj.object_type, old_remaining_raw)
+
+        for entity_id in sorted(by_object[object_id]):
+            if remaining <= 0:
+                events.acted(entity_id, "extract", False, f"{object_id} is depleted")
+                continue
+            entity = world.get_entity(entity_id)
+            progress += extract_work(entity.wielded, obj.object_type)
+            if progress >= EXTRACT_THRESHOLD:
+                progress -= EXTRACT_THRESHOLD
+                remaining -= 1
+                world.set_entity(
+                    entity.with_inventory(entity.inventory.add(yielded, 1))
+                )
+                events.acted(
+                    entity_id,
+                    "extract",
+                    True,
+                    f"worked {object_id} (+1 {yielded})",
+                )
+            else:
+                events.acted(
+                    entity_id,
+                    "extract",
+                    True,
+                    f"worked {object_id} ({progress}/{EXTRACT_THRESHOLD})",
+                )
+
+        if remaining <= 0:
+            world.remove_object(object_id)
+            events.objects_removed.append(
+                ObjectRemovedEvent(object_id=object_id, position=obj.position)
+            )
+            logger.debug("object_depleted", object_id=object_id)
+            continue
+
+        updated = obj.with_state("progress", str(progress)).with_state(
+            "remaining", str(remaining)
+        )
+        world.update_object(updated)
+        if updated.get_state("progress") != old_progress:
+            events.object_changes.append(
+                ObjectChange(
+                    object_id=object_id,
+                    field="progress",
+                    old_value=old_progress,
+                    new_value=updated.get_state("progress"),
+                )
+            )
+        if updated.get_state("remaining") != old_remaining_raw:
+            events.object_changes.append(
+                ObjectChange(
+                    object_id=object_id,
+                    field="remaining",
+                    old_value=old_remaining_raw,
+                    new_value=updated.get_state("remaining"),
+                )
+            )
 
 
 def process_regeneration(

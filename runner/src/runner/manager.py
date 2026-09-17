@@ -78,6 +78,14 @@ class ProcessManager:
         """
         entity_id = entity.entity_id
 
+        if entity.entity_type not in self.config.runner.entity_types:
+            logger.info(
+                "skipping_entity_type",
+                entity_id=entity_id,
+                entity_type=entity.entity_type,
+            )
+            return False
+
         # Skip if already leased (unless we own it)
         if entity.has_active_lease and entity_id not in self._processes:
             logger.info(

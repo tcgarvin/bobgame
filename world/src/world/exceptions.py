@@ -47,3 +47,15 @@ class ObjectAlreadyExistsError(WorldError):
     """Raised when trying to add an object that already exists."""
 
     pass
+
+
+class InvalidObjectStateError(WorldError):
+    """Raised when an object's state string cannot be parsed."""
+
+    pass
+
+
+class InvalidIntentError(WorldError):
+    """Raised when an intent model is not one the tick context understands."""
+
+    pass

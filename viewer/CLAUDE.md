@@ -69,10 +69,26 @@ Spritesheets are symlinked from `assets/dawnlike-tileset/` to `viewer/public/ass
 4. **GameScene** accesses the sprite index via `registry.get('spriteIndex')`
 
 Key sprite mappings:
-- Entities: `actor-1`, `actor-5`, etc. (assigned per entity ID in `ENTITY_SPRITE_MAP`)
+- Entities: `actor-1`..`actor-12` (assigned per entity ID in `ENTITY_SPRITE_MAP`,
+  with a deterministic hash fallback), `wolf`
 - Floor tiles: `grass-full`
 - Wall tiles: `dirt-full`
 - Bushes: `berry-bush-full`, `berry-bush-empty`
+- Objects: `oak-tree`, `rock-small`, `rock-medium`, `rock-large`, `boulder`,
+  `chest-closed`, `message-board`, `item-pile`
+- Item icons: `axe`, `pickaxe`, `sword`
+
+## HTML Overlay UI
+
+The entity picker and agent panel are plain DOM, not Phaser: the markup and
+styles live in `index.html` and `src/ui/OverlayUI.ts` wires them to
+`WorldState`. `GameScene` owns the keys (`F` follow, `P` panel, `0`
+settlement) and the camera; `OverlayUI` never touches Phaser.
+
+`WorldState` is the single source of truth for the overlay: per-entity stats,
+the 10-entry action/utterance ring buffer, the latest `agent_status`, the
+settlement position and the selection. It calls `onStateUpdate` after any
+message that changes what the overlay shows.
 
 ## Network Integration
 

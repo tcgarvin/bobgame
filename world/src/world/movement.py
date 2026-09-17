@@ -257,11 +257,7 @@ class MovementResolver:
         removing A's new position entry.
         """
         # Collect successful moves with their from/to positions
-        moves = [
-            (r.entity_id, r.from_pos, r.to_pos)
-            for r in results
-            if r.success
-        ]
+        moves = [(r.entity_id, r.from_pos, r.to_pos) for r in results if r.success]
 
         if not moves:
             return

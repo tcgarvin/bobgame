@@ -12,10 +12,39 @@ from websockets.asyncio.server import Server, ServerConnection
 
 from ..chunks import CHUNK_SIZE, ChunkManager
 from ..encoding import encode_terrain_base64
-from ..state import World
+from ..exceptions import EntityNotFoundError, ObjectNotFoundError
+from ..state import Entity, World, WorldObject
 from ..tick import TickConfig, TickContext, TickResult
+from ..types import Position
 
 logger = structlog.get_logger()
+
+
+def _entity_state(entity: Entity) -> dict[str, Any]:
+    """JSON shape for an entity sent to the viewer."""
+    return {
+        "entity_id": entity.entity_id,
+        "position": {"x": entity.position.x, "y": entity.position.y},
+        "entity_type": entity.entity_type,
+        "tags": list(entity.tags),
+        "health": entity.health,
+        "max_health": entity.max_health,
+        "hunger": entity.hunger,
+        "max_hunger": entity.max_hunger,
+        "wielded": entity.wielded,
+        "alive": entity.alive,
+        "inventory": {kind: count for kind, count in entity.inventory.items},
+    }
+
+
+def _object_state(obj: WorldObject) -> dict[str, Any]:
+    """JSON shape for a world object sent to the viewer."""
+    return {
+        "object_id": obj.object_id,
+        "position": {"x": obj.position.x, "y": obj.position.y},
+        "object_type": obj.object_type,
+        "state": dict(obj.state),
+    }
 
 
 @dataclass
@@ -203,40 +232,22 @@ class ViewerWebSocketService:
             removed=len(old_chunks),
         )
 
-    async def _send_chunk_data(
-        self, websocket: ServerConnection, chunk: Any
-    ) -> None:
+    async def _send_chunk_data(self, websocket: ServerConnection, chunk: Any) -> None:
         """Send full chunk data to a client."""
         # Get entities in this chunk
         entities = []
         for entity_id in chunk.entities:
             try:
-                entity = self.world.get_entity(entity_id)
-                entities.append(
-                    {
-                        "entity_id": entity.entity_id,
-                        "position": {"x": entity.position.x, "y": entity.position.y},
-                        "entity_type": entity.entity_type,
-                        "tags": list(entity.tags),
-                    }
-                )
-            except Exception:
+                entities.append(_entity_state(self.world.get_entity(entity_id)))
+            except EntityNotFoundError:
                 pass  # Entity may have been removed
 
         # Get objects in this chunk
         objects = []
         for object_id in chunk.objects:
             try:
-                obj = self.world.get_object(object_id)
-                objects.append(
-                    {
-                        "object_id": obj.object_id,
-                        "position": {"x": obj.position.x, "y": obj.position.y},
-                        "object_type": obj.object_type,
-                        "state": dict(obj.state),
-                    }
-                )
-            except Exception:
+                objects.append(_object_state(self.world.get_object(object_id)))
+            except ObjectNotFoundError:
                 pass  # Object may have been removed
 
         message = {
@@ -299,12 +310,18 @@ class ViewerWebSocketService:
 
     def _generate_snapshot(self) -> dict[str, Any]:
         """Generate world metadata snapshot (no terrain, clients subscribe to chunks)."""
+        settlement = self.world.settlement
         return {
             "type": "snapshot",
             "tick_id": self.world.tick,
             "world_size": {"width": self.world.width, "height": self.world.height},
             "chunk_size": CHUNK_SIZE,
             "tick_duration_ms": self.tick_config.tick_duration_ms,
+            "settlement": (
+                {"x": settlement.x, "y": settlement.y}
+                if settlement is not None
+                else None
+            ),
         }
 
     def on_tick_start(self, context: TickContext) -> None:
@@ -350,6 +367,40 @@ class ViewerWebSocketService:
                 }
             )
 
+        # Objects added/removed this tick, kept in sync with the chunk index.
+        objects_added = []
+        for added in result.objects_added:
+            self._chunk_manager.add_object(added.obj.object_id, added.obj.position)
+            objects_added.append(_object_state(added.obj))
+
+        objects_removed = []
+        for removed in result.objects_removed:
+            self._chunk_manager.remove_object(removed.object_id)
+            objects_removed.append(removed.object_id)
+
+        actions = [
+            {
+                "entity_id": action.entity_id,
+                "action_type": action.action_type,
+                "success": action.success,
+                "details": action.details,
+            }
+            for action in result.action_results
+        ]
+
+        utterances = [
+            {
+                "speaker_id": utterance.speaker_id,
+                "channel": utterance.channel,
+                "text": utterance.text,
+                "position": {
+                    "x": utterance.position.x,
+                    "y": utterance.position.y,
+                },
+            }
+            for utterance in result.utterances
+        ]
+
         total_actions = (
             len(result.move_results)
             + len(result.collect_results)
@@ -362,8 +413,81 @@ class ViewerWebSocketService:
             "moves": moves,
             "object_changes": object_changes,
             "actions_processed": total_actions,
+            "entity_updates": self._entity_updates(),
+            "actions": actions,
+            "utterances": utterances,
+            "objects_added": objects_added,
+            "objects_removed": objects_removed,
         }
         self.broadcast_event(event)
+
+        self._emit_spawns_and_despawns(result)
+
+    def _entity_updates(self) -> list[dict[str, Any]]:
+        """Full state of every entity, sent every tick."""
+        return [_entity_state(entity) for entity in self.world.all_entities().values()]
+
+    def _emit_spawns_and_despawns(self, result: TickResult) -> None:
+        """Emit spawn/despawn messages and keep the chunk index in sync."""
+        for spawned in result.entities_spawned:
+            self._chunk_manager.sync_entity_position(
+                spawned.entity_id, spawned.position
+            )
+            self.broadcast_event(
+                {
+                    "type": "entity_spawned",
+                    "tick_id": result.tick_id,
+                    "entity": self._entity_state_by_id(
+                        spawned.entity_id, spawned.position, spawned.entity_type
+                    ),
+                }
+            )
+
+        for respawned in result.respawns:
+            self._chunk_manager.sync_entity_position(
+                respawned.entity_id, respawned.position
+            )
+            self.broadcast_event(
+                {
+                    "type": "entity_spawned",
+                    "tick_id": result.tick_id,
+                    "entity": self._entity_state_by_id(
+                        respawned.entity_id, respawned.position, "player"
+                    ),
+                }
+            )
+
+        for despawned in result.entities_despawned:
+            self._chunk_manager.remove_entity(despawned.entity_id)
+            self.broadcast_event(
+                {
+                    "type": "entity_despawned",
+                    "tick_id": result.tick_id,
+                    "entity_id": despawned.entity_id,
+                    "reason": despawned.reason,
+                }
+            )
+
+    def _entity_state_by_id(
+        self, entity_id: str, position: Position, entity_type: str
+    ) -> dict[str, Any]:
+        """Entity state for a spawn message, falling back to the event data."""
+        try:
+            return _entity_state(self.world.get_entity(entity_id))
+        except EntityNotFoundError:
+            return {
+                "entity_id": entity_id,
+                "position": {"x": position.x, "y": position.y},
+                "entity_type": entity_type,
+                "tags": [],
+                "health": 0,
+                "max_health": 0,
+                "hunger": 0,
+                "max_hunger": 0,
+                "wielded": "",
+                "alive": False,
+                "inventory": {},
+            }
 
     @property
     def client_count(self) -> int:

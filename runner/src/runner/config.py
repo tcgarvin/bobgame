@@ -20,6 +20,9 @@ class RunnerConfig(BaseModel):
     server: str = "localhost:50051"
     connection_timeout_ms: int = 30000
     auto_discover: bool = True
+    # Only spawn agents for entities whose type is in this list
+    # (world-simulated NPCs such as wolves are excluded by default).
+    entity_types: list[str] = Field(default_factory=lambda: ["player"])
     log_dir: str = "logs"
     max_restart_attempts: int = 5
     initial_backoff_ms: int = 1000

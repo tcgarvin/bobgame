@@ -719,6 +719,11 @@
     "frame": 8,
     "spritesheet": "Characters/Player0.png"
   },
+  "axe": {
+    "columns": 8,
+    "frame": 24,
+    "spritesheet": "Items/ShortWep.png"
+  },
   "berry-bush-empty": {
     "columns": 8,
     "frame": 34,
@@ -728,6 +733,26 @@
     "columns": 8,
     "frame": 35,
     "spritesheet": "Objects/Ground0.png"
+  },
+  "boulder": {
+    "columns": 8,
+    "frame": 10,
+    "spritesheet": "Items/Rock.png"
+  },
+  "chest-closed": {
+    "animationFrames": [
+      {
+        "frame": 0,
+        "spritesheet": "Items/Chest0.png"
+      },
+      {
+        "frame": 0,
+        "spritesheet": "Items/Chest1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 0,
+    "spritesheet": "Items/Chest0.png"
   },
   "dirt-full": {
     "columns": 21,
@@ -759,6 +784,26 @@
     "frame": 155,
     "spritesheet": "Objects/Floor.png"
   },
+  "item-pile": {
+    "animationFrames": [
+      {
+        "frame": 16,
+        "spritesheet": "Items/Chest0.png"
+      },
+      {
+        "frame": 16,
+        "spritesheet": "Items/Chest1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 16,
+    "spritesheet": "Items/Chest0.png"
+  },
+  "message-board": {
+    "columns": 8,
+    "frame": 41,
+    "spritesheet": "Objects/Decor0.png"
+  },
   "mountain": {
     "columns": 16,
     "frame": 199,
@@ -768,6 +813,26 @@
     "columns": 12,
     "frame": 39,
     "spritesheet": "Objects/Tree0.png"
+  },
+  "pickaxe": {
+    "columns": 8,
+    "frame": 26,
+    "spritesheet": "Items/ShortWep.png"
+  },
+  "rock-large": {
+    "columns": 8,
+    "frame": 8,
+    "spritesheet": "Items/Rock.png"
+  },
+  "rock-medium": {
+    "columns": 8,
+    "frame": 2,
+    "spritesheet": "Items/Rock.png"
+  },
+  "rock-small": {
+    "columns": 8,
+    "frame": 9,
+    "spritesheet": "Items/Rock.png"
   },
   "say-sleep": {
     "columns": 16,
@@ -784,10 +849,30 @@
     "frame": 162,
     "spritesheet": "Objects/Floor.png"
   },
+  "sword": {
+    "columns": 8,
+    "frame": 8,
+    "spritesheet": "Items/ShortWep.png"
+  },
   "water": {
     "columns": 8,
     "frame": 1,
     "spritesheet": "Objects/Tile.png"
+  },
+  "wolf": {
+    "animationFrames": [
+      {
+        "frame": 32,
+        "spritesheet": "Characters/Dog0.png"
+      },
+      {
+        "frame": 32,
+        "spritesheet": "Characters/Dog1.png"
+      }
+    ],
+    "columns": 8,
+    "frame": 32,
+    "spritesheet": "Characters/Dog0.png"
   },
   "wood-floor-full": {
     "columns": 21,

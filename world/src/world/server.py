@@ -12,12 +12,14 @@ from . import world_pb2_grpc
 from .lease import LeaseManager
 from .services import (
     ActionServiceServicer,
+    AgentStatusServiceServicer,
     EntityDiscoveryServiceServicer,
     LeaseServiceServicer,
     ObservationServiceServicer,
     TickServiceServicer,
     ViewerWebSocketService,
 )
+from .settlement import find_settlement_site, nearest_free_walkable
 from .state import Entity, World, WorldObject
 from .tick import TickConfig, TickContext, TickLoop, TickResult
 from .types import Position
@@ -69,6 +71,11 @@ class WorldServer:
             world, self.tick_config, port=ws_port
         )
 
+        # Agent status reports are forwarded straight to viewer clients.
+        self.status_service = AgentStatusServiceServicer(
+            self.lease_manager, self.viewer_ws_service.broadcast_event
+        )
+
         # gRPC server
         self._server: grpc.Server | None = None
         self._tick_task: asyncio.Task | None = None
@@ -97,6 +104,10 @@ class WorldServer:
         # Cleanup expired leases periodically
         self.lease_manager.cleanup_expired()
 
+        # Hand the finished tick's events to the observation service so the
+        # next tick's observations can replay them.
+        self.observation_service.on_tick_complete(result)
+
         # Broadcast to viewer WebSocket clients
         self.viewer_ws_service.on_tick_complete(result)
 
@@ -108,9 +119,12 @@ class WorldServer:
         )
 
     def add_entity(self, entity: Entity) -> None:
-        """Add an entity to the world and register its spawn tick."""
+        """Add an entity to the world, the chunk index and the discovery list."""
         self.world.add_entity(entity)
         self.discovery_service.register_entity_spawn(entity.entity_id, self.world.tick)
+        self.viewer_ws_service.chunk_manager.add_entity(
+            entity.entity_id, entity.position
+        )
 
     def add_object(self, obj: WorldObject) -> None:
         """Add an object to the world and register with chunk manager."""
@@ -138,6 +152,9 @@ class WorldServer:
         )
         world_pb2_grpc.add_EntityDiscoveryServiceServicer_to_server(
             self.discovery_service, self._server
+        )
+        world_pb2_grpc.add_AgentStatusServiceServicer_to_server(
+            self.status_service, self._server
         )
 
         # Bind to port
@@ -185,6 +202,24 @@ class WorldServer:
             await self.stop()
 
 
+def _spawn_at_settlement(server: "WorldServer", entities: list[Entity]) -> None:
+    """Place every entity on free walkable tiles around the settlement centre."""
+    world = server.world
+    site = find_settlement_site(world, world.all_objects().values())
+    world.settlement = site
+    logger.info("settlement_centre", x=site.x, y=site.y)
+
+    for entity in entities:
+        position = nearest_free_walkable(world, site)
+        server.add_entity(entity.with_position(position))
+        logger.info(
+            "entity_spawned_at_settlement",
+            entity_id=entity.entity_id,
+            x=position.x,
+            y=position.y,
+        )
+
+
 async def run_server(
     width: int = 100,
     height: int = 100,
@@ -194,6 +229,9 @@ async def run_server(
     entities: list[Entity] | None = None,
     objects: list[WorldObject] | None = None,
     world: World | None = None,
+    spawn_mode: str = "positions",
+    intent_deadline_ms: int | None = None,
+    wolves: bool = False,
 ) -> None:
     """Run a world server with the given configuration.
 
@@ -206,25 +244,41 @@ async def run_server(
         entities: Initial entities to add to the world
         objects: Initial objects (bushes, etc.) to add to the world
         world: Pre-created world (overrides width/height if provided)
+        spawn_mode: "positions" (use each entity's coordinates) or "settlement"
+            (place every entity near the computed settlement centre)
+        intent_deadline_ms: Intent deadline within a tick; defaults to half the tick
+        wolves: Whether the world simulates wolves
     """
     if world is None:
         world = World(width=width, height=height)
     config = TickConfig(
         tick_duration_ms=tick_duration_ms,
-        intent_deadline_ms=tick_duration_ms // 2,
+        intent_deadline_ms=(
+            intent_deadline_ms
+            if intent_deadline_ms is not None
+            else tick_duration_ms // 2
+        ),
     )
 
     server = WorldServer(world, port=port, ws_port=ws_port, tick_config=config)
 
-    # Add initial entities
-    if entities:
-        for entity in entities:
-            server.add_entity(entity)
+    # The mechanics track owns the wolf simulation; it reads this flag off the
+    # tick loop. Set defensively so the two tracks can land independently.
+    # See docs/05_jev_agents_design.md "Deviations".
+    setattr(server.tick_loop, "wolves_enabled", wolves)
 
-    # Add initial objects
+    # Objects go in first: settlement spawning needs to know which tiles are
+    # occupied by trees and rocks.
     if objects:
         for obj in objects:
             server.add_object(obj)
+
+    if entities:
+        if spawn_mode == "settlement":
+            _spawn_at_settlement(server, entities)
+        else:
+            for entity in entities:
+                server.add_entity(entity)
 
     logger.info(
         "starting_world_server",
@@ -233,6 +287,9 @@ async def run_server(
         port=port,
         ws_port=ws_port,
         tick_duration_ms=tick_duration_ms,
+        intent_deadline_ms=config.intent_deadline_ms,
+        spawn_mode=spawn_mode,
+        wolves=wolves,
         entities=len(entities) if entities else 0,
         objects=len(objects) if objects else 0,
     )
@@ -260,7 +317,10 @@ def main() -> None:
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="gRPC port")
     parser.add_argument(
-        "--ws-port", type=int, default=DEFAULT_WS_PORT, help="WebSocket port for viewers"
+        "--ws-port",
+        type=int,
+        default=DEFAULT_WS_PORT,
+        help="WebSocket port for viewers",
     )
     parser.add_argument("--width", type=int, help="World width (overrides config)")
     parser.add_argument("--height", type=int, help="World height (overrides config)")
@@ -469,6 +529,9 @@ def main() -> None:
             entities=entities,
             objects=objects,
             world=world,
+            spawn_mode=config.world.spawn_mode,
+            intent_deadline_ms=config.world.intent_deadline_ms,
+            wolves=config.world.wolves,
         )
     )
 

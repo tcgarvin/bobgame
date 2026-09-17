@@ -32,6 +32,10 @@ from .exceptions import (
 from .types import Position
 
 
+# status_bits flag for a dead entity (bit 0), see docs/05_jev_agents_design.md.
+STATUS_BIT_DEAD = 1
+
+
 class Inventory(BaseModel, frozen=True):
     """Immutable inventory as item_type -> count mapping."""
 
@@ -62,9 +66,7 @@ class Inventory(BaseModel, frozen=True):
         """
         current = self.count(item_type)
         if current < amount:
-            raise ValueError(
-                f"Cannot remove {amount} {item_type}, only have {current}"
-            )
+            raise ValueError(f"Cannot remove {amount} {item_type}, only have {current}")
         new_items = dict(self.items)
         new_count = current - amount
         if new_count == 0:
@@ -83,9 +85,7 @@ class Tile(BaseModel, frozen=True):
     floor_type: str = "stone"
 
     @classmethod
-    def from_floor_type(
-        cls, position: Position, floor_type: "FloorType"
-    ) -> "Tile":
+    def from_floor_type(cls, position: Position, floor_type: "FloorType") -> "Tile":
         """Create a tile with properties derived from floor type.
 
         Args:
@@ -131,6 +131,46 @@ class Entity(BaseModel, frozen=True):
     def with_inventory(self, new_inventory: Inventory) -> "Entity":
         """Return copy with updated inventory."""
         return self.model_copy(update={"inventory": new_inventory})
+
+    def with_health(self, new_health: int) -> "Entity":
+        """Return copy with health clamped to [0, max_health]."""
+        clamped = max(0, min(self.max_health, new_health))
+        return self.model_copy(update={"health": clamped})
+
+    def with_hunger(self, new_hunger: int) -> "Entity":
+        """Return copy with hunger clamped to [0, max_hunger]."""
+        clamped = max(0, min(self.max_hunger, new_hunger))
+        return self.model_copy(update={"hunger": clamped})
+
+    def with_wielded(self, kind: str) -> "Entity":
+        """Return copy with a different wielded item kind ("" for none)."""
+        return self.model_copy(update={"wielded": kind})
+
+    def as_dead(self) -> "Entity":
+        """Return copy marked dead: no health, no inventory, nothing wielded."""
+        return self.model_copy(
+            update={
+                "alive": False,
+                "health": 0,
+                "inventory": Inventory(),
+                "wielded": "",
+                "status_bits": self.status_bits | STATUS_BIT_DEAD,
+            }
+        )
+
+    def as_respawned(self, position: Position, hunger: int) -> "Entity":
+        """Return a fresh copy for respawn at `position`."""
+        return self.model_copy(
+            update={
+                "position": position,
+                "alive": True,
+                "health": self.max_health,
+                "hunger": max(0, min(self.max_hunger, hunger)),
+                "inventory": Inventory(),
+                "wielded": "",
+                "status_bits": self.status_bits & ~STATUS_BIT_DEAD,
+            }
+        )
 
 
 class WorldObject(BaseModel, frozen=True):
@@ -187,6 +227,12 @@ class World(BaseModel):
     # Object registry (multiple objects can share a position)
     _objects: dict[str, WorldObject] = PrivateAttr(default_factory=dict)
     _object_positions: dict[Position, list[str]] = PrivateAttr(default_factory=dict)
+
+    # entity_id -> tick at which the entity died (drives respawn scheduling)
+    _death_ticks: dict[str, int] = PrivateAttr(default_factory=dict)
+
+    # Monotonic counter backing generate_object_id()
+    _object_id_seq: int = PrivateAttr(default=0)
 
     # --- Tile operations ---
 
@@ -340,6 +386,101 @@ class World(BaseModel):
         """Check if position has an entity."""
         return position in self._entity_positions
 
+    def set_entity(self, entity: Entity) -> None:
+        """Replace an entity whose position has not changed.
+
+        Raises:
+            EntityNotFoundError: If entity not found.
+            ValueError: If the entity's position differs from the indexed one.
+        """
+        existing = self._entities.get(entity.entity_id)
+        if existing is None:
+            raise EntityNotFoundError(f"Entity {entity.entity_id} not found")
+        if existing.position != entity.position:
+            raise ValueError(
+                f"set_entity() cannot move {entity.entity_id}; "
+                "use update_entity_position()"
+            )
+        self._entities[entity.entity_id] = entity
+
+    def detach_entity(self, entity_id: str) -> None:
+        """Remove an entity from the position index while keeping the record.
+
+        Used for dead entities, which stay in all_entities() but no longer
+        occupy a tile.
+
+        Raises:
+            EntityNotFoundError: If entity not found or not currently placed.
+        """
+        entity = self._entities.get(entity_id)
+        if entity is None:
+            raise EntityNotFoundError(f"Entity {entity_id} not found")
+        if self._entity_positions.get(entity.position) != entity_id:
+            raise EntityNotFoundError(
+                f"Entity {entity_id} is not present in the position index"
+            )
+        del self._entity_positions[entity.position]
+
+    def attach_entity(self, entity_id: str, position: Position) -> None:
+        """Place a detached entity back onto the grid at `position`.
+
+        Raises:
+            EntityNotFoundError: If entity not found.
+            PositionOccupiedError: If the tile already holds an entity.
+        """
+        entity = self._entities.get(entity_id)
+        if entity is None:
+            raise EntityNotFoundError(f"Entity {entity_id} not found")
+        if position in self._entity_positions:
+            occupant = self._entity_positions[position]
+            raise PositionOccupiedError(
+                f"Position {position} already occupied by {occupant}"
+            )
+        self._entity_positions[position] = entity_id
+        self._entities[entity_id] = entity.with_position(position)
+
+    def discard_entity(self, entity_id: str) -> None:
+        """Delete an entity record that is no longer on the grid.
+
+        Raises:
+            EntityNotFoundError: If entity not found.
+            ValueError: If the entity is still in the position index.
+        """
+        entity = self._entities.get(entity_id)
+        if entity is None:
+            raise EntityNotFoundError(f"Entity {entity_id} not found")
+        if self._entity_positions.get(entity.position) == entity_id:
+            raise ValueError(
+                f"Entity {entity_id} is still placed; detach_entity() first"
+            )
+        del self._entities[entity_id]
+
+    def living_entities(self) -> list[Entity]:
+        """All entities currently alive."""
+        return [e for e in self._entities.values() if e.alive]
+
+    # --- Death bookkeeping ---
+
+    def mark_death(self, entity_id: str, tick: int) -> None:
+        """Record the tick at which `entity_id` died."""
+        self._death_ticks[entity_id] = tick
+
+    def death_tick(self, entity_id: str) -> int:
+        """Tick at which the entity died.
+
+        Raises:
+            KeyError: If the entity has no recorded death.
+        """
+        return self._death_ticks[entity_id]
+
+    def pending_respawns(self) -> Mapping[str, int]:
+        """Read-only view of entity_id -> death tick for dead entities."""
+        return self._death_ticks
+
+    def clear_death(self, entity_id: str) -> None:
+        """Forget a recorded death (after respawn or despawn)."""
+        self._death_ticks.pop(entity_id, None)
+
     # --- Object operations ---
 
     def add_object(self, obj: WorldObject) -> None:
@@ -379,6 +520,30 @@ class World(BaseModel):
         if obj.object_id not in self._objects:
             raise ObjectNotFoundError(f"Object {obj.object_id} not found")
         self._objects[obj.object_id] = obj
+
+    def remove_object(self, object_id: str) -> WorldObject:
+        """Remove and return an object.
+
+        Raises:
+            ObjectNotFoundError: If object not found.
+        """
+        if object_id not in self._objects:
+            raise ObjectNotFoundError(f"Object {object_id} not found")
+        obj = self._objects.pop(object_id)
+        ids_at = self._object_positions.get(obj.position, [])
+        if object_id in ids_at:
+            ids_at.remove(object_id)
+        if not ids_at:
+            self._object_positions.pop(obj.position, None)
+        return obj
+
+    def generate_object_id(self, prefix: str) -> str:
+        """Return an unused object id of the form `<prefix>_<n>`."""
+        while True:
+            self._object_id_seq += 1
+            candidate = f"{prefix}_{self._object_id_seq}"
+            if candidate not in self._objects:
+                return candidate
 
     def all_objects(self) -> Mapping[str, WorldObject]:
         """Return read-only view of all objects."""
@@ -443,9 +608,7 @@ class World(BaseModel):
                     "mountain": 5,
                     "stone": 6,
                 }
-                chunk[local_y, local_x] = floor_type_to_value.get(
-                    tile.floor_type, 6
-                )
+                chunk[local_y, local_x] = floor_type_to_value.get(tile.floor_type, 6)
 
         return chunk
 

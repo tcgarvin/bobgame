@@ -3,10 +3,21 @@
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Mapping, TypeVar
 
 import structlog
 
+from .combat import process_attack_phase
+from .containers import (
+    process_deposit_phase,
+    process_drop_phase,
+    process_equip_phase,
+    process_pickup_phase,
+    process_place_phase,
+    process_withdraw_phase,
+    process_write_note_phase,
+)
+from .crafting import process_craft_phase
 from .events import (
     ActionResult,
     DamageEvent,
@@ -14,23 +25,54 @@ from .events import (
     EntityDespawnedEvent,
     EntitySpawnedEvent,
     ObjectAddedEvent,
+    ObjectChange,
     ObjectRemovedEvent,
     RespawnEvent,
+    TickEvents,
     UtteranceEvent,
 )
 from .foraging import (
     CollectResult,
     EatResult,
-    ObjectChange,
     process_collect_phase,
     process_eat_phase,
+    process_extract_phase,
     process_regeneration,
 )
 from .movement import MoveResult, process_movement_phase
+from .stats import process_health_regen, process_hunger_phase, process_respawns
 from .state import World
-from .types import CollectIntent, Direction, EatIntent
+from .tick_context import TickContext
+from .types import (
+    AttackIntent,
+    CraftIntent,
+    DepositIntent,
+    Direction,
+    DropIntent,
+    EntityIntent,
+    EquipIntent,
+    ExtractIntent,
+    PickupIntent,
+    PlaceIntent,
+    SayIntent,
+    WaitIntent,
+    WithdrawIntent,
+    WriteNoteIntent,
+)
+from .wolves import WolfSimulator
 
 logger = structlog.get_logger()
+
+T = TypeVar("T", bound=EntityIntent)
+
+__all__ = [
+    "TickConfig",
+    "TickContext",
+    "TickLoop",
+    "TickResult",
+    "process_tick",
+    "run_ticks",
+]
 
 
 @dataclass
@@ -39,80 +81,6 @@ class TickConfig:
 
     tick_duration_ms: int = 1000
     intent_deadline_ms: int = 500
-
-
-@dataclass
-class TickContext:
-    """Context for a single tick."""
-
-    tick_id: int
-    start_time_ms: int
-    deadline_ms: int
-
-    # Collected intents for this tick
-    move_intents: dict[str, Direction] = field(default_factory=dict)
-    collect_intents: dict[str, CollectIntent] = field(default_factory=dict)
-    eat_intents: dict[str, EatIntent] = field(default_factory=dict)
-
-    def is_past_deadline(self) -> bool:
-        """Check if current time is past the intent deadline."""
-        return time.time() * 1000 > self.deadline_ms
-
-    def submit_move_intent(self, entity_id: str, direction: Direction) -> bool:
-        """
-        Submit a move intent for this tick.
-        Returns True if accepted, False if past deadline or already submitted.
-        """
-        if self.is_past_deadline():
-            logger.debug(
-                "intent_rejected_late", entity_id=entity_id, tick_id=self.tick_id
-            )
-            return False
-        if entity_id in self.move_intents:
-            logger.debug(
-                "intent_rejected_duplicate", entity_id=entity_id, tick_id=self.tick_id
-            )
-            return False
-        self.move_intents[entity_id] = direction
-        return True
-
-    def submit_collect_intent(self, intent: CollectIntent) -> bool:
-        """Submit a collect intent for this tick."""
-        if self.is_past_deadline():
-            logger.debug(
-                "intent_rejected_late",
-                entity_id=intent.entity_id,
-                tick_id=self.tick_id,
-            )
-            return False
-        if intent.entity_id in self.collect_intents:
-            logger.debug(
-                "intent_rejected_duplicate",
-                entity_id=intent.entity_id,
-                tick_id=self.tick_id,
-            )
-            return False
-        self.collect_intents[intent.entity_id] = intent
-        return True
-
-    def submit_eat_intent(self, intent: EatIntent) -> bool:
-        """Submit an eat intent for this tick."""
-        if self.is_past_deadline():
-            logger.debug(
-                "intent_rejected_late",
-                entity_id=intent.entity_id,
-                tick_id=self.tick_id,
-            )
-            return False
-        if intent.entity_id in self.eat_intents:
-            logger.debug(
-                "intent_rejected_duplicate",
-                entity_id=intent.entity_id,
-                tick_id=self.tick_id,
-            )
-            return False
-        self.eat_intents[intent.entity_id] = intent
-        return True
 
 
 @dataclass
@@ -145,6 +113,220 @@ TickCallback = Callable[[TickResult], Awaitable[None]]
 TickStartCallback = Callable[[TickContext], Awaitable[None]]
 
 
+# --- Tick pipeline --------------------------------------------------------
+
+
+def _living_subset(
+    world: World,
+    intents: Mapping[str, T],
+    action_type: str,
+    events: TickEvents,
+) -> dict[str, T]:
+    """Drop intents from missing or dead entities, recording the failure."""
+    kept: dict[str, T] = {}
+    for entity_id, intent in intents.items():
+        entity = world.all_entities().get(entity_id)
+        if entity is None:
+            events.acted(entity_id, action_type, False, "entity not found")
+            continue
+        if not entity.alive:
+            events.acted(entity_id, action_type, False, "dead")
+            continue
+        kept[entity_id] = intent
+    return kept
+
+
+def _record_collect_results(results: list[CollectResult], events: TickEvents) -> None:
+    for result in results:
+        if result.success:
+            events.acted(
+                result.entity_id,
+                "collect",
+                True,
+                f"collected {result.item_type} from {result.object_id}",
+            )
+        else:
+            events.acted(
+                result.entity_id, "collect", False, result.failure_reason or ""
+            )
+
+
+def _record_eat_results(results: list[EatResult], events: TickEvents) -> None:
+    for result in results:
+        if result.success:
+            events.acted(
+                result.entity_id,
+                "eat",
+                True,
+                f"ate {result.amount} {result.item_type}",
+            )
+        else:
+            events.acted(result.entity_id, "eat", False, result.failure_reason or "")
+
+
+def _process_say_phase(
+    world: World, intents: Mapping[str, SayIntent], events: TickEvents
+) -> None:
+    """Emit one utterance per speaker; channel filtering happens downstream."""
+    for entity_id in sorted(intents):
+        intent = intents[entity_id]
+        if intent.channel not in ("local", "thought"):
+            events.acted(entity_id, "say", False, f"unknown channel {intent.channel}")
+            continue
+        entity = world.get_entity(entity_id)
+        events.utterances.append(
+            UtteranceEvent(
+                speaker_id=entity_id,
+                channel=intent.channel,
+                text=intent.text,
+                position=entity.position,
+            )
+        )
+        events.acted(entity_id, "say", True, intent.channel)
+
+
+def process_tick(
+    world: World,
+    ctx: TickContext,
+    wolf_simulator: WolfSimulator | None = None,
+    regen_rate: int = 10,
+) -> TickResult:
+    """Run every phase of one tick against `world` and return its result.
+
+    Phase order follows docs/05_jev_agents_design.md.
+    """
+    start = time.time()
+    events = TickEvents()
+
+    # Phase 0: wolves choose their intents (and spawn/despawn).
+    if wolf_simulator is not None:
+        wolf_simulator.step(world, ctx, events)
+
+    # Phase 1: Movement
+    move_intents = {
+        entity_id: direction
+        for entity_id, direction in ctx.move_intents.items()
+        if (entity := world.all_entities().get(entity_id)) is not None and entity.alive
+    }
+    move_results = process_movement_phase(world, move_intents)
+
+    # Phase 2: Attack
+    process_attack_phase(
+        world,
+        _living_subset(world, ctx.intents_of(AttackIntent), "attack", events),
+        events,
+    )
+
+    # Phase 3: Extract
+    process_extract_phase(
+        world,
+        _living_subset(world, ctx.intents_of(ExtractIntent), "extract", events),
+        events,
+    )
+
+    # Phase 4: Collect, pickup, withdraw
+    collect_results, collect_changes = process_collect_phase(
+        world,
+        _living_subset(world, ctx.collect_intents, "collect", events),
+    )
+    _record_collect_results(collect_results, events)
+    events.object_changes.extend(collect_changes)
+
+    process_pickup_phase(
+        world,
+        _living_subset(world, ctx.intents_of(PickupIntent), "pickup", events),
+        events,
+    )
+    process_withdraw_phase(
+        world,
+        _living_subset(world, ctx.intents_of(WithdrawIntent), "withdraw", events),
+        events,
+    )
+
+    # Phase 5: Drop, deposit
+    process_drop_phase(
+        world,
+        _living_subset(world, ctx.intents_of(DropIntent), "drop", events),
+        events,
+    )
+    process_deposit_phase(
+        world,
+        _living_subset(world, ctx.intents_of(DepositIntent), "deposit", events),
+        events,
+    )
+
+    # Phase 6: Craft
+    process_craft_phase(
+        world,
+        _living_subset(world, ctx.intents_of(CraftIntent), "craft", events),
+        events,
+    )
+
+    # Phase 7: Equip
+    process_equip_phase(
+        world,
+        _living_subset(world, ctx.intents_of(EquipIntent), "equip", events),
+        events,
+    )
+
+    # Phase 8: Place
+    process_place_phase(
+        world,
+        _living_subset(world, ctx.intents_of(PlaceIntent), "place", events),
+        events,
+    )
+
+    # Phase 9: Write note
+    process_write_note_phase(
+        world,
+        _living_subset(world, ctx.intents_of(WriteNoteIntent), "write_note", events),
+        events,
+    )
+
+    # Phase 10: Eat, say
+    eat_results = process_eat_phase(
+        world, _living_subset(world, ctx.eat_intents, "eat", events)
+    )
+    _record_eat_results(eat_results, events)
+    _process_say_phase(
+        world,
+        _living_subset(world, ctx.intents_of(SayIntent), "say", events),
+        events,
+    )
+
+    # Phase 11: Wait
+    for entity_id in sorted(
+        _living_subset(world, ctx.intents_of(WaitIntent), "wait", events)
+    ):
+        events.acted(entity_id, "wait", True, "")
+
+    # Phase 12: Bookkeeping
+    process_hunger_phase(world, events)
+    process_health_regen(world)
+    events.object_changes.extend(process_regeneration(world, regen_rate=regen_rate))
+    process_respawns(world, events)
+
+    elapsed_ms = (time.time() - start) * 1000
+
+    return TickResult(
+        tick_id=ctx.tick_id,
+        move_results=move_results,
+        collect_results=collect_results,
+        eat_results=eat_results,
+        object_changes=events.object_changes,
+        duration_ms=elapsed_ms,
+        action_results=events.action_results,
+        damage_events=events.damage_events,
+        deaths=events.deaths,
+        respawns=events.respawns,
+        utterances=events.utterances,
+        objects_added=events.objects_added,
+        objects_removed=events.objects_removed,
+        entities_spawned=events.entities_spawned,
+        entities_despawned=events.entities_despawned,
+    )
+
+
 class TickLoop:
     """
     Async tick loop for world simulation.
@@ -154,7 +336,7 @@ class TickLoop:
         loop = TickLoop(world)
 
         # In gRPC handler or test:
-        loop.submit_intent(entity_id, direction)
+        loop.submit_move_intent(entity_id, direction)
 
         # Start the loop
         await loop.run()
@@ -166,11 +348,15 @@ class TickLoop:
         config: TickConfig | None = None,
         on_tick_complete: TickCallback | None = None,
         on_tick_start: TickStartCallback | None = None,
+        wolves_enabled: bool = False,
+        wolf_seed: int = 1337,
     ):
         self.world = world
         self.config = config or TickConfig()
         self.on_tick_complete = on_tick_complete
         self.on_tick_start = on_tick_start
+        self.wolves_enabled = wolves_enabled
+        self.wolf_simulator = WolfSimulator(seed=wolf_seed)
 
         self._running = False
         self._current_context: TickContext | None = None
@@ -203,6 +389,17 @@ class TickLoop:
             return False
         return self._current_context.submit_move_intent(entity_id, direction)
 
+    def submit_intent(self, entity_id: str, intent: EntityIntent) -> tuple[bool, str]:
+        """Submit any intent for the current tick.
+
+        Returns (accepted, reason); the reason is `no_tick_in_progress` when no
+        tick is running.
+        """
+        if self._current_context is None:
+            logger.warning("intent_rejected_no_tick", entity_id=entity_id)
+            return False, "no_tick_in_progress"
+        return self._current_context.submit_intent(entity_id, intent)
+
     async def run(self) -> None:
         """Run the tick loop until stopped."""
         self._running = True
@@ -219,6 +416,7 @@ class TickLoop:
                     tick_id=self.world.tick,
                     start_time_ms=int(tick_start),
                     deadline_ms=int(tick_start + self.config.intent_deadline_ms),
+                    world=self.world,
                 )
 
                 logger.debug("tick_started", tick_id=self._current_context.tick_id)
@@ -275,44 +473,21 @@ class TickLoop:
         if ctx is None:
             raise RuntimeError("No tick context")
 
-        start = time.time()
-
-        # Phase 1: Movement
-        move_results = process_movement_phase(self.world, ctx.move_intents)
-
-        # Phase 2: Collect
-        collect_results, collect_changes = process_collect_phase(
-            self.world, ctx.collect_intents
+        result = process_tick(
+            self.world,
+            ctx,
+            self.wolf_simulator if self.wolves_enabled else None,
         )
-
-        # Phase 3: Eat
-        eat_results = process_eat_phase(self.world, ctx.eat_intents)
-
-        # Phase 4: Regeneration
-        regen_changes = process_regeneration(self.world)
-
-        all_object_changes = collect_changes + regen_changes
-
-        elapsed_ms = (time.time() - start) * 1000
 
         logger.debug(
             "tick_processed",
             tick_id=ctx.tick_id,
-            moves_submitted=len(ctx.move_intents),
-            moves_succeeded=sum(1 for r in move_results if r.success),
-            collects_succeeded=sum(1 for r in collect_results if r.success),
-            eats_succeeded=sum(1 for r in eat_results if r.success),
-            duration_ms=elapsed_ms,
+            intents_submitted=len(ctx.intents),
+            moves_succeeded=sum(1 for r in result.move_results if r.success),
+            actions=len(result.action_results),
+            duration_ms=result.duration_ms,
         )
-
-        return TickResult(
-            tick_id=ctx.tick_id,
-            move_results=move_results,
-            collect_results=collect_results,
-            eat_results=eat_results,
-            object_changes=all_object_changes,
-            duration_ms=elapsed_ms,
-        )
+        return result
 
     def stop(self) -> None:
         """Signal the tick loop to stop."""
@@ -325,6 +500,7 @@ async def run_ticks(
     num_ticks: int,
     intent_callback: Callable[[TickContext], Awaitable[None]] | None = None,
     config: TickConfig | None = None,
+    wolf_simulator: WolfSimulator | None = None,
 ) -> list[TickResult]:
     """
     Run a fixed number of ticks (useful for testing).
@@ -334,6 +510,7 @@ async def run_ticks(
         num_ticks: Number of ticks to run
         intent_callback: Optional async callback to submit intents each tick
         config: Tick timing configuration
+        wolf_simulator: Optional wolf simulation (disabled when None)
 
     Returns:
         List of TickResults
@@ -348,40 +525,14 @@ async def run_ticks(
             tick_id=world.tick,
             start_time_ms=int(tick_start),
             deadline_ms=int(tick_start + config.intent_deadline_ms),
+            world=world,
         )
 
         # Allow test to submit intents
         if intent_callback:
             await intent_callback(ctx)
 
-        # Phase 1: Movement
-        move_results = process_movement_phase(world, ctx.move_intents)
-
-        # Phase 2: Collect
-        collect_results, collect_changes = process_collect_phase(
-            world, ctx.collect_intents
-        )
-
-        # Phase 3: Eat
-        eat_results = process_eat_phase(world, ctx.eat_intents)
-
-        # Phase 4: Regeneration
-        regen_changes = process_regeneration(world)
-
-        all_object_changes = collect_changes + regen_changes
-
-        elapsed_ms = (time.time() - tick_start) * 1000
-
-        result = TickResult(
-            tick_id=ctx.tick_id,
-            move_results=move_results,
-            collect_results=collect_results,
-            eat_results=eat_results,
-            object_changes=all_object_changes,
-            duration_ms=elapsed_ms,
-        )
-        results.append(result)
-
+        results.append(process_tick(world, ctx, wolf_simulator))
         world.advance_tick()
 
     return results

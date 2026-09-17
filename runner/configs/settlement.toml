@@ -1,0 +1,17 @@
+# Runner configuration for the settlement scenario
+# Corresponds to world/configs/settlement.toml (12 planner+Jev actors)
+
+[runner]
+entity_types = ["player"]
+server = "localhost:50051"
+connection_timeout_ms = 60000
+auto_discover = true
+log_dir = "logs"
+max_restart_attempts = 5
+initial_backoff_ms = 2000
+max_backoff_ms = 30000
+backoff_multiplier = 2.0
+
+[agents.default]
+module = "agents.jev_agent"
+args = []

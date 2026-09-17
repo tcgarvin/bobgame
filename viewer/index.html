@@ -18,16 +18,212 @@
         align-items: center;
         min-height: 100vh;
         overflow: hidden;
+        color: #d8d8e0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
       }
       #app {
         display: flex;
         justify-content: center;
         align-items: center;
       }
+
+      /* --- HTML overlays on top of the Phaser canvas --- */
+      #ui-root {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 10;
+      }
+      #ui-root .panel {
+        pointer-events: auto;
+        background: rgba(16, 16, 22, 0.92);
+        border: 1px solid #33334a;
+        border-radius: 4px;
+      }
+
+      #entity-picker-box {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        padding: 6px 8px;
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      #entity-picker {
+        background: #1b1b26;
+        color: #d8d8e0;
+        border: 1px solid #3a3a52;
+        border-radius: 3px;
+        font: inherit;
+        padding: 2px 4px;
+        min-width: 150px;
+      }
+      #follow-indicator {
+        color: #7fd67f;
+      }
+      #follow-indicator.off {
+        color: #8a8a9a;
+      }
+
+      #agent-panel {
+        position: absolute;
+        top: 48px;
+        right: 8px;
+        bottom: 8px;
+        width: 320px;
+        padding: 10px;
+        overflow-y: auto;
+        line-height: 1.4;
+      }
+      #agent-panel.hidden {
+        display: none;
+      }
+      #agent-panel h2 {
+        font-size: 14px;
+        margin-bottom: 2px;
+        color: #ffffff;
+      }
+      #agent-panel .section {
+        margin-top: 10px;
+        border-top: 1px solid #2a2a3c;
+        padding-top: 6px;
+      }
+      #agent-panel .label {
+        color: #8a8aa0;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 10px;
+        margin-bottom: 2px;
+      }
+      #agent-panel .text {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      #agent-panel .muted {
+        color: #6c6c80;
+      }
+      .mode-badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 8px;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        background: #3a3a52;
+        color: #d8d8e0;
+      }
+      .mode-badge.planning {
+        background: #35407a;
+        color: #cdd8ff;
+      }
+      .mode-badge.stint {
+        background: #2b5d3a;
+        color: #c8f0d2;
+      }
+      .mode-badge.idle {
+        background: #4a4a30;
+        color: #eee7c0;
+      }
+      .bar-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 2px;
+      }
+      .bar-row .bar-label {
+        flex: 0 0 110px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .bar-track {
+        flex: 1 1 auto;
+        height: 7px;
+        background: #26263a;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .bar-fill {
+        height: 100%;
+        background: #5f8dd3;
+      }
+      .bar-row .bar-value {
+        flex: 0 0 40px;
+        text-align: right;
+        color: #9a9ab0;
+      }
+      #agent-panel ul {
+        list-style: none;
+      }
+      #agent-panel li {
+        padding: 1px 0;
+        overflow-wrap: anywhere;
+      }
+      li.fail {
+        color: #e07a7a;
+      }
+      li.utterance {
+        color: #8fd3e8;
+      }
+      .kv {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .kv span:last-child {
+        color: #ffffff;
+      }
     </style>
   </head>
   <body>
     <div id="app"></div>
+    <div id="ui-root">
+      <div id="entity-picker-box" class="panel">
+        <label for="entity-picker">Entity</label>
+        <select id="entity-picker">
+          <option value="">(none)</option>
+        </select>
+        <span id="follow-indicator" class="off">follow off</span>
+      </div>
+      <div id="agent-panel" class="panel">
+        <h2 id="ap-name">No entity selected</h2>
+        <div><span id="ap-mode" class="mode-badge">idle</span></div>
+
+        <div class="section">
+          <div class="label">Stats</div>
+          <div id="ap-stats"></div>
+        </div>
+
+        <div class="section">
+          <div class="label">Brief</div>
+          <div id="ap-brief" class="text muted">-</div>
+        </div>
+
+        <div class="section">
+          <div class="label">Planner thought</div>
+          <div id="ap-thought" class="text muted">-</div>
+        </div>
+
+        <div class="section">
+          <div class="label">Last Jev decision</div>
+          <div id="ap-jev" class="text muted">-</div>
+        </div>
+
+        <div class="section">
+          <div class="label">Inventory</div>
+          <div id="ap-inventory" class="text muted">-</div>
+        </div>
+
+        <div class="section">
+          <div class="label">Recent (newest first)</div>
+          <ul id="ap-log">
+            <li class="muted">-</li>
+          </ul>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
