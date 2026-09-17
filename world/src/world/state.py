@@ -117,6 +117,12 @@ class Entity(BaseModel, frozen=True):
     tags: tuple[str, ...] = ()
     status_bits: int = 0
     inventory: Inventory = Inventory()
+    health: int = 20
+    max_health: int = 20
+    hunger: int = 80
+    max_hunger: int = 100
+    wielded: str = ""  # item kind currently wielded, "" if none
+    alive: bool = True
 
     def with_position(self, new_position: Position) -> "Entity":
         """Return copy with updated position."""
@@ -161,6 +167,8 @@ class World(BaseModel):
     width: int
     height: int
     tick: int = 0
+    # Settlement centre (set by settlement.py when spawn_mode = "settlement").
+    settlement: Position | None = None
 
     # Private attributes for internal state
     # Optional floor array for efficient terrain storage (from terrain generation)

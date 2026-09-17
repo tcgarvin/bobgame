@@ -531,6 +531,90 @@ class ActionService(object):
             _registered_method=True)
 
 
+class AgentStatusServiceStub(object):
+    """============================================================================
+    Agent Status Service (agents report their internal state for the viewer)
+    ============================================================================
+
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.ReportStatus = channel.unary_unary(
+                '/world.AgentStatusService/ReportStatus',
+                request_serializer=world__pb2.AgentStatusReport.SerializeToString,
+                response_deserializer=world__pb2.AgentStatusAck.FromString,
+                _registered_method=True)
+
+
+class AgentStatusServiceServicer(object):
+    """============================================================================
+    Agent Status Service (agents report their internal state for the viewer)
+    ============================================================================
+
+    """
+
+    def ReportStatus(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_AgentStatusServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'ReportStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReportStatus,
+                    request_deserializer=world__pb2.AgentStatusReport.FromString,
+                    response_serializer=world__pb2.AgentStatusAck.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'world.AgentStatusService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('world.AgentStatusService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class AgentStatusService(object):
+    """============================================================================
+    Agent Status Service (agents report their internal state for the viewer)
+    ============================================================================
+
+    """
+
+    @staticmethod
+    def ReportStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/world.AgentStatusService/ReportStatus',
+            world__pb2.AgentStatusReport.SerializeToString,
+            world__pb2.AgentStatusAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
 class ViewerServiceStub(object):
     """============================================================================
     Viewer Service (Read-Only)

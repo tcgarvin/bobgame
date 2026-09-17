@@ -29,10 +29,16 @@ enum Direction {
 message Entity {
   string entity_id = 1;
   Position position = 2;
-  string entity_type = 3;
+  string entity_type = 3;   // "player" | "wolf"
   repeated string tags = 4;
   int32 status_bits = 5;
   Inventory inventory = 6;
+  int32 health = 7;
+  int32 max_health = 8;
+  int32 hunger = 9;         // 0 = starving, max_hunger = full
+  int32 max_hunger = 10;
+  string wielded = 11;      // item kind currently wielded, "" if none
+  bool alive = 12;
 }
 
 message Inventory {
@@ -169,7 +175,39 @@ message ObservationEvent {
     EntityActed entity_acted = 4;
     Utterance utterance = 5;
     ObjectChanged object_changed = 6;
+    EntityDamaged entity_damaged = 7;
+    EntityDied entity_died = 8;
+    EntityRespawned entity_respawned = 9;
+    ObjectAdded object_added = 10;
+    ObjectRemoved object_removed = 11;
   }
+}
+
+message EntityDamaged {
+  string entity_id = 1;
+  string attacker_id = 2;   // "" for hunger/environment
+  int32 amount = 3;
+  int32 remaining_health = 4;
+}
+
+message EntityDied {
+  string entity_id = 1;
+  string killer_id = 2;     // "" for hunger/environment
+  Position position = 3;
+}
+
+message EntityRespawned {
+  string entity_id = 1;
+  Position position = 2;
+}
+
+message ObjectAdded {
+  WorldObject object = 1;
+}
+
+message ObjectRemoved {
+  string object_id = 1;
+  Position position = 2;
 }
 
 message EntityEnteredView {
@@ -232,13 +270,81 @@ message Intent {
     WaitIntent wait = 5;
     CollectIntent collect = 6;
     EatIntent eat = 7;
+    AttackIntent attack = 8;
+    ExtractIntent extract = 9;
+    CraftIntent craft = 10;
+    EquipIntent equip = 11;
+    PlaceIntent place = 12;
+    DropIntent drop = 13;
+    DepositIntent deposit = 14;
+    WithdrawIntent withdraw = 15;
+    WriteNoteIntent write_note = 16;
   }
+}
+
+// Attack an adjacent (8-neighbour) entity. Damage depends on wielded item.
+message AttackIntent {
+  string target_entity_id = 1;
+}
+
+// Chop a tree or mine a rock that is on the same tile or an adjacent tile.
+// Progress accumulates in the object's state; each completed unit yields one
+// wood (tree) or stone (rock). Wielding an axe/pickaxe speeds this up.
+message ExtractIntent {
+  string object_id = 1;
+}
+
+// Craft a recipe by name (see docs/05_jev_agents_design.md for recipes).
+message CraftIntent {
+  string recipe = 1;   // "axe" | "pickaxe" | "sword" | "chest" | "message_board"
+}
+
+// Wield an item from inventory, or "" to unequip.
+message EquipIntent {
+  string kind = 1;
+}
+
+// Place a placeable inventory item (chest, message_board) on an adjacent
+// walkable, unoccupied tile in the given direction.
+message PlaceIntent {
+  string kind = 1;
+  Direction direction = 2;
+}
+
+// Drop items from inventory onto the current tile (creates/merges an item_pile).
+message DropIntent {
+  string kind = 1;
+  int32 amount = 2;   // default 1
+}
+
+// Move items from inventory into a chest on the same or adjacent tile.
+message DepositIntent {
+  string object_id = 1;
+  string kind = 2;
+  int32 amount = 3;   // default 1
+}
+
+// Move items from a chest on the same or adjacent tile into inventory.
+message WithdrawIntent {
+  string object_id = 1;
+  string kind = 2;
+  int32 amount = 3;   // default 1
+}
+
+// Write (or clear, with empty title+text) one note slot on a message board
+// on the same or adjacent tile.
+message WriteNoteIntent {
+  string object_id = 1;
+  int32 slot = 2;       // 0..19
+  string title = 3;     // <= 60 chars
+  string text = 4;      // <= 500 chars
 }
 
 message MoveIntent {
   Direction direction = 1;
 }
 
+// Pick up items from an item_pile on the current tile.
 message PickupIntent {
   string kind = 1;
   int32 amount = 2;  // default 1
@@ -249,6 +355,8 @@ message UseIntent {
   int32 amount = 2;  // default 1
 }
 
+// channel "local": heard by entities within earshot (Utterance event).
+// channel "thought": not heard by anyone; broadcast to the viewer only.
 message SayIntent {
   string text = 1;
   string channel = 2;  // default "local"
@@ -270,6 +378,27 @@ message EatIntent {
 message SubmitIntentResponse {
   bool accepted = 1;
   string reason = 2;  // if not accepted: "late_tick", "invalid_lease", "illegal_action"
+}
+
+// ============================================================================
+// Agent Status Service (agents report their internal state for the viewer)
+// ============================================================================
+
+service AgentStatusService {
+  rpc ReportStatus(AgentStatusReport) returns (AgentStatusAck);
+}
+
+message AgentStatusReport {
+  string lease_id = 1;
+  string entity_id = 2;
+  string mode = 3;            // "planning" | "stint" | "idle"
+  string brief = 4;           // current brief text ("" when planning)
+  string planner_thought = 5; // latest planner reasoning summary
+  string stint_json = 6;      // JSON: last Jev decision {tick, action, probabilities, eject, ...}
+}
+
+message AgentStatusAck {
+  bool accepted = 1;
 }
 
 // ============================================================================

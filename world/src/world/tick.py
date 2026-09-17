@@ -7,6 +7,17 @@ from typing import Awaitable, Callable
 
 import structlog
 
+from .events import (
+    ActionResult,
+    DamageEvent,
+    DeathEvent,
+    EntityDespawnedEvent,
+    EntitySpawnedEvent,
+    ObjectAddedEvent,
+    ObjectRemovedEvent,
+    RespawnEvent,
+    UtteranceEvent,
+)
 from .foraging import (
     CollectResult,
     EatResult,
@@ -114,6 +125,19 @@ class TickResult:
     eat_results: list[EatResult] = field(default_factory=list)
     object_changes: list[ObjectChange] = field(default_factory=list)
     duration_ms: float = 0.0
+
+    # Extended per-tick events (see docs/05_jev_agents_design.md).
+    # Every non-movement action (including collect/eat) is also reported here
+    # as an ActionResult so services have one uniform list.
+    action_results: list[ActionResult] = field(default_factory=list)
+    damage_events: list[DamageEvent] = field(default_factory=list)
+    deaths: list[DeathEvent] = field(default_factory=list)
+    respawns: list[RespawnEvent] = field(default_factory=list)
+    utterances: list[UtteranceEvent] = field(default_factory=list)
+    objects_added: list[ObjectAddedEvent] = field(default_factory=list)
+    objects_removed: list[ObjectRemovedEvent] = field(default_factory=list)
+    entities_spawned: list[EntitySpawnedEvent] = field(default_factory=list)
+    entities_despawned: list[EntityDespawnedEvent] = field(default_factory=list)
 
 
 # Type alias for tick callbacks
