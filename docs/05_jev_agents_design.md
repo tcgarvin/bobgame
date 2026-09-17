@@ -31,9 +31,9 @@ track needs to deviate, note it in the "Deviations" section at the bottom.
 
 | Field | Player | Wolf |
 | --- | --- | --- |
-| `max_health` | 20 | 10 |
+| `max_health` | 20 | 8 |
 | `max_hunger` | 100 | n/a (hunger stays at max) |
-| base attack damage | 2 | 3 |
+| base attack damage | 2 | 2 |
 
 - Hunger drops by 1 every 4 ticks. At hunger 0 the entity loses 1 health every 4 ticks.
 - Health regenerates 1 per 5 ticks while hunger > 50 and health < max.

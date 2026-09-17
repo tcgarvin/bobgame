@@ -26,7 +26,7 @@ from .types import (
 logger = structlog.get_logger()
 
 WOLF_TYPE = "wolf"
-WOLF_MAX_HEALTH = 10
+WOLF_MAX_HEALTH = 8
 
 SPAWN_INTERVAL_TICKS = 40
 MAX_WOLVES = 3

@@ -26,7 +26,7 @@ PLACEABLE_KINDS: frozenset[str] = frozenset({CHEST, MESSAGE_BOARD})
 
 # --- Combat ---------------------------------------------------------------
 
-BASE_ATTACK_DAMAGE: Mapping[str, int] = {"wolf": 3}
+BASE_ATTACK_DAMAGE: Mapping[str, int] = {"wolf": 2}
 DEFAULT_ATTACK_DAMAGE = 2
 
 WIELD_DAMAGE_BONUS: Mapping[str, int] = {SWORD: 3, AXE: 2, PICKAXE: 1}

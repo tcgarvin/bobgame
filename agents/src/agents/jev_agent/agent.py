@@ -163,6 +163,14 @@ class JevAgent:
 
         intent, sink = await self._choose_intent(digest)
 
+        if not self._model.self_info.alive:
+            # The world rejects every intent from a dead entity; stay quiet
+            # until the respawn instead of logging a rejection per tick.
+            if sink is not None:
+                sink("rejected: dead")
+            await self._report_status()
+            return
+
         try:
             result = await self.world.submit_intent(observation.tick_id, intent)
         except grpc.RpcError as error:
