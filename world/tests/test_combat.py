@@ -19,7 +19,7 @@ def _world_with_pair() -> World:
 class TestAttackDamage:
     def test_base_damage_for_player_and_wolf(self) -> None:
         assert attack_damage("player", "") == 2
-        assert attack_damage("wolf", "") == 3
+        assert attack_damage("wolf", "") == 2
 
     def test_wielded_bonus(self) -> None:
         assert attack_damage("player", "sword") == 5

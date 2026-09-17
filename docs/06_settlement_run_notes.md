@@ -106,8 +106,8 @@ Cost: Jev used roughly 14M input tokens across both runs (~7k calls at
 - Planners often write briefs with several sequential goals ("chop, then
   mine, then craft"); Jev follows the first and ejects. Shorter briefs work
   better; the system prompt could say so explicitly.
-- Jev's `say:` options are never chosen; consider dropping them from the
-  option list unless another settler or a wolf is in view.
+- Jev's `say:` options went unused in run 1 but were chosen 106 times in run
+  2 once wolves appeared; the canned phrases are worth keeping.
 - Milestone 7 (Parquet logging / replay) is still open; `stints.jsonl` plus
   the world log cover analysis for now.
 - Tick rate: 2 s / 1.2 s deadline is comfortable. Jev p95 is ~0.4 s, so
