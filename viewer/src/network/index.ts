@@ -17,4 +17,5 @@ export type {
   UtteranceHandler,
   StateUpdateHandler,
   SelectionHandler,
+  ObjectSelectionHandler,
 } from './WorldState';

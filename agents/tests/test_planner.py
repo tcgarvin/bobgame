@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import gzip
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +12,7 @@ from pydantic_ai import ModelRetry
 from pydantic_ai.models.test import TestModel
 
 from agents import world_pb2 as pb
+from agents.jev_agent import planner as planner_module
 from agents.jev_agent.planner import (
     Planner,
     _direction_value as direction_value,
@@ -19,6 +23,7 @@ from agents.jev_agent.planner import (
     trim_history,
 )
 from agents.jev_agent.stint import Brief, StintReport
+from agents.jev_agent.tracelog import AgentTrace
 from agents.jev_agent.worldmodel import WorldModel
 
 from helpers import make_entity, make_object, make_observation
@@ -242,7 +247,9 @@ def test_short_history_is_left_alone() -> None:
 async def test_a_planner_turn_publishes_its_reflection(
     bridge: RecordingBridge, tmp_path: Path
 ) -> None:
-    planner = Planner(bridge, "ada", model_name="test", log_root=tmp_path)
+    planner = Planner(
+        bridge, "ada", model_name="test", trace=AgentTrace("ada", tmp_path)
+    )
     test_model = TestModel(call_tools=[], custom_output_text="Chopping next.")
     with planner.agent.override(model=test_model):
         thought = await planner.take_turn()
@@ -254,7 +261,9 @@ async def test_a_planner_turn_publishes_its_reflection(
 async def test_the_prompt_carries_the_latest_look_and_stint_report(
     bridge: RecordingBridge, tmp_path: Path
 ) -> None:
-    planner = Planner(bridge, "ada", model_name="test", log_root=tmp_path)
+    planner = Planner(
+        bridge, "ada", model_name="test", trace=AgentTrace("ada", tmp_path)
+    )
     report = await bridge.run_stint(
         Brief(instruction="Chop", success_condition="2 wood", max_ticks=5)
     )
@@ -268,7 +277,9 @@ async def test_the_prompt_carries_the_latest_look_and_stint_report(
 def test_only_the_last_ten_reports_are_kept(
     bridge: RecordingBridge, tmp_path: Path
 ) -> None:
-    planner = Planner(bridge, "ada", model_name="test", log_root=tmp_path)
+    planner = Planner(
+        bridge, "ada", model_name="test", trace=AgentTrace("ada", tmp_path)
+    )
     for index in range(15):
         planner.note_report(
             StintReport(
@@ -295,10 +306,115 @@ def test_the_planner_model_string_gets_an_openrouter_prefix(
     bridge: RecordingBridge, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    planner = Planner(bridge, "ada", model_name="z-ai/glm-5.3-flash", log_root=tmp_path)
+    planner = Planner(
+        bridge,
+        "ada",
+        model_name="z-ai/glm-5.3-flash",
+        trace=AgentTrace("ada", tmp_path),
+    )
     assert planner.model_name == "openrouter:z-ai/glm-5.3-flash"
     assert (
-        Planner(bridge, "ada", model_name="test", log_root=tmp_path).model_name
+        Planner(
+            bridge, "ada", model_name="test", trace=AgentTrace("ada", tmp_path)
+        ).model_name
         == "test"
     )
     assert planner.memory_path == tmp_path / "agent-ada" / "memory.md"
+
+
+def planner_lines(trace: AgentTrace) -> list[dict[str, object]]:
+    """Every record written to `planner.jsonl.gz`."""
+    trace.planner.close()
+    with gzip.open(trace.directory / "planner.jsonl.gz", "rt", encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+async def test_a_turn_writes_its_prompt_tools_and_result_to_the_trace(
+    bridge: RecordingBridge, tmp_path: Path
+) -> None:
+    trace = AgentTrace("ada", tmp_path)
+    planner = Planner(bridge, "ada", model_name="test", trace=trace)
+    test_model = TestModel(call_tools=["remember"], custom_output_text="Noted.")
+    with planner.agent.override(model=test_model):
+        await planner.take_turn()
+
+    lines = planner_lines(trace)
+    events = [line["event"] for line in lines]
+    assert events[0] == "turn_start"
+    assert events[-1] == "turn_end"
+    assert "tool_call" in events and "tool_result" in events
+    assert all(line["entity_id"] == "ada" for line in lines)
+    assert all(line["turn"] == 1 for line in lines)
+    assert all(line["tick"] == bridge.model.tick for line in lines)
+
+    start = lines[0]
+    assert isinstance(start["prompt"], str)
+    assert "you are ada at (10, 10)" in start["prompt"]
+
+    call = next(line for line in lines if line["event"] == "tool_call")
+    assert call["tool"] == "remember"
+    assert isinstance(call["args"], dict)
+
+    result = next(line for line in lines if line["event"] == "tool_result")
+    assert result["tool"] == "remember"
+    assert result["result"] == "noted"
+
+    end = lines[-1]
+    assert end["thought"] == "Noted."
+    assert end["tool_calls"] == 1
+    assert isinstance(end["duration_ms"], int)
+    assert set(end["usage"]) == {"input_tokens", "output_tokens"}  # type: ignore[arg-type]
+
+
+async def test_a_history_reset_is_traced(
+    bridge: RecordingBridge, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(planner_module, "TURN_RETRY_SECONDS", 0.0)
+    trace = AgentTrace("ada", tmp_path)
+    planner = Planner(bridge, "ada", model_name="test", trace=trace)
+    # Two turns in a row without a tool call drop the history.
+    with planner.agent.override(model=TestModel(call_tools=[])):
+        await planner.take_turn()
+        await planner.take_turn()
+
+    events = [line["event"] for line in planner_lines(trace)]
+    assert events.count("turn_start") == 2
+    assert "history_reset" in events
+    assert not planner.history
+
+
+async def test_a_failed_turn_is_traced(
+    bridge: RecordingBridge, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(planner_module, "TURN_RETRY_SECONDS", 0.0)
+    trace = AgentTrace("ada", tmp_path)
+    planner = Planner(bridge, "ada", model_name="test", trace=trace)
+
+    async def explode() -> str:
+        raise RuntimeError("openrouter is down")
+
+    monkeypatch.setattr(planner, "take_turn", explode)
+    task = asyncio.create_task(planner.run())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    failures = [line for line in planner_lines(trace) if line["event"] == "turn_failed"]
+    assert failures, "the failure reached the trace"
+    assert "openrouter is down" in str(failures[0]["error"])
+
+
+async def test_the_tool_budget_is_traced(
+    bridge: RecordingBridge, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(planner_module, "MAX_TOOL_CALLS_PER_TURN", 0)
+    trace = AgentTrace("ada", tmp_path)
+    planner = Planner(bridge, "ada", model_name="test", trace=trace)
+    with planner.agent.override(model=TestModel(call_tools=["look"])):
+        thought = await planner.take_turn()
+
+    assert "tool calls" in thought
+    events = [line["event"] for line in planner_lines(trace)]
+    assert events == ["turn_start", "tool_budget_reached"]

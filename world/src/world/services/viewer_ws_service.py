@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
@@ -11,48 +10,32 @@ from websockets import ConnectionClosed
 from websockets.asyncio.server import Server, ServerConnection
 
 from ..chunks import CHUNK_SIZE, ChunkManager
-from ..encoding import encode_terrain_base64
-from ..exceptions import EntityNotFoundError, ObjectNotFoundError
-from ..state import Entity, World, WorldObject
+from ..exceptions import EntityNotFoundError
+from ..state import World
 from ..tick import TickConfig, TickContext, TickResult
 from ..types import Position
+from ..viewer_payload import (
+    action_payload,
+    entity_state,
+    entity_updates,
+    move_payload,
+    object_change_payload,
+    object_state,
+    utterance_payload,
+)
+from .chunk_subscriptions import (
+    ChunkSubscription,
+    apply_subscription,
+    chunk_data_message,
+    requested_chunks,
+    viewport_chunks,
+)
 
 logger = structlog.get_logger()
 
 
-def _entity_state(entity: Entity) -> dict[str, Any]:
-    """JSON shape for an entity sent to the viewer."""
-    return {
-        "entity_id": entity.entity_id,
-        "position": {"x": entity.position.x, "y": entity.position.y},
-        "entity_type": entity.entity_type,
-        "tags": list(entity.tags),
-        "health": entity.health,
-        "max_health": entity.max_health,
-        "hunger": entity.hunger,
-        "max_hunger": entity.max_hunger,
-        "wielded": entity.wielded,
-        "alive": entity.alive,
-        "inventory": {kind: count for kind, count in entity.inventory.items},
-    }
-
-
-def _object_state(obj: WorldObject) -> dict[str, Any]:
-    """JSON shape for a world object sent to the viewer."""
-    return {
-        "object_id": obj.object_id,
-        "position": {"x": obj.position.x, "y": obj.position.y},
-        "object_type": obj.object_type,
-        "state": dict(obj.state),
-    }
-
-
-@dataclass
-class ViewerClientState:
-    """Per-client subscription state for chunk-based streaming."""
-
-    subscribed_chunks: set[tuple[int, int]] = field(default_factory=set)
-    chunk_versions: dict[tuple[int, int], int] = field(default_factory=dict)
+# Per-client subscription state for chunk-based streaming.
+ViewerClientState = ChunkSubscription
 
 
 class ViewerWebSocketService:
@@ -71,9 +54,11 @@ class ViewerWebSocketService:
         host: str = "0.0.0.0",
         port: int = 8765,
         chunk_manager: ChunkManager | None = None,
+        run_id: str = "",
     ):
         self.world = world
         self.tick_config = tick_config
+        self.run_id = run_id
         self.host = host
         self.port = port
         self._clients: set[ServerConnection] = set()
@@ -176,22 +161,14 @@ class ViewerWebSocketService:
         self, client_id: int, websocket: ServerConnection, message: dict[str, Any]
     ) -> None:
         """Handle viewport subscription - subscribe to chunks covering viewport."""
-        viewport = message.get("viewport", {})
-        x = viewport.get("x", 0)
-        y = viewport.get("y", 0)
-        width = viewport.get("width", 64)
-        height = viewport.get("height", 48)
-
-        chunks = self._chunk_manager.get_chunks_for_viewport(x, y, width, height)
+        chunks = viewport_chunks(self._chunk_manager, message)
         await self._subscribe_to_chunks(client_id, websocket, chunks)
 
     async def _handle_subscribe_chunks(
         self, client_id: int, websocket: ServerConnection, message: dict[str, Any]
     ) -> None:
         """Handle explicit chunk subscription."""
-        chunk_list = message.get("chunks", [])
-        chunks = [(int(c[0]), int(c[1])) for c in chunk_list if len(c) >= 2]
-        await self._subscribe_to_chunks(client_id, websocket, chunks)
+        await self._subscribe_to_chunks(client_id, websocket, requested_chunks(message))
 
     async def _subscribe_to_chunks(
         self,
@@ -204,62 +181,24 @@ class ViewerWebSocketService:
         if not client_state:
             return
 
-        new_chunks = set(chunks) - client_state.subscribed_chunks
-        old_chunks = client_state.subscribed_chunks - set(chunks)
+        async def send(message: dict[str, Any]) -> None:
+            await self._send_to_client(websocket, message)
 
-        # Send unload messages for chunks no longer needed
-        for chunk_x, chunk_y in old_chunks:
-            await self._send_to_client(
-                websocket,
-                {"type": "chunk_unload", "chunk_x": chunk_x, "chunk_y": chunk_y},
-            )
-
-        # Update subscription
-        client_state.subscribed_chunks = set(chunks)
-
-        # Send chunk data for newly subscribed chunks
-        for chunk_x, chunk_y in new_chunks:
-            chunk = self._chunk_manager.get_chunk(chunk_x, chunk_y)
-            if chunk:
-                await self._send_chunk_data(websocket, chunk)
-                client_state.chunk_versions[(chunk_x, chunk_y)] = chunk.version
+        added, removed = await apply_subscription(
+            client_state, self._chunk_manager, self.world, chunks, send
+        )
 
         logger.debug(
             "chunks_subscribed",
             client_id=client_id,
             count=len(chunks),
-            new=len(new_chunks),
-            removed=len(old_chunks),
+            new=added,
+            removed=removed,
         )
 
     async def _send_chunk_data(self, websocket: ServerConnection, chunk: Any) -> None:
         """Send full chunk data to a client."""
-        # Get entities in this chunk
-        entities = []
-        for entity_id in chunk.entities:
-            try:
-                entities.append(_entity_state(self.world.get_entity(entity_id)))
-            except EntityNotFoundError:
-                pass  # Entity may have been removed
-
-        # Get objects in this chunk
-        objects = []
-        for object_id in chunk.objects:
-            try:
-                objects.append(_object_state(self.world.get_object(object_id)))
-            except ObjectNotFoundError:
-                pass  # Object may have been removed
-
-        message = {
-            "type": "chunk_data",
-            "chunk_x": chunk.chunk_x,
-            "chunk_y": chunk.chunk_y,
-            "version": chunk.version,
-            "terrain": encode_terrain_base64(chunk.terrain),
-            "entities": entities,
-            "objects": objects,
-        }
-        await self._send_to_client(websocket, message)
+        await self._send_to_client(websocket, chunk_data_message(chunk, self.world))
 
     async def _send_to_client(
         self, websocket: ServerConnection, message: dict[str, Any]
@@ -322,6 +261,7 @@ class ViewerWebSocketService:
                 if settlement is not None
                 else None
             ),
+            "run_id": self.run_id or None,
         }
 
     def on_tick_start(self, context: TickContext) -> None:
@@ -337,17 +277,8 @@ class ViewerWebSocketService:
 
     def on_tick_complete(self, result: TickResult) -> None:
         """Called after tick processing - broadcasts tick_completed with move results."""
-        moves = []
+        moves = [move_payload(move_result) for move_result in result.move_results]
         for move_result in result.move_results:
-            moves.append(
-                {
-                    "entity_id": move_result.entity_id,
-                    "from": {"x": move_result.from_pos.x, "y": move_result.from_pos.y},
-                    "to": {"x": move_result.to_pos.x, "y": move_result.to_pos.y},
-                    "success": move_result.success,
-                }
-            )
-
             # Update chunk manager for entity movements
             if move_result.success:
                 self._chunk_manager.update_entity_position(
@@ -356,50 +287,24 @@ class ViewerWebSocketService:
                     move_result.to_pos,
                 )
 
-        object_changes = []
-        for change in result.object_changes:
-            object_changes.append(
-                {
-                    "object_id": change.object_id,
-                    "field": change.field,
-                    "old_value": change.old_value,
-                    "new_value": change.new_value,
-                }
-            )
+        object_changes = [
+            object_change_payload(change) for change in result.object_changes
+        ]
 
         # Objects added/removed this tick, kept in sync with the chunk index.
         objects_added = []
         for added in result.objects_added:
             self._chunk_manager.add_object(added.obj.object_id, added.obj.position)
-            objects_added.append(_object_state(added.obj))
+            objects_added.append(object_state(added.obj))
 
         objects_removed = []
         for removed in result.objects_removed:
             self._chunk_manager.remove_object(removed.object_id)
             objects_removed.append(removed.object_id)
 
-        actions = [
-            {
-                "entity_id": action.entity_id,
-                "action_type": action.action_type,
-                "success": action.success,
-                "details": action.details,
-            }
-            for action in result.action_results
-        ]
+        actions = [action_payload(action) for action in result.action_results]
 
-        utterances = [
-            {
-                "speaker_id": utterance.speaker_id,
-                "channel": utterance.channel,
-                "text": utterance.text,
-                "position": {
-                    "x": utterance.position.x,
-                    "y": utterance.position.y,
-                },
-            }
-            for utterance in result.utterances
-        ]
+        utterances = [utterance_payload(utterance) for utterance in result.utterances]
 
         total_actions = (
             len(result.move_results)
@@ -425,7 +330,7 @@ class ViewerWebSocketService:
 
     def _entity_updates(self) -> list[dict[str, Any]]:
         """Full state of every entity, sent every tick."""
-        return [_entity_state(entity) for entity in self.world.all_entities().values()]
+        return entity_updates(self.world)
 
     def _emit_spawns_and_despawns(self, result: TickResult) -> None:
         """Emit spawn/despawn messages and keep the chunk index in sync."""
@@ -473,7 +378,7 @@ class ViewerWebSocketService:
     ) -> dict[str, Any]:
         """Entity state for a spawn message, falling back to the event data."""
         try:
-            return _entity_state(self.world.get_entity(entity_id))
+            return entity_state(self.world.get_entity(entity_id))
         except EntityNotFoundError:
             return {
                 "entity_id": entity_id,

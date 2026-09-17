@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
@@ -16,8 +18,8 @@ from agents.jev_agent.stint import (
     END_TICKS,
     Brief,
     Stint,
-    default_log_path,
 )
+from agents.jev_agent.tracelog import AgentTrace
 from agents import world_pb2 as pb
 from agents.jev_agent.worldmodel import WorldModel
 
@@ -57,10 +59,11 @@ def make_brief(**overrides: object) -> Brief:
 class StintHarness:
     """Drives a stint over a scripted sequence of observations."""
 
-    def __init__(self, jev: FakeJevClient, brief: Brief, log_path: Path) -> None:
+    def __init__(self, jev: FakeJevClient, brief: Brief, trace: AgentTrace) -> None:
         self.model = WorldModel("ada")
         self.jev = jev
-        self.stint = Stint(brief, self.model, jev, log_path=log_path)
+        self.trace = trace
+        self.stint = Stint(brief, self.model, jev, trace=trace)
 
     async def tick(self, observation) -> object:  # type: ignore[no-untyped-def]
         """Feed one observation through the model and the stint."""
@@ -71,22 +74,30 @@ class StintHarness:
 
 
 @pytest.fixture
-def log_path(tmp_path: Path) -> Path:
-    """A throwaway JSONL path."""
-    return tmp_path / "logs" / "agent-ada" / "stints.jsonl"
+def trace(tmp_path: Path) -> Iterator[AgentTrace]:
+    """A throwaway trace directory for `ada`."""
+    agent_trace = AgentTrace("ada", tmp_path / "logs")
+    yield agent_trace
+    agent_trace.close()
 
 
-async def test_jev_choice_becomes_the_matching_intent(log_path: Path) -> None:
+def read_lines(path: Path) -> list[dict[str, object]]:
+    """Every JSON record in a gzip JSONL file."""
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+async def test_jev_choice_becomes_the_matching_intent(trace: AgentTrace) -> None:
     jev = FakeJevClient(script=[decision("move_E")])
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     intent = await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     assert intent.HasField("move")
     assert intent.move.direction == 3  # EAST
 
 
-async def test_extract_choice_targets_the_right_object(log_path: Path) -> None:
+async def test_extract_choice_targets_the_right_object(trace: AgentTrace) -> None:
     jev = FakeJevClient(script=[decision("extract:tree_1")])
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     intent = await harness.tick(
         make_observation(
             1,
@@ -97,15 +108,15 @@ async def test_extract_choice_targets_the_right_object(log_path: Path) -> None:
     assert intent.extract.object_id == "tree_1"
 
 
-async def test_an_option_jev_never_saw_falls_back_to_wait(log_path: Path) -> None:
+async def test_an_option_jev_never_saw_falls_back_to_wait(trace: AgentTrace) -> None:
     jev = FakeJevClient(script=[decision("fly_to_the_moon")])
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     intent = await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     assert intent.HasField("wait")
     assert "unknown option" in harness.stint.records[0].note
 
 
-async def test_two_high_eject_ticks_in_a_row_end_the_stint(log_path: Path) -> None:
+async def test_two_high_eject_ticks_in_a_row_end_the_stint(trace: AgentTrace) -> None:
     jev = FakeJevClient(
         script=[
             decision("wait", eject=0.9),
@@ -113,7 +124,7 @@ async def test_two_high_eject_ticks_in_a_row_end_the_stint(log_path: Path) -> No
             decision("wait"),
         ]
     )
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     assert not harness.stint.finished
     await harness.tick(make_observation(2, make_entity("ada", (10, 10))))
@@ -123,19 +134,19 @@ async def test_two_high_eject_ticks_in_a_row_end_the_stint(log_path: Path) -> No
     assert harness.stint.end_reason == END_SUCCESS_OR_JUDGEMENT
 
 
-async def test_a_single_high_eject_does_not_end_the_stint(log_path: Path) -> None:
+async def test_a_single_high_eject_does_not_end_the_stint(trace: AgentTrace) -> None:
     jev = FakeJevClient(
         script=[decision("wait", eject=0.9), decision("wait", eject=0.1)] * 2
     )
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     for tick in range(1, 5):
         await harness.tick(make_observation(tick, make_entity("ada", (10, 10))))
     assert not harness.stint.finished
 
 
-async def test_the_tick_budget_ends_the_stint(log_path: Path) -> None:
+async def test_the_tick_budget_ends_the_stint(trace: AgentTrace) -> None:
     jev = FakeJevClient()
-    harness = StintHarness(jev, make_brief(max_ticks=2), log_path)
+    harness = StintHarness(jev, make_brief(max_ticks=2), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     await harness.tick(make_observation(2, make_entity("ada", (10, 10))))
     assert not harness.stint.finished
@@ -145,9 +156,9 @@ async def test_the_tick_budget_ends_the_stint(log_path: Path) -> None:
     assert harness.stint.ticks_used == 2
 
 
-async def test_death_ends_the_stint(log_path: Path) -> None:
+async def test_death_ends_the_stint(trace: AgentTrace) -> None:
     jev = FakeJevClient()
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     await harness.tick(
         make_observation(2, make_entity("ada", (10, 10), health=0, alive=False))
@@ -156,9 +167,9 @@ async def test_death_ends_the_stint(log_path: Path) -> None:
     assert harness.stint.end_reason == END_DEATH
 
 
-async def test_three_identical_failures_end_the_stint(log_path: Path) -> None:
+async def test_three_identical_failures_end_the_stint(trace: AgentTrace) -> None:
     jev = FakeJevClient(default_action="move_N")
-    harness = StintHarness(jev, make_brief(max_ticks=20), log_path)
+    harness = StintHarness(jev, make_brief(max_ticks=20), trace)
     failure = acted_event("ada", "move", False, "blocked")
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     for tick in range(2, 5):
@@ -169,9 +180,9 @@ async def test_three_identical_failures_end_the_stint(log_path: Path) -> None:
     assert harness.stint.end_reason == END_REPEATED_FAILURE
 
 
-async def test_a_success_resets_the_failure_streak(log_path: Path) -> None:
+async def test_a_success_resets_the_failure_streak(trace: AgentTrace) -> None:
     jev = FakeJevClient(default_action="move_N")
-    harness = StintHarness(jev, make_brief(max_ticks=20), log_path)
+    harness = StintHarness(jev, make_brief(max_ticks=20), trace)
     failure = acted_event("ada", "move", False, "blocked")
     success = acted_event("ada", "move", True, "moved N")
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
@@ -190,9 +201,9 @@ async def test_a_success_resets_the_failure_streak(log_path: Path) -> None:
     assert not harness.stint.finished
 
 
-async def test_danger_rule_overrides_jev_when_death_is_close(log_path: Path) -> None:
+async def test_danger_rule_overrides_jev_when_death_is_close(trace: AgentTrace) -> None:
     jev = FakeJevClient(script=[decision("wait", danger=0.95)])
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     intent = await harness.tick(
         make_observation(
             1,
@@ -204,9 +215,9 @@ async def test_danger_rule_overrides_jev_when_death_is_close(log_path: Path) -> 
     assert harness.stint.records[0].note.startswith("danger override")
 
 
-async def test_danger_rule_leaves_healthy_actors_alone(log_path: Path) -> None:
+async def test_danger_rule_leaves_healthy_actors_alone(trace: AgentTrace) -> None:
     jev = FakeJevClient(script=[decision("wait", danger=0.95)])
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     intent = await harness.tick(
         make_observation(
             1,
@@ -218,14 +229,14 @@ async def test_danger_rule_leaves_healthy_actors_alone(log_path: Path) -> None:
 
 
 async def test_a_jev_failure_falls_back_to_wait_without_crashing(
-    log_path: Path,
+    trace: AgentTrace,
 ) -> None:
     class BrokenJev:
         async def decide(self, state, options):  # type: ignore[no-untyped-def]
             raise RuntimeError("typesafe is down")
 
     model = WorldModel("ada")
-    stint = Stint(make_brief(), model, BrokenJev(), log_path=log_path)
+    stint = Stint(make_brief(), model, BrokenJev(), trace=trace)
     digest = model.update(make_observation(1, make_entity("ada", (10, 10))))
     intent = await stint.decide(digest)
     stint.record_intent_result("accepted")
@@ -235,10 +246,10 @@ async def test_a_jev_failure_falls_back_to_wait_without_crashing(
 
 
 async def test_check_every_repeats_the_last_action_between_calls(
-    log_path: Path,
+    trace: AgentTrace,
 ) -> None:
     jev = FakeJevClient(default_action="move_E")
-    harness = StintHarness(jev, make_brief(max_ticks=6, check_every=2), log_path)
+    harness = StintHarness(jev, make_brief(max_ticks=6, check_every=2), trace)
     for tick in range(1, 5):
         # The actor really moves east each tick, so no move counts as blocked.
         await harness.tick(make_observation(tick, make_entity("ada", (9 + tick, 10))))
@@ -248,10 +259,10 @@ async def test_check_every_repeats_the_last_action_between_calls(
 
 
 async def test_accepted_move_that_goes_nowhere_counts_as_blocked(
-    log_path: Path,
+    trace: AgentTrace,
 ) -> None:
     jev = FakeJevClient(default_action="move_E")
-    harness = StintHarness(jev, make_brief(max_ticks=20), log_path)
+    harness = StintHarness(jev, make_brief(max_ticks=20), trace)
     for tick in range(1, 5):
         await harness.tick(make_observation(tick, make_entity("ada", (10, 10))))
     results = [record.intent_result for record in harness.stint.records]
@@ -260,9 +271,9 @@ async def test_accepted_move_that_goes_nowhere_counts_as_blocked(
     assert any("blocked" in line for line in harness.model.recent_history())
 
 
-async def test_travel_choice_sets_and_clears_the_travel(log_path: Path) -> None:
+async def test_travel_choice_sets_and_clears_the_travel(trace: AgentTrace) -> None:
     jev = FakeJevClient(script=[decision("travel_to:tree_1"), decision("stop_travel")])
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     observation = make_observation(
         1,
         make_entity("ada", (10, 10)),
@@ -277,26 +288,37 @@ async def test_travel_choice_sets_and_clears_the_travel(log_path: Path) -> None:
 
 
 async def test_a_preset_travel_offers_follow_travel_on_the_first_tick(
-    log_path: Path,
+    trace: AgentTrace,
 ) -> None:
     jev = FakeJevClient(default_action="follow_travel")
     brief = make_brief(travel=TravelState(target=(14, 10), label="(14, 10)"))
-    harness = StintHarness(jev, brief, log_path)
+    harness = StintHarness(jev, brief, trace)
     intent = await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     assert "follow_travel" in jev.last_options
     assert intent.move.direction == 3  # EAST
 
 
-async def test_every_tick_is_written_to_the_jsonl_log(log_path: Path) -> None:
+async def test_every_tick_is_written_to_the_stint_trace(trace: AgentTrace) -> None:
     jev = FakeJevClient(script=[decision("move_E"), decision("wait")])
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     await harness.tick(make_observation(2, make_entity("ada", (11, 10))))
+    trace.close()
 
-    lines = log_path.read_text(encoding="utf-8").strip().split("\n")
-    assert len(lines) == 2
-    first = json.loads(lines[0])
+    lines = read_lines(trace.directory / "stints.jsonl.gz")
+    start, first, second = lines
+    assert start["event"] == "stint_start"
+    assert start["stint_id"] == "ada-1"
+    assert start["brief"] == {
+        "instruction": "Chop the nearest tree",
+        "success_condition": "you hold 2 more wood",
+        "max_ticks": 5,
+        "notes": "",
+        "check_every": 1,
+        "travel": None,
+    }
     assert first["entity_id"] == "ada"
+    assert first["stint_id"] == "ada-1"
     assert first["tick"] == 1
     assert first["action"] == "move_E"
     assert first["input_tokens"] == 420
@@ -304,11 +326,85 @@ async def test_every_tick_is_written_to_the_jsonl_log(log_path: Path) -> None:
     assert first["intent_result"] == "accepted"
     assert first["options"] > 5
     assert first["top"][0][0] == "move_E"
+    assert first["probabilities"] == {"move_E": 0.8, "wait": 0.2}
+    assert first["confidence"] == 0.7
+    assert second["tick"] == 2
+    assert "event" not in first
 
 
-async def test_the_report_summarises_the_whole_stint(log_path: Path) -> None:
+async def test_a_preset_travel_is_serialised_in_the_start_line(
+    trace: AgentTrace,
+) -> None:
+    jev = FakeJevClient(default_action="follow_travel")
+    brief = make_brief(travel=TravelState(target=(14, 10), label="(14, 10)"))
+    harness = StintHarness(jev, brief, trace)
+    await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
+    trace.close()
+
+    start = read_lines(trace.directory / "stints.jsonl.gz")[0]
+    assert start["brief"]["travel"] == {"target": [14, 10], "label": "(14, 10)"}  # type: ignore[index]
+
+
+async def test_the_end_line_carries_the_report(trace: AgentTrace) -> None:
+    jev = FakeJevClient(default_action="wait")
+    harness = StintHarness(jev, make_brief(max_ticks=1), trace)
+    await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
+    await harness.tick(make_observation(2, make_entity("ada", (10, 10))))
+    trace.close()
+
+    end = read_lines(trace.directory / "stints.jsonl.gz")[-1]
+    assert end["event"] == "stint_end"
+    assert end["stint_id"] == "ada-1"
+    assert end["end_reason"] == END_TICKS
+    assert end["ticks_used"] == 1
+    assert end["max_ticks"] == 1
+    assert isinstance(end["report"], str)
+    assert "STINT REPORT: Chop the nearest tree" in end["report"]
+
+
+async def test_jev_states_are_logged_once_per_real_call(trace: AgentTrace) -> None:
     jev = FakeJevClient(default_action="move_E")
-    harness = StintHarness(jev, make_brief(max_ticks=2), log_path)
+    harness = StintHarness(jev, make_brief(max_ticks=6, check_every=2), trace)
+    for tick in range(1, 5):
+        await harness.tick(make_observation(tick, make_entity("ada", (9 + tick, 10))))
+    trace.close()
+
+    states = read_lines(trace.directory / "jev_states.jsonl.gz")
+    assert len(states) == len(jev.calls) == 2, "repeats do not call Jev or log a state"
+    assert [state["tick"] for state in states] == [1, 3]
+    assert states[0]["entity_id"] == "ada"
+    assert states[0]["stint_id"] == "ada-1"
+    assert states[0]["state"] == jev.calls[0][0]
+    assert states[0]["criteria"] == jev.calls[0][1]
+
+
+async def test_a_timed_out_call_still_logs_the_state_it_sent(
+    trace: AgentTrace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from agents.jev_agent import stint as stint_module
+
+    class SlowJev(FakeJevClient):
+        async def decide(self, state, options):  # type: ignore[no-untyped-def]
+            if len(self.calls) >= 1:
+                await asyncio.sleep(0.2)
+            return await super().decide(state, options)
+
+    monkeypatch.setattr(stint_module, "JEV_TICK_BUDGET_SECONDS", 0.05)
+    jev = SlowJev(default_action="move_E")
+    harness = StintHarness(jev, make_brief(max_ticks=10), trace)
+    await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
+    await harness.tick(make_observation(2, make_entity("ada", (11, 10))))
+    trace.close()
+
+    states = read_lines(trace.directory / "jev_states.jsonl.gz")
+    assert [state["tick"] for state in states] == [1, 2]
+
+
+async def test_the_report_summarises_the_whole_stint(trace: AgentTrace) -> None:
+    jev = FakeJevClient(default_action="move_E")
+    harness = StintHarness(jev, make_brief(max_ticks=2), trace)
     await harness.tick(
         make_observation(1, make_entity("ada", (10, 10), inventory={"wood": 1}))
     )
@@ -339,9 +435,9 @@ async def test_the_report_summarises_the_whole_stint(log_path: Path) -> None:
     assert len(text.split("\n")) <= 22
 
 
-async def test_the_report_mentions_damage_and_speech(log_path: Path) -> None:
+async def test_the_report_mentions_damage_and_speech(trace: AgentTrace) -> None:
     jev = FakeJevClient()
-    harness = StintHarness(jev, make_brief(max_ticks=4), log_path)
+    harness = StintHarness(jev, make_brief(max_ticks=4), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     await harness.tick(
         make_observation(
@@ -369,24 +465,22 @@ async def test_the_report_mentions_damage_and_speech(log_path: Path) -> None:
     assert any("bob" in line for line in report.notable)
 
 
-def test_default_log_path_follows_the_documented_layout(tmp_path: Path) -> None:
-    assert default_log_path("ada", tmp_path) == tmp_path / "agent-ada" / "stints.jsonl"
-    assert default_log_path("ada") == Path("logs/agent-ada/stints.jsonl")
-
-
-async def test_status_json_reports_the_last_decision(log_path: Path) -> None:
+async def test_status_json_reports_the_last_decision(trace: AgentTrace) -> None:
     jev = FakeJevClient(script=[decision("move_E", eject=0.4, danger=0.2)])
-    harness = StintHarness(jev, make_brief(), log_path)
+    harness = StintHarness(jev, make_brief(), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     payload = json.loads(harness.stint.status_json())
     assert payload["action"] == "move_E"
     assert payload["eject"] == 0.4
     assert payload["danger"] == 0.2
     assert payload["ticks_used"] == 1
+    assert payload["stint_id"] == "ada-1"
+    assert payload["success_condition"] == "you hold 2 more wood"
+    assert payload["notes"] == ""
 
 
 async def test_a_slow_jev_answer_falls_back_to_repeating_the_last_action(
-    log_path: Path, monkeypatch: pytest.MonkeyPatch
+    trace: AgentTrace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
 
@@ -400,7 +494,7 @@ async def test_a_slow_jev_answer_falls_back_to_repeating_the_last_action(
 
     monkeypatch.setattr(stint_module, "JEV_TICK_BUDGET_SECONDS", 0.05)
     jev = SlowJev(default_action="move_E")
-    harness = StintHarness(jev, make_brief(max_ticks=10), log_path)
+    harness = StintHarness(jev, make_brief(max_ticks=10), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     intent = await harness.tick(make_observation(2, make_entity("ada", (11, 10))))
     assert intent.HasField("move"), "the last action is repeated on timeout"

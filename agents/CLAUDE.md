@@ -181,9 +181,34 @@ set -a; . ../.env; set +a          # TYPESAFE_API_KEY, OPENROUTER_API_KEY
 uv run python -m agents.jev_agent --entity ada --server localhost:50051
 ```
 
-Flags: `--log-root` (default `./logs`), `--planner-model`, `--jev-model`,
-`--log-level`. Logs go to stderr; per-tick Jev traces go to
-`logs/agent-<id>/stints.jsonl` and planner notes to `logs/agent-<id>/memory.md`.
+Flags: `--log-root`, `--planner-model`, `--jev-model`, `--log-level`. Logs go to
+stderr; the trace files go under `<log_root>/agent-<id>/`.
+
+### Trace files and the log root
+
+The log root is `--log-root` when it is given, else `$BOBGAME_RUN_DIR/agents`
+when that environment variable is set (`dev.sh` exports it; see
+[docs/07_replay.md](../docs/07_replay.md)), else `./logs`. Each agent process
+opens three gzip JSONL files in `<log_root>/agent-<id>/` once, writes one JSON
+object per line, and flushes with `zlib.Z_SYNC_FLUSH` after every line, so a
+reader sees everything up to a Ctrl-C (readers must treat an `EOFError` or
+`zlib.error` on the last partial line as end of file). `stints.jsonl.gz` is the
+light one: a `stint_start` line with the whole brief, one record per tick with
+the chosen action, the full probability map, confidence, eject, danger, latency
+and the world's verdict, and a `stint_end` line carrying the end reason and the
+rendered `StintReport`. `jev_states.jsonl.gz` is the heavy one: the exact state
+and criteria sent to Jev, one line per real call (repeats under `check_every`
+make no call and write no line; a timed-out call still wrote its state).
+`planner.jsonl.gz` holds the planner's turns: `turn_start` with the full prompt,
+`tool_call` and `tool_result` with untruncated args and results, `turn_end` with
+the reflection, tool count, duration and token usage, plus `turn_failed`,
+`tool_budget_reached` and `history_reset`. `memory.md`, the planner's persistent
+notes, sits in the same directory. A file that cannot be opened or written
+complains once and then goes inert - tracing never stops the agent.
+
+`tracelog.py` owns this: `JsonlGzWriter`, the per-entity `AgentTrace` (created
+once per process by `JevAgent`, closed in `run_agent`'s finally block) and
+`resolve_log_root`.
 
 ### Module map
 
@@ -197,6 +222,7 @@ Flags: `--log-root` (default `./logs`), `--planner-model`, `--jev-model`,
 | `jevstate.py` | The compact JSON state (with the 17x17 ASCII map) Jev sees |
 | `jevclient.py` | The TypeSafe System One call; `JevClient` protocol for fakes |
 | `stint.py` | `Brief` -> one Jev call per tick -> Intent, plus the code rules and `StintReport` |
+| `tracelog.py` | The gzip JSONL trace files, the `AgentTrace` that owns them, and the log-root rules |
 | `planner.py` | The pydantic-ai agent, its tools, and the turn loop |
 | `agent.py` | The tick loop and the planner handshake |
 

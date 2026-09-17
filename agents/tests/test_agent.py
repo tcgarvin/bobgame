@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import json
 from pathlib import Path
 from typing import AsyncIterator, Sequence
 
@@ -275,3 +277,55 @@ async def test_exactly_one_intent_is_submitted_per_tick(
     agent.planner.run = idle  # type: ignore[method-assign]
     await agent.run()
     assert len(world.submitted) == ticks
+
+
+async def test_the_agent_writes_its_trace_files_under_the_log_root(
+    tmp_path: Path,
+) -> None:
+    jev = FakeJevClient(default_action="move_E")
+    world = FakeWorldClient(observations(6))
+    agent = build_agent(world, jev, tmp_path)
+
+    async def plan() -> None:
+        await agent.run_stint(
+            Brief(
+                instruction="Walk east",
+                success_condition="you are 2 tiles east",
+                max_ticks=2,
+            )
+        )
+        await asyncio.sleep(3600)
+
+    agent.planner.run = plan  # type: ignore[method-assign]
+    await agent.run()
+    agent.trace.close()
+
+    directory = tmp_path / "agent-ada"
+    assert agent.planner.memory_path == directory / "memory.md"
+    with gzip.open(directory / "stints.jsonl.gz", "rt", encoding="utf-8") as handle:
+        lines = [json.loads(line) for line in handle if line.strip()]
+    assert [line.get("event", "record") for line in lines] == [
+        "stint_start",
+        "record",
+        "record",
+        "stint_end",
+    ]
+    assert {line["stint_id"] for line in lines} == {"ada-1"}
+    assert (directory / "jev_states.jsonl.gz").exists()
+
+
+async def test_the_log_root_falls_back_to_the_run_directory(
+    fake_jev: FakeJevClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BOBGAME_RUN_DIR", str(tmp_path / "run"))
+    agent = JevAgent(
+        FakeWorldClient([]),  # type: ignore[arg-type]
+        fake_jev,
+        "ada",
+        planner_model="test",
+    )
+    try:
+        assert agent.log_root == tmp_path / "run" / "agents"
+        assert agent.trace.directory == tmp_path / "run" / "agents" / "agent-ada"
+    finally:
+        agent.trace.close()

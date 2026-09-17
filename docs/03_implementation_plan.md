@@ -14,7 +14,7 @@ This plan is organized into incremental milestones. Each milestone produces a wo
 | ✓ | 5a: Berry Foraging Foundation |
 | ✓ | 5b: Simple Agent & Multi-Agent |
 | ✓ | 6: Runner & Process Management |
-| | 7: Logging & Replay |
+| ◐ | 7: Run Recording & Replay (tooling done; world/agents/viewer in progress) |
 | | 8: LLM Agent Integration |
 
 ---
@@ -46,7 +46,7 @@ Milestone 5b: Simple Agent & Multi-Agent             ✓
 Milestone 6: Runner & Process Management             ✓
      │
      ▼
-Milestone 7: Logging & Replay                        ← NEXT
+Milestone 7: Run Recording & Replay                  ← IN PROGRESS
      │
      ▼
 Milestone 8: LLM Agent Integration
@@ -218,30 +218,66 @@ cd runner && uv run python -m runner --config configs/foraging.toml
 
 ---
 
-## Milestone 7: Logging & Replay
+## Milestone 7: Run Recording & Replay
 
-**Goal**: Parquet logging and replay viewer
+**Goal**: Every run is recorded to a run directory that a replay server can
+serve to the viewer, with seeking, stepping, playback and deep links into any
+tick.
+
+**Contract**: [07_replay.md](07_replay.md) — file formats, replay protocol,
+deep-link parameters. Read it before touching any of the tracks below.
+
+Not Parquet: the earlier plan named Parquet, but the experiment gets killed
+often and a Parquet file is only valid once its footer is written. The
+recording is gzip-compressed JSONL, flushed with `Z_SYNC_FLUSH`, so a killed
+run still reads up to its last flush. A Parquet export can be added later as
+an analysis tool.
 
 ### Tasks
 
-#### 7.1 Parquet Writer
-- [ ] `ticks.parquet` - tick timing
-- [ ] `entity_state.parquet` - position, inventory per tick
-- [ ] `actions.parquet` - intents and results
-- [ ] `objects.parquet` - object state changes
+#### 7.1 World recording (`world/src/world/recording.py`)
+- [ ] Run directory from `BOBGAME_RUN_DIR` / `--run-dir`, else a fresh
+      `runs/<run_id>`
+- [ ] `meta.json` at start; `finished_at` and `last_tick` at clean stop
+- [ ] `world/objects.jsonl.gz` - every object at tick 0
+- [ ] `world/ticks.jsonl.gz` - `tick` records (moves, entity updates, object
+      deltas, actions, utterances, damage, deaths, respawns, spawns,
+      despawns) and `agent_status` records
 
-#### 7.2 Run Management
-- [ ] `run_id` generation
-- [ ] Directory structure: `runs/<run_id>/`
-- [ ] `meta.json` with run metadata
+#### 7.2 Agent tracing (`agents/src/agents/jev_agent/tracelog.py`)
+- [ ] Log root from `BOBGAME_RUN_DIR/agents`, else `logs/`
+- [ ] `stints.jsonl.gz` - `stint_start`, per-tick Jev record (now with
+      `stint_id`, `confidence`, full `probabilities`), `stint_end`
+- [ ] `jev_states.jsonl.gz` - the exact state and criteria per Jev call
+- [ ] `planner.jsonl.gz` - turns, tool calls, results, reflections, failures
 
-#### 7.3 Replay Mode
-- [ ] Viewer loads Parquet files
-- [ ] Tick stepping (forward, back, play, pause)
-- [ ] Seek to tick
-- [ ] Same rendering as live mode
+#### 7.3 Replay server (`world/src/world/replay/`)
+- [ ] `python -m world.replay --runs-dir ../runs --port 8766`, one server for
+      every run
+- [ ] Speaks the live viewer protocol, so replay renders with live code
+- [ ] `open_run`, `seek`, `step`, `play`, `pause`, `get_agent_detail`,
+      `get_run_index`
+- [ ] `run_index` event list (deaths, wolf kills, crafts, notes, stints)
 
-**Deliverable**: Full run can be replayed from logs
+#### 7.4 Viewer replay mode
+- [ ] Deep links: `?run=&tick=&entity=&x=&y=&zoom=&play=&speed=&panel=&object=`,
+      URL kept in sync
+- [ ] Transport bar: seek, step, play/pause, speed, events dropdown
+- [ ] Object inspector (chests, piles, boards, bushes)
+- [ ] Agent panel grows: brief, probabilities, "what Jev saw", planner turn,
+      memory notes
+
+#### 7.5 Tooling
+- [x] `dev.sh` makes the run id and directory, exports `BOBGAME_RUN_ID` /
+      `BOBGAME_RUN_DIR`, points every log at it, maintains `runs/latest`, and
+      starts the replay server
+- [x] `replay.sh [run_id]` starts just the replay server and the viewer
+- [x] `tools/analyze_run.py [run_dir]` reads run directories (default
+      `runs/latest`), adds a notable-moments section with deep links and a
+      `--json` dump, and still reads the old `logs/` layout
+
+**Deliverable**: a finished run can be opened at any tick from a link, with
+every agent's reasoning visible at that tick
 
 ---
 

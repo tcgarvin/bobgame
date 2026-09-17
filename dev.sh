@@ -15,14 +15,19 @@
 #
 # Starts:
 #   - World server using the specified config
+#   - Replay server (serves recorded runs to the viewer)
 #   - Runner (manages agent processes with auto-restart)
 #   - Viewer dev server
 #
-# Logs are written to logs/ directory:
-#   logs/world.log
-#   logs/viewer.log
-#   logs/runner.log
-#   logs/agent-*.log (managed by runner)
+# Every run gets its own directory, runs/<run_id>, where <run_id> is
+# YYYYMMDD-HHMMSS-<config>. All recordings and logs go there:
+#   runs/<run_id>/meta.json
+#   runs/<run_id>/world.log, runner.log, viewer.log, replay.log
+#   runs/<run_id>/world/ticks.jsonl.gz, objects.jsonl.gz
+#   runs/<run_id>/agents/agent-<id>.log, agent-<id>/*.jsonl.gz
+# runs/latest is a symlink to the most recent run.
+#
+# See docs/07_replay.md for the recording format and replay protocol.
 #
 # Press Ctrl+C to stop all components
 #
@@ -30,7 +35,6 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_DIR="$SCRIPT_DIR/logs"
 PIDS=()
 
 # Default config
@@ -47,8 +51,14 @@ for arg in "$@"; do
             echo ""
             echo "Starts all components for development:"
             echo "  - World server (gRPC :50051, WebSocket :8765)"
-            echo "  - Simple agents (alice and bob)"
+            echo "  - Replay server (WebSocket :8766, serves runs/)"
+            echo "  - Agents via the runner"
             echo "  - Viewer (http://localhost:5173)"
+            echo ""
+            echo "Each run is recorded to runs/<YYYYMMDD-HHMMSS-config>/ and"
+            echo "runs/latest points at it. Process logs live there too."
+            echo "Replay an earlier run with ./replay.sh [run_id] and"
+            echo "summarise one with python tools/analyze_run.py [run_dir]."
             echo ""
             echo "The island config generates a 4000x4000 procedural world on first"
             echo "run and saves it to saves/island.npz. Subsequent runs load the"
@@ -121,12 +131,17 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set +a
 fi
 
-# Create logs directory
-mkdir -p "$LOG_DIR"
+# Create the run directory and publish it to every child process.
+# The world server and the agents read BOBGAME_RUN_DIR (see docs/07_replay.md).
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$CONFIG"
+RUN_DIR="$SCRIPT_DIR/runs/$RUN_ID"
+mkdir -p "$RUN_DIR/agents"
+ln -sfn "$RUN_ID" "$SCRIPT_DIR/runs/latest"
+export BOBGAME_RUN_ID="$RUN_ID"
+export BOBGAME_RUN_DIR="$RUN_DIR"
 
-# Clear old logs
-log_info "Clearing old logs..."
-rm -f "$LOG_DIR"/*.log
+log_info "Run id: $RUN_ID"
+log_info "Run dir: $RUN_DIR"
 
 # Function to tail logs with color prefix
 tail_log() {
@@ -174,7 +189,7 @@ fi
 cd "$SCRIPT_DIR/world"
 uv run python -m world.server \
     --config "$CONFIG" \
-    > "$LOG_DIR/world.log" 2>&1 &
+    > "$RUN_DIR/world.log" 2>&1 &
 WORLD_PID=$!
 PIDS+=($WORLD_PID)
 log_info "World Server started (PID: $WORLD_PID)"
@@ -182,7 +197,7 @@ log_info "World Server started (PID: $WORLD_PID)"
 # If generating terrain, stream the log while waiting
 if [ "$NEEDS_GENERATION" = true ]; then
     # Start tailing log in background
-    tail -f "$LOG_DIR/world.log" 2>/dev/null | while IFS= read -r line; do
+    tail -f "$RUN_DIR/world.log" 2>/dev/null | while IFS= read -r line; do
         echo -e "${CYAN}[world]${NC} $line"
     done &
     TAIL_PID=$!
@@ -201,6 +216,23 @@ else
     wait_for_port 8765 "World WebSocket" 30 || exit 1
 fi
 
+# Start Replay Server (serves recorded runs, including the one in progress)
+log_info "Starting Replay Server..."
+cd "$SCRIPT_DIR/world"
+uv run python -m world.replay \
+    --runs-dir "$SCRIPT_DIR/runs" \
+    --port 8766 \
+    > "$RUN_DIR/replay.log" 2>&1 &
+REPLAY_PID=$!
+PIDS+=($REPLAY_PID)
+if wait_for_port 8766 "Replay WebSocket" 20; then
+    log_info "Replay Server started (PID: $REPLAY_PID)"
+    REPLAY_OK=true
+else
+    log_warn "Replay server did not start; see $RUN_DIR/replay.log (continuing)"
+    REPLAY_OK=false
+fi
+
 # Start Runner (manages all agents)
 # Use a runner config matching the world config name when one exists.
 RUNNER_CONFIG="$SCRIPT_DIR/runner/configs/$CONFIG.toml"
@@ -211,8 +243,8 @@ log_info "Starting Agent Runner with $(basename "$RUNNER_CONFIG")..."
 cd "$SCRIPT_DIR/runner"
 uv run python -m runner \
     --config "$RUNNER_CONFIG" \
-    --log-dir "$LOG_DIR" \
-    > "$LOG_DIR/runner.log" 2>&1 &
+    --log-dir "$RUN_DIR/agents" \
+    > "$RUN_DIR/runner.log" 2>&1 &
 RUNNER_PID=$!
 PIDS+=($RUNNER_PID)
 log_info "Agent Runner started (PID: $RUNNER_PID)"
@@ -223,7 +255,7 @@ sleep 2
 # Start Viewer Dev Server
 log_info "Starting Viewer..."
 cd "$SCRIPT_DIR/viewer"
-npm run dev > "$LOG_DIR/viewer.log" 2>&1 &
+npm run dev > "$RUN_DIR/viewer.log" 2>&1 &
 VIEWER_PID=$!
 PIDS+=($VIEWER_PID)
 log_info "Viewer started (PID: $VIEWER_PID)"
@@ -236,10 +268,18 @@ echo ""
 log_info "All components started successfully!"
 echo ""
 echo -e "  ${CYAN}World Server${NC}:  http://localhost:50051 (gRPC), ws://localhost:8765 (WebSocket)"
+if [ "$REPLAY_OK" = true ]; then
+    echo -e "  ${CYAN}Replay Server${NC}: ws://localhost:8766"
+else
+    echo -e "  ${RED}Replay Server${NC}: not running (see replay.log)"
+fi
 echo -e "  ${YELLOW}Runner${NC}:        Managing agents (with auto-restart)"
 echo -e "  ${MAGENTA}Viewer${NC}:        http://localhost:5173"
 echo ""
-echo -e "  ${BLUE}Logs${NC}:          $LOG_DIR/"
+echo -e "  ${BLUE}Run id${NC}:        $RUN_ID"
+echo -e "  ${BLUE}Run dir${NC}:       $RUN_DIR"
+echo -e "  ${BLUE}Live${NC}:          http://localhost:5173"
+echo -e "  ${BLUE}Replay${NC}:        http://localhost:5173/?run=$RUN_ID"
 echo ""
 log_info "Press Ctrl+C to stop all components"
 echo ""
@@ -247,9 +287,9 @@ echo "────────────────────────�
 echo ""
 
 # Tail all logs
-tail_log "world" "$CYAN" "$LOG_DIR/world.log"
-tail_log "runner" "$YELLOW" "$LOG_DIR/runner.log"
-tail_log "viewer" "$MAGENTA" "$LOG_DIR/viewer.log"
+tail_log "world" "$CYAN" "$RUN_DIR/world.log"
+tail_log "runner" "$YELLOW" "$RUN_DIR/runner.log"
+tail_log "viewer" "$MAGENTA" "$RUN_DIR/viewer.log"
 
 # Wait for any process to exit
 wait

@@ -90,6 +90,76 @@ the 10-entry action/utterance ring buffer, the latest `agent_status`, the
 settlement position and the selection. It calls `onStateUpdate` after any
 message that changes what the overlay shows.
 
+## Replay Mode and Deep Links
+
+The viewer renders a recorded run with the same code as a live world: the
+replay server (`world/src/world/replay`, port 8766) speaks the live protocol
+plus the control messages in [docs/07_replay.md](../docs/07_replay.md).
+
+### Deep-link parameters
+
+The whole visible state lives in the query string, and `GameScene` keeps the
+address bar in sync with `history.replaceState` (throttled to ~4 Hz, only when
+something changed). Parsing and building live in `src/DeepLink.ts`.
+
+| param | meaning |
+| --- | --- |
+| `run` | replay mode: connect to the replay server and `open_run` |
+| `ws` | WebSocket URL override (defaults: live `ws://localhost:8765`, replay `ws://localhost:8766`) |
+| `tick` | seek here after the snapshot (replay only) |
+| `entity` | select this entity, camera follows it |
+| `x`, `y` | put the camera on this tile, follow off |
+| `zoom` | camera zoom |
+| `play` | `1` to start playing after the seek |
+| `speed` | playback speed (0.5, 1, 2, 5, 10, 25) |
+| `panel` | `1` / `0` to show or hide the agent panel |
+| `object` | select this object id and open its inspector |
+
+Entity and object selection are mutually exclusive, so a link never carries
+both. Example: `http://localhost:5173/?run=fake&tick=50&entity=ada`.
+
+### Replay bar and inspectors
+
+- `src/ui/ReplayBar.ts` — the bottom transport bar (run id, jump-to-start,
+  ±1, ±10, play/pause, jump-to-end, tick input, slider, speed select, the
+  notable-events dropdown from `run_index`, and "copy link"). In live mode
+  everything but "copy link" is hidden, and that button copies a *replay* link
+  for the run currently being watched.
+- Keys (replay only): space play/pause, `,` / `.` step ±1, `[` / `]` step ±10.
+  They are suppressed while a form field has focus, and focusing the tick input
+  disables the Phaser keyboard so `F`/`P`/digits do not fire.
+- `src/ui/ObjectPanel.ts` — clicking a chest, item pile, message board or bush
+  opens an inspector with its contents / notes / berry state. The data comes
+  from `ObjectState.state`, where `contents` and `notes` are JSON strings.
+- `src/ui/OverlayUI.ts` — the agent panel: brief (with success condition,
+  ticks used of max, notes), planner thought, the Jev decision with every
+  option's probability as a bar (chosen one highlighted) plus confidence,
+  eject, danger, latency and input tokens. In replay mode it adds collapsible
+  "What Jev saw", "Planner turn" and "Memory" sections fed by `agent_detail`,
+  which is requested when the selection or the tick changes (debounced to
+  ~250 ms while playing).
+
+`WorldState` owns the replay state as well: `isReplay()`, `getReplayStatus()`,
+`getRunId()`, `getRunIndex()`, `getAgentDetail(entityId, tickId)` and the
+object selection. A second `snapshot` (every seek sends one) clears entities,
+objects, logs and agent statuses but keeps the selection; `GameScene` does not
+recentre the camera or rebuild the `ChunkManager` on it.
+
+### Fake replay server
+
+`scripts/fake_replay_server.mjs` serves a synthetic 64x64 run (three settlers,
+a wolf, a chest, an item pile, a message board, a bush, 200 ticks of scripted
+movement, actions, chat, `agent_status`, `agent_detail` and `run_index`) so the
+replay UI can be developed without a recording. It is the only thing the `ws`
+devDependency is for.
+
+```bash
+cd viewer
+npm run fake-replay     # ws://localhost:8766, run id "fake", ticks 0-199
+npm run dev             # then open the link below
+# http://localhost:5173/?run=fake&tick=50&entity=ada
+```
+
 ## Network Integration
 
 ### WebSocket Connection
@@ -126,8 +196,10 @@ function easeOutQuad(t: number): number {
 
 ```bash
 cd viewer
-npm run dev    # Development server with hot reload
-npm run build  # Production build
+npm run dev           # Development server with hot reload
+npm run build         # Production build (tsc strict + vite)
+npm run fake-replay   # Synthetic replay server for UI work (see above)
 ```
 
-Requires world server running on localhost:8765 for live entity updates.
+Requires the world server on localhost:8765 for live entity updates, or the
+replay server on localhost:8766 (or `npm run fake-replay`) for replay mode.

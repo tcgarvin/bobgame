@@ -1,21 +1,36 @@
 #!/usr/bin/env python3
-"""Summarise a settlement run from the logs directory.
+"""Summarise a settlement run.
 
-Reads every ``logs/agent-<id>/stints.jsonl`` plus the planner lines in
-``logs/agent-<id>.log`` and prints a per-agent and aggregate summary: stint
+Reads a run directory produced by ``dev.sh`` (``runs/<run_id>/``, see
+``docs/07_replay.md``) and prints a per-agent and aggregate summary: stint
 counts and end reasons, Jev latency and token sizes, action mix, eject and
-danger distributions, intent failure rates, planner turn counts and tool
-usage, deaths, and the final planner thoughts.
+danger distributions, intent failure rates, planner turn counts and tool usage,
+deaths, and the final planner thoughts. It then prints a "notable moments"
+section: deaths, wolf kills, crafts, placed objects, notes written and planner
+trouble, each with a viewer deep link.
 
-Usage: python tools/analyze_run.py [logs_dir]
+The older flat ``logs/`` layout (plain ``.jsonl`` traces, no ``meta.json``) is
+still supported so earlier runs stay readable.
+
+Usage:
+    python tools/analyze_run.py [run_dir]      # default: runs/latest
+    python tools/analyze_run.py logs           # legacy layout
+    python tools/analyze_run.py --json         # machine-readable dump
 """
 
+from __future__ import annotations
+
+import argparse
+import gzip
 import json
 import re
 import statistics
 import sys
-from collections import Counter, defaultdict
+import zlib
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 TOOL_CALL_RE = re.compile(r"planner_tool_call .*?tool=(\S+)")
 TURN_RE = re.compile(r"planner_turn_started")
@@ -23,18 +38,74 @@ THOUGHT_RE = re.compile(r"planner_thought .*?text=(.*)$")
 FAILED_RE = re.compile(r"planner_turn_failed .*?error=(.*)$")
 REJECTED_RE = re.compile(r"intent_rejected .*?reason=(\S+)")
 
+DEFAULT_VIEWER_URL = "http://localhost:5173"
+DEFAULT_MAX_MOMENTS = 60
 
-def load_jsonl(path: Path) -> list[dict]:
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return rows
+# Notable moment kinds, most interesting first. The cap keeps the rarest kinds.
+MOMENT_PRIORITY = (
+    "death",
+    "wolf_killed",
+    "planner_failed",
+    "history_reset",
+    "first_wolf",
+    "write_note",
+    "place",
+    "craft",
+)
+
+CRAFT_ACTIONS = frozenset({"craft"})
+PLACE_ACTIONS = frozenset({"place"})
+NOTE_ACTIONS = frozenset({"write_note"})
+
+# The world writes prose details, e.g. "crafted sword", "placed chest_3 at (1,2)".
+CRAFTED_RE = re.compile(r"crafted (\S+)")
+PLACED_RE = re.compile(r"placed (\S+?)(?:_\d+)? ")
+
+
+# --------------------------------------------------------------------------
+# reading
+# --------------------------------------------------------------------------
+
+
+def iter_jsonl(path: Path) -> Iterator[dict]:
+    """Yield JSON objects from a ``.jsonl`` or ``.jsonl.gz`` file.
+
+    A run that was killed leaves a truncated final gzip block; that is the
+    normal case, not an error, so reading stops there instead of raising.
+    """
+    if path.suffix == ".gz":
+        handle = gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    else:
+        handle = path.open("rt", encoding="utf-8", errors="replace")
+    with handle:
+        while True:
+            try:
+                line = handle.readline()
+            except (EOFError, zlib.error, gzip.BadGzipFile):
+                return
+            if not line:
+                return
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                # Only the truncated last line can be invalid; stop there.
+                return
+
+
+def first_existing(*paths: Path) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
+def read_text(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def pct(values: list[float], q: float) -> float:
@@ -45,12 +116,143 @@ def pct(values: list[float], q: float) -> float:
     return ordered[index]
 
 
-def summarise_agent(agent_id: str, logs_dir: Path) -> dict:
-    stints_path = logs_dir / f"agent-{agent_id}" / "stints.jsonl"
-    log_path = logs_dir / f"agent-{agent_id}.log"
-    rows = load_jsonl(stints_path) if stints_path.exists() else []
+# --------------------------------------------------------------------------
+# run layout
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RunLayout:
+    """Where the trace files live for one run."""
+
+    run_id: str
+    root: Path
+    agents_dir: Path
+    ticks_path: Path | None
+    meta: dict
+
+    @property
+    def is_run_dir(self) -> bool:
+        return bool(self.meta)
+
+
+def resolve_run_dir(raw: str | None) -> Path:
+    if raw is not None:
+        return Path(raw)
+    latest = Path("runs/latest")
+    if latest.exists():
+        return latest.resolve()
+    return latest
+
+
+def load_layout(run_dir: Path) -> RunLayout:
+    """Describe a run directory, falling back to the legacy flat layout."""
+    meta_path = run_dir / "meta.json"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        resolved = run_dir.resolve()
+        return RunLayout(
+            run_id=meta.get("run_id", resolved.name),
+            root=run_dir,
+            agents_dir=run_dir / "agents",
+            ticks_path=first_existing(
+                run_dir / "world" / "ticks.jsonl.gz",
+                run_dir / "world" / "ticks.jsonl",
+            ),
+            meta=meta,
+        )
+    return RunLayout(
+        run_id=run_dir.resolve().name,
+        root=run_dir,
+        agents_dir=run_dir,
+        ticks_path=None,
+        meta={},
+    )
+
+
+def agent_ids(layout: RunLayout) -> list[str]:
+    return sorted(
+        p.name.removeprefix("agent-")
+        for p in layout.agents_dir.glob("agent-*")
+        if p.is_dir()
+    )
+
+
+# --------------------------------------------------------------------------
+# per-agent summary
+# --------------------------------------------------------------------------
+
+
+def summarise_planner_file(rows: list[dict]) -> dict:
+    """Turn counts, tool usage, thoughts and failures from planner.jsonl.gz."""
+    tools: Counter[str] = Counter()
+    thoughts: list[str] = []
+    turns = 0
+    turn_failures = 0
+    history_resets = 0
+    for row in rows:
+        event = row.get("event")
+        if event == "turn_start":
+            turns += 1
+        elif event == "tool_call":
+            tools[row.get("tool", "?")] += 1
+        elif event == "turn_end":
+            thought = row.get("thought", "")
+            if thought:
+                thoughts.append(thought.strip())
+        elif event == "turn_failed":
+            turn_failures += 1
+        elif event == "history_reset":
+            history_resets += 1
+    return {
+        "planner_turns": turns,
+        "planner_turn_failures": turn_failures,
+        "history_resets": history_resets,
+        "tools": dict(tools.most_common()),
+        "thoughts": thoughts,
+    }
+
+
+def summarise_planner_log(log_text: str) -> dict:
+    """Same numbers scraped from the structlog output (older runs)."""
+    tools: Counter[str] = Counter()
+    thoughts: list[str] = []
+    turns = 0
+    turn_failures = 0
+    for line in log_text.splitlines():
+        if TURN_RE.search(line):
+            turns += 1
+        match = TOOL_CALL_RE.search(line)
+        if match:
+            tools[match.group(1)] += 1
+        match = THOUGHT_RE.search(line)
+        if match:
+            thoughts.append(match.group(1).strip())
+        if FAILED_RE.search(line):
+            turn_failures += 1
+    return {
+        "planner_turns": turns,
+        "planner_turn_failures": turn_failures,
+        "history_resets": 0,
+        "tools": dict(tools.most_common()),
+        "thoughts": thoughts,
+    }
+
+
+def summarise_agent(agent_id: str, layout: RunLayout) -> dict:
+    agent_dir = layout.agents_dir / f"agent-{agent_id}"
+    stints_path = first_existing(
+        agent_dir / "stints.jsonl.gz", agent_dir / "stints.jsonl"
+    )
+    planner_path = first_existing(
+        agent_dir / "planner.jsonl.gz", agent_dir / "planner.jsonl"
+    )
+    log_path = layout.agents_dir / f"agent-{agent_id}.log"
+
+    rows = list(iter_jsonl(stints_path)) if stints_path else []
     ticks = [r for r in rows if "action" in r and "top" in r]
     ends = [r for r in rows if r.get("event") == "stint_end"]
+    starts = [r for r in rows if r.get("event") == "stint_start"]
 
     actions = Counter(r["action"].split(":")[0] for r in ticks)
     latencies = [r["latency_ms"] for r in ticks if "latency_ms" in r]
@@ -58,34 +260,27 @@ def summarise_agent(agent_id: str, logs_dir: Path) -> dict:
     ejects = [r["eject"] for r in ticks if "eject" in r]
     dangers = [r["danger"] for r in ticks if "danger" in r]
     top_probs = [r["top"][0][1] for r in ticks if r.get("top")]
+    confidences = [r["confidence"] for r in ticks if "confidence" in r]
     failures = sum(1 for r in ticks if r.get("intent_result") not in ("accepted", None))
     end_reasons = Counter(r.get("end_reason", r.get("reason", "?")) for r in ends)
 
-    tools: Counter[str] = Counter()
-    turns = 0
-    turn_failures = 0
-    rejected: Counter[str] = Counter()
-    thoughts: list[str] = []
-    if log_path.exists():
-        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if TURN_RE.search(line):
-                turns += 1
-            m = TOOL_CALL_RE.search(line)
-            if m:
-                tools[m.group(1)] += 1
-            m = THOUGHT_RE.search(line)
-            if m:
-                thoughts.append(m.group(1).strip())
-            if FAILED_RE.search(line):
-                turn_failures += 1
-            m = REJECTED_RE.search(line)
-            if m:
-                rejected[m.group(1)] += 1
+    log_text = read_text(log_path)
+    if planner_path:
+        planner = summarise_planner_file(list(iter_jsonl(planner_path)))
+    else:
+        planner = summarise_planner_log(log_text)
 
+    rejected: Counter[str] = Counter()
+    for line in log_text.splitlines():
+        match = REJECTED_RE.search(line)
+        if match:
+            rejected[match.group(1)] += 1
+
+    thoughts = planner["thoughts"]
     return {
         "agent": agent_id,
         "stint_ticks": len(ticks),
-        "stints": len(ends),
+        "stints": len(ends) or len(starts),
         "end_reasons": dict(end_reasons),
         "actions": dict(actions.most_common()),
         "latency_p50": statistics.median(latencies) if latencies else 0,
@@ -95,28 +290,198 @@ def summarise_agent(agent_id: str, logs_dir: Path) -> dict:
         "eject_mean": statistics.mean(ejects) if ejects else 0,
         "danger_mean": statistics.mean(dangers) if dangers else 0,
         "top_prob_mean": statistics.mean(top_probs) if top_probs else 0,
+        "confidence_mean": statistics.mean(confidences) if confidences else 0,
         "intent_failures": failures,
-        "planner_turns": turns,
-        "planner_turn_failures": turn_failures,
-        "tools": dict(tools.most_common()),
+        "planner_turns": planner["planner_turns"],
+        "planner_turn_failures": planner["planner_turn_failures"],
+        "history_resets": planner["history_resets"],
+        "tools": planner["tools"],
         "rejected": dict(rejected),
         "last_thought": thoughts[-1] if thoughts else "",
         "thoughts": len(thoughts),
     }
 
 
-def main() -> None:
-    logs_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("logs")
-    agent_ids = sorted(
-        p.name.removeprefix("agent-")
-        for p in logs_dir.glob("agent-*")
-        if p.is_dir()
-    )
-    if not agent_ids:
-        print(f"no agent logs under {logs_dir}")
-        return
+# --------------------------------------------------------------------------
+# world facts and notable moments
+# --------------------------------------------------------------------------
 
-    summaries = [summarise_agent(a, logs_dir) for a in agent_ids]
+
+@dataclass
+class Moment:
+    tick: int
+    kind: str
+    entity_id: str
+    text: str
+
+    def link(self, viewer_url: str, run_id: str) -> str:
+        link = f"{viewer_url}/?run={run_id}&tick={self.tick}"
+        if self.entity_id:
+            link += f"&entity={self.entity_id}"
+        return link
+
+    def as_dict(self, viewer_url: str, run_id: str) -> dict:
+        return {
+            "tick": self.tick,
+            "kind": self.kind,
+            "entity_id": self.entity_id,
+            "text": self.text,
+            "link": self.link(viewer_url, run_id),
+        }
+
+
+@dataclass
+class WorldFacts:
+    ticks: int = 0
+    first_tick: int = 0
+    last_tick: int = 0
+    deaths: Counter[str] = field(default_factory=Counter)
+    killers: Counter[str] = field(default_factory=Counter)
+    wolves_spawned: int = 0
+    wolves_despawned: Counter[str] = field(default_factory=Counter)
+    crafts: Counter[str] = field(default_factory=Counter)
+    placements: Counter[str] = field(default_factory=Counter)
+    notes_written: int = 0
+    utterances: int = 0
+
+    def as_dict(self) -> dict:
+        return {
+            "ticks": self.ticks,
+            "first_tick": self.first_tick,
+            "last_tick": self.last_tick,
+            "deaths": dict(self.deaths),
+            "killers": dict(self.killers),
+            "wolves_spawned": self.wolves_spawned,
+            "wolves_despawned": dict(self.wolves_despawned),
+            "crafts": dict(self.crafts),
+            "placements": dict(self.placements),
+            "notes_written": self.notes_written,
+            "utterances": self.utterances,
+        }
+
+
+def scan_world_ticks(path: Path) -> tuple[WorldFacts, list[Moment]]:
+    """Read world/ticks.jsonl.gz into aggregate counts plus notable moments."""
+    facts = WorldFacts()
+    moments: list[Moment] = []
+    wolf_ids: set[str] = set()
+    seen_first_wolf = False
+    first_tick_set = False
+
+    for record in iter_jsonl(path):
+        if record.get("type") != "tick":
+            continue
+        tick = int(record.get("tick_id", 0))
+        facts.ticks += 1
+        if not first_tick_set:
+            facts.first_tick = tick
+            first_tick_set = True
+        facts.last_tick = max(facts.last_tick, tick)
+        facts.utterances += len(record.get("utterances", ()))
+
+        for spawn in record.get("entities_spawned", ()):
+            if spawn.get("entity_type") == "wolf":
+                wolf_ids.add(spawn.get("entity_id", ""))
+                facts.wolves_spawned += 1
+                if not seen_first_wolf:
+                    seen_first_wolf = True
+                    moments.append(
+                        Moment(tick, "first_wolf", spawn.get("entity_id", ""),
+                               "first wolf appeared")
+                    )
+
+        # A damage record in the same tick names whoever landed the blow.
+        attackers = {
+            d.get("entity_id", ""): d.get("attacker_id", "")
+            for d in record.get("damage", ())
+        }
+
+        for death in record.get("deaths", ()):
+            entity = death.get("entity_id", "")
+            killer = death.get("killer_id", "") or "unknown"
+            facts.deaths[entity] += 1
+            facts.killers[killer] += 1
+            moments.append(
+                Moment(tick, "death", entity, f"{entity} killed by {killer}")
+            )
+
+        for despawn in record.get("entities_despawned", ()):
+            entity = despawn.get("entity_id", "")
+            reason = despawn.get("reason", "")
+            if entity in wolf_ids or entity.startswith("wolf"):
+                facts.wolves_despawned[reason or "?"] += 1
+                if reason == "killed":
+                    killer = attackers.get(entity, "")
+                    who = f" by {killer}" if killer else ""
+                    moments.append(
+                        Moment(tick, "wolf_killed", killer or entity,
+                               f"{entity} killed{who}")
+                    )
+
+        for action in record.get("actions", ()):
+            if not action.get("success"):
+                continue
+            entity = action.get("entity_id", "")
+            action_type = action.get("action_type", "")
+            details = action.get("details", "")
+            if action_type in CRAFT_ACTIONS:
+                match = CRAFTED_RE.search(details)
+                facts.crafts[match.group(1) if match else details or "?"] += 1
+                moments.append(Moment(tick, "craft", entity, f"{entity} {details}"))
+            elif action_type in PLACE_ACTIONS:
+                match = PLACED_RE.search(details)
+                facts.placements[match.group(1) if match else details or "?"] += 1
+                moments.append(Moment(tick, "place", entity, f"{entity} {details}"))
+            elif action_type in NOTE_ACTIONS:
+                facts.notes_written += 1
+                moments.append(
+                    Moment(tick, "write_note", entity, f"{entity} wrote a note: {details}")
+                )
+
+    return facts, moments
+
+
+def planner_moments(agent_id: str, layout: RunLayout) -> list[Moment]:
+    """Planner turn failures and history resets, which need the tick numbers."""
+    agent_dir = layout.agents_dir / f"agent-{agent_id}"
+    planner_path = first_existing(
+        agent_dir / "planner.jsonl.gz", agent_dir / "planner.jsonl"
+    )
+    if planner_path is None:
+        return []
+    moments = []
+    for row in iter_jsonl(planner_path):
+        event = row.get("event")
+        tick = int(row.get("tick", 0))
+        if event == "turn_failed":
+            error = str(row.get("error", ""))[:160]
+            moments.append(
+                Moment(tick, "planner_failed", agent_id, f"{agent_id} turn failed: {error}")
+            )
+        elif event == "history_reset":
+            moments.append(
+                Moment(tick, "history_reset", agent_id, f"{agent_id} planner history reset")
+            )
+    return moments
+
+
+def select_moments(moments: list[Moment], limit: int) -> tuple[list[Moment], Counter[str]]:
+    """Keep at most ``limit`` moments, dropping the most common kinds first."""
+    order = {kind: i for i, kind in enumerate(MOMENT_PRIORITY)}
+    ranked = sorted(
+        moments, key=lambda m: (order.get(m.kind, len(order)), m.tick)
+    )
+    kept = ranked[:limit]
+    omitted = Counter(m.kind for m in ranked[limit:])
+    return sorted(kept, key=lambda m: (m.tick, m.kind)), omitted
+
+
+# --------------------------------------------------------------------------
+# output
+# --------------------------------------------------------------------------
+
+
+def aggregate(summaries: list[dict]) -> dict:
     total_actions: Counter[str] = Counter()
     total_tools: Counter[str] = Counter()
     total_ends: Counter[str] = Counter()
@@ -124,19 +489,51 @@ def main() -> None:
         total_actions.update(s["actions"])
         total_tools.update(s["tools"])
         total_ends.update(s["end_reasons"])
+    latencies = [s["latency_p50"] for s in summaries if s["latency_p50"]]
+    return {
+        "agents": len(summaries),
+        "stint_ticks": sum(s["stint_ticks"] for s in summaries),
+        "stints": sum(s["stints"] for s in summaries),
+        "end_reasons": dict(total_ends),
+        "planner_turns": sum(s["planner_turns"] for s in summaries),
+        "planner_turn_failures": sum(s["planner_turn_failures"] for s in summaries),
+        "history_resets": sum(s["history_resets"] for s in summaries),
+        "tools": dict(total_tools.most_common()),
+        "actions": dict(total_actions.most_common()),
+        "latency_p50_median": statistics.median(latencies) if latencies else 0,
+    }
 
-    print(f"== run summary: {len(summaries)} agents ==")
-    print(f"stint ticks: {sum(s['stint_ticks'] for s in summaries)}")
-    print(f"stints: {sum(s['stints'] for s in summaries)} ends={dict(total_ends)}")
-    print(f"planner turns: {sum(s['planner_turns'] for s in summaries)}"
-          f" failures={sum(s['planner_turn_failures'] for s in summaries)}")
-    print(f"tool calls: {dict(total_tools.most_common())}")
-    print(f"jev actions: {dict(total_actions.most_common())}")
-    lat = [s["latency_p50"] for s in summaries if s["latency_p50"]]
-    if lat:
-        print(f"jev latency p50 (median of agents): {statistics.median(lat):.0f} ms")
+
+def print_report(
+    layout: RunLayout,
+    summaries: list[dict],
+    totals: dict,
+    facts: WorldFacts | None,
+    moments: list[Moment],
+    omitted: Counter[str],
+    viewer_url: str,
+) -> None:
+    print(f"== run summary: {layout.run_id} ({len(summaries)} agents) ==")
+    if layout.meta:
+        started = layout.meta.get("started_at", "?")
+        finished = layout.meta.get("finished_at") or "(unfinished)"
+        print(f"config: {layout.meta.get('config_name', '?')}  "
+              f"started: {started}  finished: {finished}")
+    print(f"stint ticks: {totals['stint_ticks']}")
+    print(f"stints: {totals['stints']} ends={totals['end_reasons']}")
+    print(f"planner turns: {totals['planner_turns']}"
+          f" failures={totals['planner_turn_failures']}"
+          f" history_resets={totals['history_resets']}")
+    print(f"tool calls: {totals['tools']}")
+    print(f"jev actions: {totals['actions']}")
+    if totals["latency_p50_median"]:
+        print("jev latency p50 (median of agents): "
+              f"{totals['latency_p50_median']:.0f} ms")
     print()
-    header = f"{'agent':7s} {'ticks':>5s} {'stints':>6s} {'turns':>5s} {'p50ms':>6s} {'p95ms':>6s} {'tok':>5s} {'eject':>5s} {'dang':>5s} {'top':>4s} {'fail':>4s} rejected"
+
+    header = (f"{'agent':7s} {'ticks':>5s} {'stints':>6s} {'turns':>5s} {'p50ms':>6s} "
+              f"{'p95ms':>6s} {'tok':>5s} {'eject':>5s} {'dang':>5s} {'top':>4s} "
+              f"{'fail':>4s} rejected")
     print(header)
     for s in summaries:
         print(
@@ -150,14 +547,102 @@ def main() -> None:
         if s["last_thought"]:
             print(f"[{s['agent']}] {s['last_thought'][:400]}")
 
-    world_log = logs_dir / "world.log"
-    if world_log.exists():
-        text = world_log.read_text(encoding="utf-8", errors="replace")
-        deaths = len(re.findall(r"entity_died|death", text))
-        wolves = len(re.findall(r"wolf_spawned", text))
+    if facts is not None:
         print()
-        print(f"world.log: death mentions={deaths} wolf spawns={wolves}")
+        print(f"== world: ticks {facts.first_tick}..{facts.last_tick} "
+              f"({facts.ticks} recorded) ==")
+        print(f"deaths: {sum(facts.deaths.values())} by={dict(facts.killers)}")
+        print(f"wolves: spawned={facts.wolves_spawned} "
+              f"despawned={dict(facts.wolves_despawned)}")
+        print(f"crafts: {dict(facts.crafts)}")
+        print(f"placements: {dict(facts.placements)}")
+        print(f"notes written: {facts.notes_written}  utterances: {facts.utterances}")
+    elif not layout.meta:
+        world_log = layout.root / "world.log"
+        if world_log.exists():
+            text = read_text(world_log)
+            deaths = len(re.findall(r"entity_died|death", text))
+            wolves = len(re.findall(r"wolf_spawned", text))
+            print()
+            print(f"world.log: death mentions={deaths} wolf spawns={wolves}")
+
+    if moments:
+        print()
+        print(f"== notable moments ({len(moments)} shown) ==")
+        for moment in moments:
+            print(f"  t{moment.tick:<6d} {moment.kind:<14s} {moment.text}")
+            print(f"           {moment.link(viewer_url, layout.run_id)}")
+        if omitted:
+            total = sum(omitted.values())
+            print(f"  ... {total} more omitted: {dict(omitted.most_common())}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "run_dir",
+        nargs="?",
+        default=None,
+        help="run directory (default: runs/latest); a legacy logs/ dir also works",
+    )
+    parser.add_argument(
+        "--viewer-url",
+        default=DEFAULT_VIEWER_URL,
+        help=f"base URL for deep links (default: {DEFAULT_VIEWER_URL})",
+    )
+    parser.add_argument(
+        "--max-moments",
+        type=int,
+        default=DEFAULT_MAX_MOMENTS,
+        help=f"cap on notable moments (default: {DEFAULT_MAX_MOMENTS})",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="dump the summary and moments as JSON"
+    )
+    args = parser.parse_args(argv)
+
+    run_dir = resolve_run_dir(args.run_dir)
+    if not run_dir.is_dir():
+        print(f"no such run directory: {run_dir}", file=sys.stderr)
+        return 1
+
+    layout = load_layout(run_dir)
+    ids = agent_ids(layout)
+    if not ids and layout.ticks_path is None:
+        print(f"no agent traces or world recording under {run_dir}", file=sys.stderr)
+        return 1
+
+    summaries = [summarise_agent(agent_id, layout) for agent_id in ids]
+    totals = aggregate(summaries)
+
+    facts: WorldFacts | None = None
+    moments: list[Moment] = []
+    if layout.ticks_path is not None:
+        facts, moments = scan_world_ticks(layout.ticks_path)
+    for agent_id in ids:
+        moments.extend(planner_moments(agent_id, layout))
+
+    viewer_url = args.viewer_url.rstrip("/")
+    shown, omitted = select_moments(moments, max(0, args.max_moments))
+
+    if args.json:
+        payload = {
+            "run_id": layout.run_id,
+            "run_dir": str(run_dir.resolve()),
+            "meta": layout.meta,
+            "totals": totals,
+            "agents": summaries,
+            "world": facts.as_dict() if facts else None,
+            "moments": [m.as_dict(viewer_url, layout.run_id) for m in shown],
+            "moments_omitted": dict(omitted),
+        }
+        json.dump(payload, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    print_report(layout, summaries, totals, facts, shown, omitted, viewer_url)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

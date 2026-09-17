@@ -6,7 +6,8 @@ Quick reference for AI agents working on this codebase.
 
 **Current experiment**: the "settlement" scenario: 12 planner+Jev actors (pydantic-ai on OpenRouter for slow thinking, TypeSafe's Jev for per-tick action) building a settlement on the big island while wolves roam. Design and contract: [docs/05_jev_agents_design.md](docs/05_jev_agents_design.md).
 **Completed milestones**: 0, 1, 2, 3, 4, 5a, 5b, 6, procedural terrain generation, chunked terrain streaming, and the settlement mechanics (stats, hunger, combat, wolves, extraction, crafting, chests, message boards, say).
-**Not done**: milestone 7 (Parquet logging & replay). Milestone 8 (LLM agents) is superseded by `agents.jev_agent`.
+**In progress**: milestone 7, run recording & replay — every run is recorded to `runs/<run_id>/` as gzip JSONL (not Parquet) and a replay server serves it to the viewer with seeking, playback and deep links. Contract: [docs/07_replay.md](docs/07_replay.md).
+**Not done**: milestone 8 (LLM agents) is superseded by `agents.jev_agent`.
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)
 
 ## Project Structure
@@ -39,9 +40,35 @@ bobgame/
 ```
 
 `dev.sh` loads `.env` (`TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`) and uses
-`runner/configs/<config>.toml` when it exists. After a settlement run:
-`python tools/analyze_run.py logs` summarises stints, Jev latency, planner
-tool use, and failures. Per-tick Jev traces: `logs/agent-<id>/stints.jsonl`.
+`runner/configs/<config>.toml` when it exists.
+
+**Run directories**: each `./dev.sh` run creates `runs/<YYYYMMDD-HHMMSS-config>/`,
+exports `BOBGAME_RUN_ID` and `BOBGAME_RUN_DIR` to every child process, and points
+`runs/latest` at it. Everything for a run lives there: `meta.json`, the process
+logs (`world.log`, `runner.log`, `viewer.log`, `replay.log`), the world recording
+(`world/ticks.jsonl.gz`, `world/objects.jsonl.gz`) and the agent traces
+(`agents/agent-<id>.log`, `agents/agent-<id>/{stints,jev_states,planner}.jsonl.gz`,
+`memory.md`). `runs/` is gitignored. The old flat `logs/` directory is no longer
+written to. Format details: [docs/07_replay.md](docs/07_replay.md).
+
+**Replay**: `dev.sh` also starts the replay server on `ws://localhost:8766`, so a
+live run can be opened at any past tick. To replay an earlier run without the
+world and agents:
+
+```bash
+./replay.sh              # replays runs/latest
+./replay.sh 20260917-143000-settlement
+```
+
+Deep links are `http://localhost:5173/?run=<run_id>&tick=<n>&entity=<id>`
+(also `x`, `y`, `zoom`, `play`, `speed`, `panel`, `object`).
+
+**Analysis**: `python tools/analyze_run.py` summarises `runs/latest` — stints,
+Jev latency, planner tool use, failures, world-level deaths/wolves/crafts — and
+prints a "notable moments" list where every line carries a deep link. Pass a run
+directory to pick another run, `--json` for a machine-readable dump,
+`--max-moments` to change the cap, and `--viewer-url` to change the link base.
+It still reads the legacy layout: `python tools/analyze_run.py logs`.
 
 Or manually:
 ```bash
@@ -74,7 +101,9 @@ uv run python tools/visualize_world.py <map.npz> [out]  # Render a saved map to 
 - `combat.py`, `crafting.py`, `containers.py`, `stats.py`, `wolves.py` - settlement mechanics (see docs/05)
 - `settlement.py` - Settlement site finder and spawn placement
 - `tick_context.py` - TickContext with one `submit_intent` dispatcher for all intent types
-- `server.py` - WorldServer entry point
+- `server.py` - WorldServer entry point (`--run-dir`, defaults to `$BOBGAME_RUN_DIR`)
+- `recording.py` - Run recorder: `meta.json`, `world/objects.jsonl.gz`, `world/ticks.jsonl.gz`
+- `replay/` - Replay server (`python -m world.replay --runs-dir ../runs --port 8766`)
 - `services/` - gRPC service implementations
 - `chunks.py` - Server-side chunk manager (terrain + object chunks sent to viewers)
 - `terrain_types.py` - FloorType enum (numeric values must match `viewer/src/terrain/TerrainConfig.ts`)
@@ -83,6 +112,13 @@ uv run python tools/visualize_world.py <map.npz> [out]  # Render a saved map to 
 **Agents** (`agents/src/agents/`):
 - `random_agent.py` - SimpleAgent with state machine (WANDER/SEEK/COLLECT/EAT)
 - `jev_agent/` - Planner (pydantic-ai, OpenRouter) + Jev stint executor; see `agents/CLAUDE.md`
+- `jev_agent/tracelog.py` - gzip JSONL traces (`stints`, `jev_states`, `planner`) under `$BOBGAME_RUN_DIR/agents`
+
+**Tooling** (repo root, `tools/`):
+- `dev.sh` - Makes the run dir, exports `BOBGAME_RUN_ID`/`BOBGAME_RUN_DIR`, starts world + replay + runner + viewer
+- `replay.sh` - Replay server + viewer only, for an earlier run
+- `tools/analyze_run.py` - Run summary, notable moments with deep links, `--json`
+- `tools/tests/test_analyze_run.py` - `cd tools && uv run pytest -q`
 
 **Proto** (`proto/world.proto`):
 - Defines all gRPC services and message types
@@ -99,8 +135,10 @@ uv run python tools/visualize_world.py <map.npz> [out]  # Render a saved map to 
 - `terrain/TerrainConfig.ts` - Floor type → sprite key mapping and multi-tileset GID offsets
 - `terrain/ChunkManager.ts` - Per-chunk Phaser tilemaps built from the sprite index
 - `terrain/ViewportTracker.ts` - Requests chunks as the camera moves
-- `network/WebSocketClient.ts` - Server connection
+- `network/WebSocketClient.ts` - Server connection (live `:8765`, replay `:8766`)
 - `network/WorldState.ts` - Entity interpolation
+- Replay mode: deep-link parsing, the transport bar and the object inspector -
+  see `viewer/CLAUDE.md` for the current file names
 
 ## Component-Specific Notes
 
@@ -108,6 +146,7 @@ See component CLAUDE.md files for detailed architecture decisions:
 - `world/CLAUDE.md` - Simulation engine, tick loop, movement conflict resolution
 - `viewer/CLAUDE.md` - Phaser rendering, WebSocket integration
 - `agents/CLAUDE.md` - Agent implementation patterns, foraging, intent submission
+- `docs/07_replay.md` - Run recording formats, replay protocol, deep links
 
 ## Sprite Index
 
@@ -128,4 +167,5 @@ Output: `viewer/public/assets/sprite-index.json`
 cd world && uv run pytest tests/ -v
 cd agents && uv run pytest -q
 cd runner && uv run pytest -q
+cd tools && uv run pytest -q
 ```

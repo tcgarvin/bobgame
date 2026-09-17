@@ -1,8 +1,10 @@
 """Main gRPC server for the world simulation."""
 
 import asyncio
+import signal
 from concurrent import futures
 from pathlib import Path
+from typing import Any
 
 import grpc
 import structlog
@@ -10,6 +12,7 @@ import structlog
 from . import world_pb2 as pb
 from . import world_pb2_grpc
 from .lease import LeaseManager
+from .recording import RunRecorder, default_run_dir, generate_run_id
 from .services import (
     ActionServiceServicer,
     AgentStatusServiceServicer,
@@ -26,6 +29,9 @@ from .types import Position
 
 logger = structlog.get_logger()
 
+# Project root: the parent of the world/ package directory.
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+
 # Default ports
 DEFAULT_PORT = 50051
 DEFAULT_WS_PORT = 8765
@@ -40,11 +46,13 @@ class WorldServer:
         port: int = DEFAULT_PORT,
         ws_port: int = DEFAULT_WS_PORT,
         tick_config: TickConfig | None = None,
+        recorder: RunRecorder | None = None,
     ):
         self.world = world
         self.port = port
         self.ws_port = ws_port
         self.tick_config = tick_config or TickConfig()
+        self.recorder = recorder
 
         # Core components
         self.lease_manager = LeaseManager()
@@ -68,17 +76,28 @@ class WorldServer:
 
         # Viewer WebSocket service
         self.viewer_ws_service = ViewerWebSocketService(
-            world, self.tick_config, port=ws_port
+            world,
+            self.tick_config,
+            port=ws_port,
+            run_id=recorder.run_id if recorder is not None else "",
         )
 
-        # Agent status reports are forwarded straight to viewer clients.
+        # Agent status reports go to viewer clients and, when recording, to
+        # the run's tick stream.
         self.status_service = AgentStatusServiceServicer(
-            self.lease_manager, self.viewer_ws_service.broadcast_event
+            self.lease_manager,
+            self.viewer_ws_service.broadcast_event,
+            self._record_agent_status,
         )
 
         # gRPC server
         self._server: grpc.Server | None = None
         self._tick_task: asyncio.Task | None = None
+
+    def _record_agent_status(self, status: dict[str, Any]) -> None:
+        """Append an accepted agent status report to the run recording."""
+        if self.recorder is not None:
+            self.recorder.record_agent_status(status)
 
     async def _on_tick_start(self, context: TickContext) -> None:
         """Called at the start of each tick, before deadline."""
@@ -111,6 +130,10 @@ class WorldServer:
         # Broadcast to viewer WebSocket clients
         self.viewer_ws_service.on_tick_complete(result)
 
+        # Append the tick to the run recording
+        if self.recorder is not None:
+            self.recorder.record_tick(result)
+
         logger.debug(
             "tick_complete",
             tick_id=result.tick_id,
@@ -134,6 +157,9 @@ class WorldServer:
 
     async def start(self) -> None:
         """Start the gRPC server and tick loop."""
+        if self.recorder is not None:
+            self.recorder.start()
+
         # Create gRPC server with thread pool for handling requests
         # Every observation stream holds a worker thread for its lifetime, so
         # the pool must exceed the number of agents or unary RPCs starve.
@@ -191,9 +217,24 @@ class WorldServer:
             self._server.stop(grace_period)
             logger.info("grpc_server_stopped")
 
+        # Finish the recording (updates meta.json with finished_at/last_tick)
+        if self.recorder is not None:
+            self.recorder.close()
+
     async def run_forever(self) -> None:
-        """Start and run until interrupted."""
+        """Start and run until interrupted.
+
+        SIGINT and SIGTERM stop the tick loop so `stop()` runs and the run
+        recorder can close its files and finish `meta.json`.
+        """
         await self.start()
+        loop = asyncio.get_running_loop()
+        for signal_number in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(signal_number, self.tick_loop.stop)
+            except (NotImplementedError, RuntimeError):
+                # Not on the main thread (tests) or not a Unix loop.
+                pass
         try:
             # Wait for tick loop to complete (runs until stopped)
             if self._tick_task:
@@ -202,6 +243,14 @@ class WorldServer:
             pass
         finally:
             await self.stop()
+
+
+def _relative_to_root(path: Path) -> str:
+    """Path as written relative to the project root, or its absolute form."""
+    try:
+        return str(path.resolve().relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(path)
 
 
 def _spawn_at_settlement(server: "WorldServer", entities: list[Entity]) -> None:
@@ -234,6 +283,11 @@ async def run_server(
     spawn_mode: str = "positions",
     intent_deadline_ms: int | None = None,
     wolves: bool = False,
+    run_dir: Path | None = None,
+    run_id: str = "",
+    config_name: str = "default",
+    config_path: str = "",
+    map_path: str = "",
 ) -> None:
     """Run a world server with the given configuration.
 
@@ -250,6 +304,11 @@ async def run_server(
             (place every entity near the computed settlement centre)
         intent_deadline_ms: Intent deadline within a tick; defaults to half the tick
         wolves: Whether the world simulates wolves
+        run_dir: Directory to record the run into; None disables recording
+        run_id: Run id for the recording (generated when empty)
+        config_name: Config name, recorded in meta.json
+        config_path: Config path relative to the project root, recorded in meta.json
+        map_path: Map file path relative to the project root, "" when there is none
     """
     if world is None:
         world = World(width=width, height=height)
@@ -262,7 +321,24 @@ async def run_server(
         ),
     )
 
-    server = WorldServer(world, port=port, ws_port=ws_port, tick_config=config)
+    recorder: RunRecorder | None = None
+    if run_dir is not None:
+        recorder = RunRecorder(
+            run_dir=run_dir,
+            run_id=run_id or generate_run_id(config_name),
+            config_name=config_name,
+            config_path=config_path,
+            world=world,
+            tick_config=config,
+            wolves=wolves,
+            map_path=map_path,
+            project_root=PROJECT_ROOT,
+        )
+        logger.info("run_dir", path=str(run_dir), run_id=recorder.run_id)
+
+    server = WorldServer(
+        world, port=port, ws_port=ws_port, tick_config=config, recorder=recorder
+    )
 
     # The mechanics track owns the wolf simulation; it reads this flag off the
     # tick loop. Set defensively so the two tracks can land independently.
@@ -337,6 +413,18 @@ def main() -> None:
         help="Spawn entity at x,y (e.g., 'bob:5,5') - adds to config entities",
     )
     parser.add_argument(
+        "--run-dir",
+        type=str,
+        default="",
+        help="Directory to record this run into "
+        "(default: $BOBGAME_RUN_DIR or <project_root>/runs/<run id>)",
+    )
+    parser.add_argument(
+        "--no-record",
+        action="store_true",
+        help="Do not record this run",
+    )
+    parser.add_argument(
         "--spawn-bush",
         type=str,
         nargs="*",
@@ -347,11 +435,15 @@ def main() -> None:
     args = parser.parse_args()
 
     # Load config if specified
+    config_name = "default"
+    config_rel_path = ""
     if args.config:
         try:
             config_path = find_config(args.config)
             config = load_config(config_path)
             logger.info("config_loaded", path=str(config_path))
+            config_name = config_path.stem
+            config_rel_path = _relative_to_root(config_path)
         except FileNotFoundError as e:
             parser.error(str(e))
     else:
@@ -434,8 +526,7 @@ def main() -> None:
         # Resolve save path relative to project root
         if map_save_path:
             # Find project root (parent of world/ directory)
-            project_root = Path(__file__).parent.parent.parent.parent
-            save_path = project_root / map_save_path
+            save_path = PROJECT_ROOT / map_save_path
 
             if save_path.exists():
                 # Load existing map
@@ -504,8 +595,7 @@ def main() -> None:
         if not map_save_path:
             parser.error("generation_mode='load' requires map_save_path to be set")
 
-        project_root = Path(__file__).parent.parent.parent.parent
-        save_path = project_root / map_save_path
+        save_path = PROJECT_ROOT / map_save_path
 
         logger.info(
             "loading_saved_map",
@@ -521,6 +611,25 @@ def main() -> None:
             objects=len(terrain_objects),
         )
 
+    # Recording destination
+    run_id = generate_run_id(config_name)
+    run_dir: Path | None = None
+    if not args.no_record:
+        run_dir = (
+            Path(args.run_dir)
+            if args.run_dir
+            else default_run_dir(PROJECT_ROOT, run_id)
+        )
+        logger.info("recording_run", run_id=run_id, run_dir=str(run_dir))
+    else:
+        logger.info("recording_disabled")
+
+    # The map path recorded in meta is relative to the project root, as the
+    # config writes it; only a map that actually exists is recorded.
+    recorded_map_path = ""
+    if map_save_path and (PROJECT_ROOT / map_save_path).exists():
+        recorded_map_path = map_save_path
+
     asyncio.run(
         run_server(
             width=width,
@@ -534,6 +643,11 @@ def main() -> None:
             spawn_mode=config.world.spawn_mode,
             intent_deadline_ms=config.world.intent_deadline_ms,
             wolves=config.world.wolves,
+            run_dir=run_dir,
+            run_id=run_id,
+            config_name=config_name,
+            config_path=config_rel_path,
+            map_path=recorded_map_path,
         )
     )
 

@@ -22,7 +22,8 @@ from .. import world_pb2 as pb
 from .client import WorldClient
 from .jevclient import JevClient, TypeSafeJevClient
 from .planner import Planner
-from .stint import Brief, Stint, StintReport, default_log_path
+from .stint import Brief, Stint, StintReport
+from .tracelog import AgentTrace, resolve_log_root
 from .worldmodel import TickDigest, WorldModel
 
 logger = structlog.get_logger(__name__)
@@ -73,12 +74,13 @@ class JevAgent:
         self.world = world
         self.jev = jev
         self.entity_id = entity_id
-        self.log_root = Path("logs") if log_root is None else log_root
+        self.log_root = resolve_log_root() if log_root is None else log_root
+        self.trace = AgentTrace(entity_id, self.log_root)
         self._model = WorldModel(entity_id)
 
         self.mode = MODE_IDLE
         self.planner = Planner(
-            self, entity_id, model_name=planner_model, log_root=self.log_root
+            self, entity_id, model_name=planner_model, trace=self.trace
         )
 
         self._stint_requests: asyncio.Queue[_StintRequest] = asyncio.Queue()
@@ -246,7 +248,7 @@ class JevAgent:
             request.brief,
             self._model,
             self.jev,
-            log_path=default_log_path(self.entity_id, self.log_root),
+            trace=self.trace,
         )
         self._active_stint = stint
         self.mode = MODE_STINT
@@ -338,3 +340,4 @@ async def run_agent(
     finally:
         await jev.aclose()
         await world.close()
+        agent.trace.close()

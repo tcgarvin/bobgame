@@ -5,7 +5,13 @@
  */
 
 import type {
+  AgentDetailMessage,
   AgentStatusMessage,
+  EntityLogMessage,
+  ErrorMessage,
+  ReplayInfo,
+  ReplayStatusMessage,
+  RunIndexMessage,
   EntityState,
   EntityUpdate,
   ObjectState,
@@ -31,6 +37,11 @@ import {
   isTerrainUpdateMessage,
   isChunkUnloadMessage,
   isAgentStatusMessage,
+  isAgentDetailMessage,
+  isEntityLogMessage,
+  isErrorMessage,
+  isReplayStatusMessage,
+  isRunIndexMessage,
 } from './types';
 
 /** How many action/utterance log entries are kept per entity. */
@@ -89,6 +100,12 @@ export type StateUpdateHandler = () => void;
 
 export type SelectionHandler = (entityId: string) => void;
 
+/** Called when the selected object changes ('' when cleared). */
+export type ObjectSelectionHandler = (objectId: string) => void;
+
+/** How many agent_detail replies are cached (keyed by entity and tick). */
+const AGENT_DETAIL_CACHE_SIZE = 64;
+
 /**
  * Tracked world object (bushes, etc.)
  */
@@ -131,7 +148,14 @@ export class WorldState {
   private objects: Map<string, TrackedObject> = new Map();
   private entityLogs: Map<string, EntityLogEntry[]> = new Map();
   private agentStatuses: Map<string, AgentStatusMessage> = new Map();
+  private agentDetails: Map<string, AgentDetailMessage> = new Map();
   private selectedEntityId: string = '';
+  private selectedObjectId: string = '';
+  private runId: string = '';
+  private replayInfo: ReplayInfo | null = null;
+  private replayStatus: ReplayStatusMessage | null = null;
+  private runIndex: RunIndexMessage | null = null;
+  private lastError: string = '';
   private settlement: Position | null = null;
   private currentTickId: number = 0;
   private tickDurationMs: number = 1000;
@@ -146,6 +170,7 @@ export class WorldState {
   private utteranceHandler: UtteranceHandler | null = null;
   private stateUpdateHandler: StateUpdateHandler | null = null;
   private selectionHandler: SelectionHandler | null = null;
+  private objectSelectionHandler: ObjectSelectionHandler | null = null;
 
   /**
    * Set handler for entity add/remove events
@@ -272,10 +297,74 @@ export class WorldState {
 
   /** Select an entity (pass '' to clear). Notifies the selection handler. */
   setSelectedEntity(entityId: string): void {
+    if (entityId) {
+      this.setSelectedObject('');
+    }
     if (this.selectedEntityId === entityId) return;
     this.selectedEntityId = entityId;
     this.selectionHandler?.(entityId);
     this.stateUpdateHandler?.();
+  }
+
+  /** Set handler called when the selected object changes. */
+  onObjectSelectionChange(handler: ObjectSelectionHandler): void {
+    this.objectSelectionHandler = handler;
+  }
+
+  /** Currently selected object id, or '' when nothing is selected. */
+  getSelectedObjectId(): string {
+    return this.selectedObjectId;
+  }
+
+  getSelectedObject(): TrackedObject | undefined {
+    return this.selectedObjectId ? this.objects.get(this.selectedObjectId) : undefined;
+  }
+
+  /**
+   * Select an object (pass '' to clear). Entity and object selection are
+   * mutually exclusive so a deep link always names at most one of them.
+   */
+  setSelectedObject(objectId: string): void {
+    if (objectId && this.selectedEntityId) {
+      this.selectedEntityId = '';
+      this.selectionHandler?.('');
+    }
+    if (this.selectedObjectId === objectId) return;
+    this.selectedObjectId = objectId;
+    this.objectSelectionHandler?.(objectId);
+    this.stateUpdateHandler?.();
+  }
+
+  // --- Replay ---
+
+  /** Run id of the recording being watched ('' when the server sends none). */
+  getRunId(): string {
+    return this.runId;
+  }
+
+  /** True when the server identified itself as a replay in its snapshot. */
+  isReplay(): boolean {
+    return this.replayInfo !== null;
+  }
+
+  /** Latest replay position, or null in live mode. */
+  getReplayStatus(): ReplayStatusMessage | null {
+    return this.replayStatus;
+  }
+
+  /** Latest run index, or null when none has arrived. */
+  getRunIndex(): RunIndexMessage | null {
+    return this.runIndex;
+  }
+
+  /** Last error message from the server ('' when none). */
+  getLastError(): string {
+    return this.lastError;
+  }
+
+  /** Cached agent detail for one entity at one tick, if it has arrived. */
+  getAgentDetail(entityId: string, tickId: number): AgentDetailMessage | null {
+    return this.agentDetails.get(`${entityId}@${tickId}`) ?? null;
   }
 
   /**
@@ -300,7 +389,68 @@ export class WorldState {
       this.handleChunkUnload(message);
     } else if (isAgentStatusMessage(message)) {
       this.handleAgentStatus(message);
+    } else if (isReplayStatusMessage(message)) {
+      this.handleReplayStatus(message);
+    } else if (isRunIndexMessage(message)) {
+      this.handleRunIndex(message);
+    } else if (isEntityLogMessage(message)) {
+      this.handleEntityLog(message);
+    } else if (isAgentDetailMessage(message)) {
+      this.handleAgentDetail(message);
+    } else if (isErrorMessage(message)) {
+      this.handleError(message);
     }
+  }
+
+  private handleReplayStatus(msg: ReplayStatusMessage): void {
+    this.replayStatus = msg;
+    if (this.replayInfo) {
+      this.replayInfo = { ...this.replayInfo, ...msg, run_id: this.replayInfo.run_id };
+    }
+    this.currentTickId = msg.tick_id;
+    this.stateUpdateHandler?.();
+  }
+
+  private handleRunIndex(msg: RunIndexMessage): void {
+    this.runIndex = msg;
+    if (msg.run_id) this.runId = msg.run_id;
+    this.stateUpdateHandler?.();
+  }
+
+  /**
+   * Backfilled action/utterance history sent after a seek. The logs were
+   * cleared by the preceding snapshot, so entries are simply appended in the
+   * order the server sent them (oldest first).
+   */
+  private handleEntityLog(msg: EntityLogMessage): void {
+    for (const entry of msg.entries ?? []) {
+      this.appendLog(entry.entity_id, {
+        tick: entry.tick_id,
+        kind: entry.kind === 'utterance' ? 'utterance' : 'action',
+        text: entry.text,
+        success: entry.success ?? true,
+        channel: entry.channel ?? '',
+      });
+    }
+    this.stateUpdateHandler?.();
+  }
+
+  private handleAgentDetail(msg: AgentDetailMessage): void {
+    const key = `${msg.entity_id}@${msg.tick_id}`;
+    this.agentDetails.delete(key);
+    this.agentDetails.set(key, msg);
+    while (this.agentDetails.size > AGENT_DETAIL_CACHE_SIZE) {
+      const oldest = this.agentDetails.keys().next();
+      if (oldest.done) break;
+      this.agentDetails.delete(oldest.value);
+    }
+    this.stateUpdateHandler?.();
+  }
+
+  private handleError(msg: ErrorMessage): void {
+    this.lastError = msg.message;
+    console.error(`Server error: ${msg.message}`);
+    this.stateUpdateHandler?.();
   }
 
   /**
@@ -317,6 +467,7 @@ export class WorldState {
     }
     this.entities.clear();
     this.entityLogs.clear();
+    this.agentStatuses.clear();
 
     // Clear existing objects
     for (const obj of this.objects.values()) {
@@ -324,7 +475,23 @@ export class WorldState {
     }
     this.objects.clear();
 
+    // The selection survives a re-snapshot (a replay seek sends one); the
+    // sprites and panels are rebuilt from the messages that follow.
+
     // Set world state
+    this.runId = msg.run_id ?? this.runId;
+    this.replayInfo = msg.replay ? { ...msg.replay } : null;
+    if (msg.replay) {
+      this.runId = msg.replay.run_id || this.runId;
+      this.replayStatus = {
+        type: 'replay_status',
+        tick_id: msg.replay.tick_id,
+        playing: msg.replay.playing,
+        speed: msg.replay.speed,
+        first_tick: msg.replay.first_tick,
+        last_tick: msg.replay.last_tick,
+      };
+    }
     this.currentTickId = msg.tick_id;
     this.tickDurationMs = msg.tick_duration_ms;
     this.worldSize = msg.world_size;
@@ -461,6 +628,9 @@ export class WorldState {
       if (obj) {
         this.objects.delete(objectId);
         this.objectChangeHandler?.('removed', obj);
+        if (this.selectedObjectId === objectId) {
+          this.setSelectedObject('');
+        }
       }
     }
 

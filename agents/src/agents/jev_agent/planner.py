@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterable, Protocol, Sequence
+from typing import Any, AsyncIterable, Protocol, Sequence
 
 import structlog
 from pydantic_ai import Agent, ModelRetry, RunContext
@@ -21,6 +22,7 @@ from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     ModelMessage,
+    ToolCallPart,
 )
 from pydantic_ai.models.openrouter import OpenRouterModelSettings
 from pydantic_ai.usage import UsageLimits
@@ -30,6 +32,7 @@ from .. import world_pb2 as pb
 from .geometry import NAME_TO_DIRECTION, chebyshev
 from .options import CRAFT_RECIPES, TravelState
 from .stint import Brief, StintReport
+from .tracelog import AgentTrace
 from .worldmodel import WorldModel
 
 logger = structlog.get_logger(__name__)
@@ -461,6 +464,14 @@ def read_memory(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip() or "(no notes yet)"
 
 
+def _tool_args(part: ToolCallPart) -> dict[str, Any]:
+    """The tool call's arguments as a dict, even when the model sent bad JSON."""
+    try:
+        return part.args_as_dict()
+    except (ValueError, TypeError) as error:
+        return {"_unparsed": part.args_as_json_str(), "_error": str(error)}
+
+
 def trim_history(
     messages: Sequence[ModelMessage], limit: int = HISTORY_MESSAGE_LIMIT
 ) -> list[ModelMessage]:
@@ -479,7 +490,7 @@ class Planner:
         entity_id: str,
         *,
         model_name: str = "",
-        log_root: Path | None = None,
+        trace: AgentTrace,
     ) -> None:
         resolved = model_name or os.environ.get("PLANNER_MODEL", DEFAULT_PLANNER_MODEL)
         # Bare OpenRouter ids look like "vendor/model"; anything else (such as
@@ -489,13 +500,14 @@ class Planner:
         self.model_name = resolved
         self.bridge = bridge
         self.entity_id = entity_id
-        root = Path("logs") if log_root is None else log_root
-        self.memory_path = root / f"agent-{entity_id}" / "memory.md"
+        self.trace = trace
+        self.memory_path = trace.memory_path
         self.agent = build_planner_agent(self.model_name)
         self.deps = PlannerDeps(bridge=bridge, memory_path=self.memory_path)
         self.history: list[ModelMessage] = []
         self.reports: list[StintReport] = []
         self.last_thought = ""
+        self.turn = 0
         self._tool_calls_this_turn = 0
         self._turns_without_tools = 0
 
@@ -527,7 +539,19 @@ class Planner:
                 raise
             except Exception as error:  # noqa: BLE001 - the planner must keep going
                 logger.warning("planner_turn_failed", error=str(error))
+                self._trace("turn_failed", error=str(error))
                 await asyncio.sleep(TURN_RETRY_SECONDS)
+
+    def _trace(self, event: str, **fields: object) -> None:
+        """Write one line to `planner.jsonl.gz`, stamped with the current tick."""
+        payload: dict[str, object] = {
+            "event": event,
+            "entity_id": self.entity_id,
+            "tick": self.bridge.model.tick,
+            "turn": self.turn,
+        }
+        payload.update(fields)
+        self.trace.planner.write(payload)
 
     async def _log_events(self, events: AsyncIterable[AgentStreamEvent]) -> None:
         """Log every tool call and result so a live run can be followed."""
@@ -540,23 +564,34 @@ class Planner:
                     tool=event.part.tool_name,
                     args=event.part.args_as_json_str()[:300],
                 )
+                self._trace(
+                    "tool_call",
+                    tool=event.part.tool_name,
+                    args=_tool_args(event.part),
+                )
             elif isinstance(event, FunctionToolResultEvent):
+                tool_name = event.part.tool_name or ""
                 logger.info(
                     "planner_tool_result",
                     entity_id=self.entity_id,
-                    tool=(
-                        event.part.tool_name if hasattr(event.part, "tool_name") else ""
-                    ),
+                    tool=tool_name,
                     result=str(event.part.content)[:200],
+                )
+                self._trace(
+                    "tool_result", tool=tool_name, result=str(event.part.content)
                 )
 
     async def take_turn(self) -> str:
         """Run one planner turn and publish its reflection."""
         logger.info("planner_turn_started", entity_id=self.entity_id)
+        self.turn += 1
         self._tool_calls_this_turn = 0
+        prompt = self.build_prompt()
+        self._trace("turn_start", prompt=prompt)
+        started = time.monotonic()
         try:
             result = await self.agent.run(
-                self.build_prompt(),
+                prompt,
                 deps=self.deps,
                 message_history=self.history,
                 usage_limits=UsageLimits(tool_calls_limit=MAX_TOOL_CALLS_PER_TURN),
@@ -566,6 +601,7 @@ class Planner:
             # Hitting the per-turn tool budget is normal, not an error: the turn
             # simply ends here and the next one starts with a fresh look().
             logger.info("planner_tool_budget_reached", entity_id=self.entity_id)
+            self._trace("tool_budget_reached")
             self.last_thought = "Ran out of tool calls this turn; continuing."
             self.bridge.set_thought(self.last_thought)
             return self.last_thought
@@ -574,6 +610,18 @@ class Planner:
         if self.last_thought:
             self.bridge.set_thought(self.last_thought)
         logger.info("planner_thought", entity_id=self.entity_id, text=self.last_thought)
+        # `usage` is a property on pydantic-ai 2.4x, not a method.
+        usage = result.usage
+        self._trace(
+            "turn_end",
+            thought=self.last_thought,
+            tool_calls=self._tool_calls_this_turn,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            usage={
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+            },
+        )
         await self._recover_from_text_only_turn()
         return self.last_thought
 
@@ -596,6 +644,7 @@ class Planner:
         )
         if self._turns_without_tools >= 2:
             logger.warning("planner_history_reset", entity_id=self.entity_id)
+            self._trace("history_reset")
             self.history = []
             self._turns_without_tools = 0
         await asyncio.sleep(TURN_RETRY_SECONDS)

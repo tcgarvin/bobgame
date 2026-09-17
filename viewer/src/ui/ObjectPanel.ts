@@ -1,0 +1,172 @@
+/**
+ * Object inspector: shows the selected chest, item pile, message board or
+ * bush. The markup lives in index.html; this module only fills it in.
+ *
+ * All the data comes from `ObjectState.state`, which the world server already
+ * sends in both live and replay mode: `contents` and `notes` are JSON strings,
+ * `berry_count` is "0" or "1".
+ */
+
+import type { TrackedObject, WorldState } from '../network';
+
+export interface ObjectPanelCallbacks {
+  /** Called when the user closes the panel (clears the selection). */
+  onClose: () => void;
+}
+
+/** Object types that have something worth inspecting. */
+export const INSPECTABLE_TYPES = new Set(['chest', 'item_pile', 'message_board', 'bush']);
+
+interface BoardNote {
+  title?: string;
+  text?: string;
+  author?: string;
+  tick?: number;
+}
+
+function requireElement<T extends HTMLElement>(id: string): T {
+  const element = document.getElementById(id);
+  if (!element) {
+    throw new Error(`Object panel element #${id} is missing from index.html`);
+  }
+  return element as T;
+}
+
+/**
+ * Parse a JSON string from an object's state.
+ * Malformed JSON is reported rather than silently swallowed, because it means
+ * the server changed shape.
+ */
+function parseState(raw: string | undefined, objectId: string, field: string): unknown {
+  if (raw === undefined || raw === '') return null;
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    console.error(`Object ${objectId}: ${field} is not valid JSON`, error, raw);
+    return null;
+  }
+}
+
+function readContents(obj: TrackedObject): Array<[string, number]> {
+  const parsed = parseState(obj.state.contents, obj.objectId, 'contents');
+  if (typeof parsed !== 'object' || parsed === null) return [];
+  return Object.entries(parsed as Record<string, unknown>)
+    .filter((pair): pair is [string, number] => typeof pair[1] === 'number' && pair[1] !== 0)
+    .sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+function readNotes(obj: TrackedObject): Array<{ slot: number; note: BoardNote }> {
+  const parsed = parseState(obj.state.notes, obj.objectId, 'notes');
+  if (!Array.isArray(parsed)) return [];
+  const notes: Array<{ slot: number; note: BoardNote }> = [];
+  parsed.forEach((entry, slot) => {
+    if (entry && typeof entry === 'object') {
+      notes.push({ slot, note: entry as BoardNote });
+    }
+  });
+  return notes;
+}
+
+export class ObjectPanel {
+  private worldState: WorldState;
+  private panel: HTMLElement;
+  private titleEl: HTMLElement;
+  private bodyEl: HTMLElement;
+
+  constructor(worldState: WorldState, callbacks: ObjectPanelCallbacks) {
+    this.worldState = worldState;
+    this.panel = requireElement('object-panel');
+    this.titleEl = requireElement('op-title');
+    this.bodyEl = requireElement('op-body');
+    requireElement<HTMLButtonElement>('op-close').addEventListener('click', () =>
+      callbacks.onClose()
+    );
+  }
+
+  /** Redraw from the current selection; hides itself when nothing is selected. */
+  refresh(): void {
+    const obj = this.worldState.getSelectedObject();
+    if (!obj) {
+      this.panel.classList.add('hidden');
+      return;
+    }
+    this.panel.classList.remove('hidden');
+    this.titleEl.textContent = obj.objectType;
+
+    const rows: HTMLElement[] = [
+      this.kvRow('id', obj.objectId),
+      this.kvRow('position', `(${obj.position.x}, ${obj.position.y})`),
+    ];
+
+    if (obj.objectType === 'bush') {
+      rows.push(this.kvRow('berries', obj.state.berry_count === '1' ? 'ripe' : 'none'));
+    } else if (obj.objectType === 'message_board') {
+      rows.push(this.sectionLabel('Notes'));
+      const notes = readNotes(obj);
+      if (notes.length === 0) {
+        rows.push(this.muted('empty board'));
+      } else {
+        for (const { slot, note } of notes) {
+          rows.push(this.noteBlock(slot, note));
+        }
+      }
+    } else {
+      rows.push(this.sectionLabel('Contents'));
+      const contents = readContents(obj);
+      if (contents.length === 0) {
+        rows.push(this.muted('empty'));
+      } else {
+        for (const [kind, count] of contents) {
+          rows.push(this.kvRow(kind, String(count)));
+        }
+      }
+    }
+
+    this.bodyEl.replaceChildren(...rows);
+  }
+
+  private noteBlock(slot: number, note: BoardNote): HTMLElement {
+    const block = document.createElement('div');
+    block.className = 'note';
+
+    const head = document.createElement('div');
+    head.className = 'note-head';
+    head.textContent = `#${slot} ${note.title ?? '(untitled)'}`;
+
+    const meta = document.createElement('div');
+    meta.className = 'note-meta';
+    meta.textContent = `${note.author ?? 'unknown'} · t${note.tick ?? '?'}`;
+
+    const body = document.createElement('div');
+    body.className = 'note-text';
+    body.textContent = note.text ?? '';
+
+    block.append(head, meta, body);
+    return block;
+  }
+
+  private sectionLabel(text: string): HTMLElement {
+    const el = document.createElement('div');
+    el.className = 'label';
+    el.textContent = text;
+    return el;
+  }
+
+  private muted(text: string): HTMLElement {
+    const el = document.createElement('div');
+    el.className = 'muted';
+    el.textContent = text;
+    return el;
+  }
+
+  private kvRow(label: string, value: string): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'kv';
+    const left = document.createElement('span');
+    left.textContent = label;
+    const right = document.createElement('span');
+    right.textContent = value;
+    row.append(left, right);
+    return row;
+  }
+}

@@ -14,4 +14,5 @@ backoff_multiplier = 2.0
 
 [agents.default]
 module = "agents.jev_agent"
-args = ["--log-root", "../logs"]
+# The agent derives its log root from BOBGAME_RUN_DIR (see docs/07_replay.md).
+args = []

@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, replace
-from pathlib import Path
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 import structlog
@@ -28,6 +27,7 @@ from .options import (
     options_to_criteria,
     retreat_option,
 )
+from .tracelog import AgentTrace
 from .worldmodel import TickDigest, WorldModel
 
 logger = structlog.get_logger(__name__)
@@ -64,6 +64,22 @@ class Brief:
         """One-line form for status reports and the viewer."""
         return f"{self.instruction} (until: {self.success_condition})"
 
+    def as_payload(self) -> dict[str, Any]:
+        """The brief as the replay contract serialises it."""
+        travel = self.travel
+        return {
+            "instruction": self.instruction,
+            "success_condition": self.success_condition,
+            "max_ticks": self.max_ticks,
+            "notes": self.notes,
+            "check_every": self.check_every,
+            "travel": (
+                None
+                if travel is None
+                else {"target": list(travel.target), "label": travel.label}
+            ),
+        }
+
 
 @dataclass(frozen=True)
 class TickRecord:
@@ -80,29 +96,34 @@ class TickRecord:
     eject: float
     danger: float
     latency_ms: int
+    confidence: float = 0.0
+    probabilities: Mapping[str, float] = field(default_factory=dict)
     intent_result: str = "pending"
     note: str = ""
 
-    def as_json(self, entity_id: str) -> str:
-        """Serialise for the JSONL log."""
-        return json.dumps(
-            {
-                "entity_id": entity_id,
-                "tick": self.tick,
-                "position": list(self.position),
-                "health": self.health,
-                "hunger": self.hunger,
-                "input_tokens": self.input_tokens,
-                "options": self.option_count,
-                "action": self.action,
-                "top": [[key, round(value, 3)] for key, value in self.top],
-                "eject": round(self.eject, 3),
-                "danger": round(self.danger, 3),
-                "latency_ms": self.latency_ms,
-                "intent_result": self.intent_result,
-                "note": self.note,
-            }
-        )
+    def as_payload(self, entity_id: str, stint_id: str) -> dict[str, Any]:
+        """Serialise for `stints.jsonl.gz`."""
+        return {
+            "entity_id": entity_id,
+            "stint_id": stint_id,
+            "tick": self.tick,
+            "position": list(self.position),
+            "health": self.health,
+            "hunger": self.hunger,
+            "input_tokens": self.input_tokens,
+            "options": self.option_count,
+            "action": self.action,
+            "top": [[key, round(value, 3)] for key, value in self.top],
+            "probabilities": {
+                key: round(value, 3) for key, value in self.probabilities.items()
+            },
+            "confidence": round(self.confidence, 3),
+            "eject": round(self.eject, 3),
+            "danger": round(self.danger, 3),
+            "latency_ms": self.latency_ms,
+            "intent_result": self.intent_result,
+            "note": self.note,
+        }
 
     def as_line(self) -> str:
         """Compact human form used in the stint report's tail."""
@@ -168,14 +189,15 @@ class Stint:
         model: WorldModel,
         jev: JevClient,
         *,
-        log_path: Path,
+        trace: AgentTrace,
     ) -> None:
         self.brief = brief
         self.model = model
         self.jev = jev
-        self.log_path = log_path
+        self.trace = trace
         self.travel = brief.travel
 
+        self.stint_id = ""
         self.finished = False
         self.end_reason = ""
         self.ticks_used = 0
@@ -202,6 +224,16 @@ class Stint:
             self._start_position = self.model.position
             self._start_stats = _stats(self.model)
             self._start_inventory = dict(self.model.self_info.inventory)
+            self.stint_id = f"{self.model.entity_id}-{self.model.tick}"
+            self.trace.stints.write(
+                {
+                    "event": "stint_start",
+                    "entity_id": self.model.entity_id,
+                    "tick": self.model.tick,
+                    "stint_id": self.stint_id,
+                    "brief": self.brief.as_payload(),
+                }
+            )
 
         self._absorb(digest)
         if not any(not acted.success for acted in digest.own_actions):
@@ -230,6 +262,17 @@ class Stint:
             travel=self.travel,
         )
         criteria = options_to_criteria(options)
+        # Written before the call: a timed-out or failed call still saw this
+        # state, and the trace should say so.
+        self.trace.jev_states.write(
+            {
+                "entity_id": self.model.entity_id,
+                "tick": self.model.tick,
+                "stint_id": self.stint_id,
+                "state": state,
+                "criteria": criteria,
+            }
+        )
 
         try:
             decision = await asyncio.wait_for(
@@ -404,6 +447,8 @@ class Stint:
             eject=decision.eject,
             danger=decision.danger,
             latency_ms=decision.latency_ms,
+            confidence=decision.confidence,
+            probabilities=dict(decision.probabilities),
             note=note,
         )
 
@@ -421,15 +466,19 @@ class Stint:
             ticks=self.ticks_used,
             brief=self.brief.instruction,
         )
-        self._append_log_line(
+        # The end line carries the report, so build it here rather than leaving
+        # the reader to reconstruct it from the per-tick records.
+        self.trace.stints.write(
             {
-                "entity_id": self.model.entity_id,
                 "event": "stint_end",
+                "entity_id": self.model.entity_id,
                 "tick": self.model.tick,
+                "stint_id": self.stint_id,
                 "end_reason": reason,
                 "ticks_used": self.ticks_used,
                 "max_ticks": self.brief.max_ticks,
                 "brief": self.brief.instruction,
+                "report": self.build_report().to_text(),
             }
         )
 
@@ -470,7 +519,10 @@ class Stint:
         decision = self.last_decision
         payload: dict[str, Any] = {
             "tick": self.model.tick,
+            "stint_id": self.stint_id,
             "brief": self.brief.instruction,
+            "success_condition": self.brief.success_condition,
+            "notes": self.brief.notes,
             "ticks_used": self.ticks_used,
             "max_ticks": self.brief.max_ticks,
             "action": decision.action,
@@ -484,17 +536,7 @@ class Stint:
         return json.dumps(payload)
 
     def _append_log(self, record: TickRecord) -> None:
-        self._append_log_line(json.loads(record.as_json(self.model.entity_id)))
-
-    def _append_log_line(self, payload: dict[str, Any]) -> None:
-        try:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.log_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload) + "\n")
-        except OSError as error:
-            logger.warning(
-                "stint_log_write_failed", path=str(self.log_path), error=str(error)
-            )
+        self.trace.stints.write(record.as_payload(self.model.entity_id, self.stint_id))
 
 
 def _find_option(options: Sequence[Option], key: str) -> Option | None:
@@ -518,9 +560,3 @@ def _dedupe(items: Sequence[str]) -> list[str]:
         seen.add(item)
         result.append(item)
     return result
-
-
-def default_log_path(entity_id: str, log_root: Path | None = None) -> Path:
-    """`logs/agent-<id>/stints.jsonl`, relative to the working directory by default."""
-    root = Path("logs") if log_root is None else log_root
-    return root / f"agent-{entity_id}" / "stints.jsonl"

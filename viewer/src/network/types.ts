@@ -83,6 +83,19 @@ export interface TerrainChange {
 
 // Message types
 
+/**
+ * Replay position, sent inside `snapshot.replay` by the replay server only.
+ * Its presence is what puts the viewer into replay mode.
+ */
+export interface ReplayInfo {
+  run_id: string;
+  first_tick: number;
+  last_tick: number;
+  tick_id: number;
+  playing: boolean;
+  speed: number;
+}
+
 export interface SnapshotMessage {
   type: 'snapshot';
   tick_id: number;
@@ -91,6 +104,11 @@ export interface SnapshotMessage {
   tick_duration_ms: number;
   /** Settlement centre; absent on servers without the settlement feature. */
   settlement?: Position;
+  /** Run id of the recording being watched (live server sends it too, and
+   * sends null when it runs with --no-record). */
+  run_id?: string | null;
+  /** Present only in replay mode. */
+  replay?: ReplayInfo;
 }
 
 export interface TickStartedMessage {
@@ -127,6 +145,18 @@ export interface StintOptionProbability {
 export interface AgentStint {
   tick?: number;
   action?: string;
+  /** The stint brief instruction (status_json) - not the full brief object. */
+  brief?: string;
+  /** Full option -> probability map from Jev. */
+  probabilities?: Record<string, number>;
+  confidence?: number;
+  ticks_used?: number;
+  max_ticks?: number;
+  input_tokens?: number;
+  /** Added by the agent track; treated as optional here. */
+  success_condition?: string;
+  notes?: string;
+  stint_id?: string;
   /**
    * Top options by probability, highest first. The agent currently sends
    * `[option, probability]` pairs; objects are accepted too.
@@ -151,6 +181,8 @@ export interface AgentStatusMessage {
   brief: string;
   planner_thought: string;
   stint: AgentStint | null;
+  /** Replay only: the tick this status was recorded at. */
+  tick_id?: number;
 }
 
 export interface EntitySpawnedMessage {
@@ -189,6 +221,117 @@ export interface ChunkUnloadMessage {
   chunk_y: number;
 }
 
+// --- Replay-only messages (see docs/07_replay.md, "Replay server") ---
+
+/** Sent after every replay state change. */
+export interface ReplayStatusMessage {
+  type: 'replay_status';
+  tick_id: number;
+  playing: boolean;
+  speed: number;
+  first_tick: number;
+  last_tick: number;
+}
+
+export type RunEventKind =
+  | 'death'
+  | 'respawn'
+  | 'wolf_spawned'
+  | 'wolf_killed'
+  | 'craft'
+  | 'place'
+  | 'write_note'
+  | 'say'
+  | 'stint_start'
+  | 'planner_turn'
+  | 'planner_failed'
+  | string;
+
+export interface RunEvent {
+  tick_id: number;
+  kind: RunEventKind;
+  entity_id: string;
+  text: string;
+}
+
+export interface RunIndexMessage {
+  type: 'run_index';
+  run_id: string;
+  agents: string[];
+  events: RunEvent[];
+}
+
+/** One entry of the backfilled per-entity log sent after a seek. */
+export interface EntityLogEntryMessage {
+  tick_id: number;
+  entity_id: string;
+  kind: 'action' | 'utterance';
+  text: string;
+  success?: boolean;
+  channel?: string;
+}
+
+export interface EntityLogMessage {
+  type: 'entity_log';
+  tick_id: number;
+  entries: EntityLogEntryMessage[];
+}
+
+/** The brief a stint was started with (from the `stint_start` trace line). */
+export interface StintBrief {
+  instruction?: string;
+  success_condition?: string;
+  max_ticks?: number;
+  notes?: string;
+  check_every?: number;
+  travel?: { target?: [number, number]; label?: string } | null;
+  [key: string]: unknown;
+}
+
+export interface StintStart {
+  stint_id?: string;
+  entity_id?: string;
+  tick?: number;
+  brief?: StintBrief;
+  [key: string]: unknown;
+}
+
+/** A `tool_call` / `tool_result` line inside a planner turn. */
+export interface PlannerTurnEvent {
+  event: string;
+  tool?: string;
+  args?: Record<string, unknown>;
+  result?: string;
+  tick?: number;
+  [key: string]: unknown;
+}
+
+export interface PlannerTurn {
+  turn: number;
+  started_tick?: number;
+  ended_tick?: number | null;
+  prompt?: string;
+  thought?: string;
+  events?: PlannerTurnEvent[];
+}
+
+export interface AgentDetailMessage {
+  type: 'agent_detail';
+  entity_id: string;
+  tick_id: number;
+  stint: StintStart | null;
+  record: AgentStint | null;
+  jev_state: Record<string, unknown> | null;
+  criteria: Record<string, string> | null;
+  planner_turn: PlannerTurn | null;
+  memory?: string;
+}
+
+export interface ErrorMessage {
+  type: 'error';
+  message: string;
+}
+
 export type ViewerMessage =
   | SnapshotMessage
   | TickStartedMessage
@@ -198,7 +341,12 @@ export type ViewerMessage =
   | ChunkDataMessage
   | TerrainUpdateMessage
   | ChunkUnloadMessage
-  | AgentStatusMessage;
+  | AgentStatusMessage
+  | ReplayStatusMessage
+  | RunIndexMessage
+  | EntityLogMessage
+  | AgentDetailMessage
+  | ErrorMessage;
 
 /**
  * Type guard for checking message types
@@ -237,4 +385,24 @@ export function isChunkUnloadMessage(msg: ViewerMessage): msg is ChunkUnloadMess
 
 export function isAgentStatusMessage(msg: ViewerMessage): msg is AgentStatusMessage {
   return msg.type === 'agent_status';
+}
+
+export function isReplayStatusMessage(msg: ViewerMessage): msg is ReplayStatusMessage {
+  return msg.type === 'replay_status';
+}
+
+export function isRunIndexMessage(msg: ViewerMessage): msg is RunIndexMessage {
+  return msg.type === 'run_index';
+}
+
+export function isEntityLogMessage(msg: ViewerMessage): msg is EntityLogMessage {
+  return msg.type === 'entity_log';
+}
+
+export function isAgentDetailMessage(msg: ViewerMessage): msg is AgentDetailMessage {
+  return msg.type === 'agent_detail';
+}
+
+export function isErrorMessage(msg: ViewerMessage): msg is ErrorMessage {
+  return msg.type === 'error';
 }

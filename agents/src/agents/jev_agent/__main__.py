@@ -8,11 +8,11 @@ import logging
 import os
 import signal
 import sys
-from pathlib import Path
 
 import structlog
 
 from .agent import run_agent
+from .tracelog import RUN_DIR_ENV, resolve_log_root
 
 
 def configure_logging(level: str) -> None:
@@ -39,8 +39,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--log-root",
-        default="logs",
-        help="directory for logs/agent-<id>/ (default: ./logs)",
+        default="",
+        help=(
+            "directory holding agent-<id>/ trace files; defaults to "
+            f"${RUN_DIR_ENV}/agents when that variable is set, else ./logs"
+        ),
     )
     parser.add_argument("--planner-model", default="", help="override PLANNER_MODEL")
     parser.add_argument("--jev-model", default="", help="override JEV_MODEL")
@@ -68,7 +71,7 @@ async def _main_async(args: argparse.Namespace) -> None:
         run_agent(
             args.server,
             args.entity,
-            log_root=Path(args.log_root),
+            log_root=resolve_log_root(args.log_root),
             planner_model=args.planner_model,
             jev_model=args.jev_model,
         )

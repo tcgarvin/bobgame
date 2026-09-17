@@ -194,4 +194,45 @@ export class WebSocketClient {
       viewport: { x, y, width, height },
     });
   }
+
+  // --- Replay control (ignored by the live world server) ---
+
+  /** Ask the replay server to load a run and position at its first tick. */
+  openRun(runId: string): boolean {
+    return this.send({ type: 'open_run', run_id: runId });
+  }
+
+  /** Jump to an absolute tick. The server clamps to [first_tick, last_tick]. */
+  seek(tickId: number): boolean {
+    return this.send({ type: 'seek', tick_id: Math.round(tickId) });
+  }
+
+  /** Jump by a relative number of ticks (negative allowed). */
+  step(delta: number): boolean {
+    return this.send({ type: 'step', delta: Math.round(delta) });
+  }
+
+  /** Start playback at `speed` ticks per tick_duration. */
+  play(speed: number = 1): boolean {
+    return this.send({ type: 'play', speed });
+  }
+
+  /** Stop playback. */
+  pause(): boolean {
+    return this.send({ type: 'pause' });
+  }
+
+  /** Request the full agent detail for one entity at one tick. */
+  getAgentDetail(entityId: string, tickId: number): boolean {
+    return this.send({
+      type: 'get_agent_detail',
+      entity_id: entityId,
+      tick_id: Math.round(tickId),
+    });
+  }
+
+  /** Request the run index (agents + notable events). */
+  getRunIndex(): boolean {
+    return this.send({ type: 'get_run_index' });
+  }
 }

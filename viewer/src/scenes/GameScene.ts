@@ -9,7 +9,9 @@ import type {
 import type { SpriteIndex } from '../sprites';
 import { getSpriteFrame } from '../sprites';
 import { ChunkManager, ViewportTracker } from '../terrain';
-import { OverlayUI } from '../ui';
+import { INSPECTABLE_TYPES, ObjectPanel, OverlayUI, ReplayBar } from '../ui';
+import type { DeepLinkParams, DeepLinkState } from '../DeepLink';
+import { buildQuery, buildUrl, parseDeepLink, resolveWsUrl } from '../DeepLink';
 
 const TILE_SIZE = 16;
 const SCALE = 3; // Scale up for visibility (16 * 3 = 48px per tile)
@@ -81,6 +83,9 @@ const HUNGER_BAR_HEIGHT = 2;
 const SPEECH_BUBBLE_MS = 3000;
 const DAMAGE_FLASH_MS = 350;
 
+/** How often the address bar is rewritten (about 4 Hz). */
+const URL_SYNC_MS = 250;
+
 /** Deterministic fallback sprite for entity ids we have no mapping for. */
 function hashToActorSprite(entityId: string): string {
   let hash = 0;
@@ -127,12 +132,25 @@ export class GameScene extends Phaser.Scene {
 
   // HTML overlay
   private overlay?: OverlayUI;
+  private objectPanel?: ObjectPanel;
+  private replayBar?: ReplayBar;
+
+  // Deep links and replay
+  private deepLink: DeepLinkParams = parseDeepLink('');
+  private deepLinkApplied: boolean = false;
+  private pendingObjectId: string = '';
+  private lastUrlQuery: string = '';
+  private lastUrlSyncMs: number = 0;
+  private connectionLabel: string = 'Connecting...';
+  private keyHandler?: (event: KeyboardEvent) => void;
 
   constructor() {
     super({ key: 'GameScene' });
   }
 
   create(): void {
+    this.deepLink = parseDeepLink(window.location.search);
+    this.pendingObjectId = this.deepLink.object;
     // Get sprite index from registry
     this.spriteIndex = this.registry.get('spriteIndex') as SpriteIndex;
 
@@ -186,8 +204,11 @@ export class GameScene extends Phaser.Scene {
     // Setup camera dev tools
     this.setupCameraControls();
 
-    // HTML overlay (entity picker + agent panel)
+    // HTML overlay (entity picker, agent panel, object panel, replay bar)
     this.setupOverlay();
+
+    // Replay transport keys (space, , . [ ])
+    this.setupReplayKeys();
 
     // Setup network
     this.setupNetwork();
@@ -196,9 +217,191 @@ export class GameScene extends Phaser.Scene {
   private setupOverlay(): void {
     this.overlay = new OverlayUI(this.worldState, {
       onSelectEntity: (entityId) => this.selectEntity(entityId),
+      onRequestAgentDetail: (entityId, tickId) => {
+        this.wsClient?.getAgentDetail(entityId, tickId);
+      },
     });
     this.overlay.setFollowing(this.cameraFollowing);
-    this.overlay.refresh();
+    if (this.deepLink.panel === false) {
+      this.overlay.setPanelVisible(false);
+    }
+
+    this.objectPanel = new ObjectPanel(this.worldState, {
+      onClose: () => this.selectObject(''),
+    });
+
+    this.replayBar = new ReplayBar(this.worldState, {
+      onSeek: (tickId) => this.wsClient?.seek(tickId),
+      onStep: (delta) => this.wsClient?.step(delta),
+      onPlay: (speed) => this.wsClient?.play(speed),
+      onPause: () => this.wsClient?.pause(),
+      onSelectEntity: (entityId) => this.selectEntity(entityId),
+      onCopyLink: () => this.copyDeepLink(),
+      onTypingChange: (typing) => {
+        if (this.input.keyboard) this.input.keyboard.enabled = !typing;
+      },
+    });
+    if (this.deepLink.speed !== null) {
+      this.replayBar.setSpeed(this.deepLink.speed);
+    }
+
+    this.refreshOverlays();
+  }
+
+  private refreshOverlays(): void {
+    this.overlay?.refresh();
+    this.objectPanel?.refresh();
+    this.replayBar?.refresh();
+  }
+
+  /** Select a world object (pass '' to clear) and show its inspector. */
+  private selectObject(objectId: string): void {
+    this.worldState.setSelectedObject(objectId);
+    this.refreshOverlays();
+  }
+
+  /** True while a form field has focus, so game keys should stay quiet. */
+  private isTyping(): boolean {
+    const active = document.activeElement;
+    if (!active) return false;
+    const tag = active.tagName;
+    return (
+      tag === 'INPUT' ||
+      tag === 'TEXTAREA' ||
+      tag === 'SELECT' ||
+      (active as HTMLElement).isContentEditable === true
+    );
+  }
+
+  /** Replay transport keys: space play/pause, ,/. step ±1, [/] step ±10. */
+  private setupReplayKeys(): void {
+    this.keyHandler = (event: KeyboardEvent) => {
+      if (this.isTyping()) return;
+      if (!this.worldState.isReplay()) return;
+
+      switch (event.key) {
+        case ' ':
+          event.preventDefault();
+          this.replayBar?.toggle();
+          break;
+        case ',':
+          this.wsClient?.step(-1);
+          break;
+        case '.':
+          this.wsClient?.step(1);
+          break;
+        case '[':
+          this.wsClient?.step(-10);
+          break;
+        case ']':
+          this.wsClient?.step(10);
+          break;
+        default:
+          return;
+      }
+    };
+    window.addEventListener('keydown', this.keyHandler);
+  }
+
+  /**
+   * Copy a deep link to the current moment. In replay mode that is the current
+   * URL; in live mode it is a replay link for the run being watched.
+   */
+  private copyDeepLink(): void {
+    const state = this.deepLinkState();
+    if (!this.worldState.isReplay()) {
+      const runId = this.worldState.getRunId();
+      if (!runId) {
+        this.replayBar?.flashCopy('no run id');
+        return;
+      }
+      state.run = runId;
+      state.tick = this.worldState.getCurrentTick();
+      // The replay server listens on its own port, so drop any live override.
+      state.ws = '';
+    }
+
+    const url = buildUrl(state);
+    navigator.clipboard.writeText(url).then(
+      () => this.replayBar?.flashCopy('copied!'),
+      (error: unknown) => {
+        console.error('Clipboard write failed', error);
+        this.replayBar?.flashCopy('copy failed');
+      }
+    );
+  }
+
+  /** The viewer state the address bar mirrors. */
+  private deepLinkState(): DeepLinkState {
+    const cam = this.cameras.main;
+    const replay = this.worldState.isReplay();
+    const status = this.worldState.getReplayStatus();
+    const tileX = Math.floor((cam.scrollX + cam.width / 2) / (TILE_SIZE * SCALE));
+    const tileY = Math.floor((cam.scrollY + cam.height / 2) / (TILE_SIZE * SCALE));
+
+    return {
+      run: replay ? this.worldState.getRunId() : '',
+      ws: this.deepLink.ws,
+      tick: replay ? (status?.tick_id ?? this.worldState.getCurrentTick()) : null,
+      entity: this.worldState.getSelectedEntityId(),
+      object: this.worldState.getSelectedObjectId(),
+      x: this.cameraFollowing ? null : tileX,
+      y: this.cameraFollowing ? null : tileY,
+      zoom: cam.zoom,
+      play: replay ? (status?.playing ?? false) : false,
+      speed: replay ? (this.replayBar?.getSpeed() ?? 1) : null,
+      panel: this.overlay?.isPanelVisible() ?? true,
+    };
+  }
+
+  /** Keep the address bar a valid deep link, at about 4 Hz and only on change. */
+  private syncUrl(): void {
+    const now = performance.now();
+    if (now - this.lastUrlSyncMs < URL_SYNC_MS) return;
+    this.lastUrlSyncMs = now;
+
+    const query = buildQuery(this.deepLinkState());
+    if (query === this.lastUrlQuery) return;
+    this.lastUrlQuery = query;
+    window.history.replaceState(null, '', `${window.location.pathname}${query}`);
+  }
+
+  /**
+   * Apply the deep link once the first snapshot has arrived: camera, zoom,
+   * selection, then (replay only) the seek and playback.
+   */
+  private applyDeepLink(): void {
+    if (this.deepLinkApplied) return;
+    this.deepLinkApplied = true;
+
+    const link = this.deepLink;
+
+    if (link.zoom !== null) {
+      this.cameras.main.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, link.zoom));
+    }
+
+    if (link.entity) {
+      // The sprite may not exist yet; createEntitySprite re-attaches the
+      // camera when it appears.
+      this.worldState.setSelectedEntity(link.entity);
+      this.toggleCameraFollow(true);
+    }
+
+    if (link.x !== null && link.y !== null) {
+      this.gotoTile(link.x, link.y);
+    }
+
+    if (this.worldState.isReplay()) {
+      this.wsClient?.getRunIndex();
+      if (link.tick !== null) {
+        this.wsClient?.seek(link.tick);
+      }
+      if (link.play) {
+        this.wsClient?.play(this.replayBar?.getSpeed() ?? 1);
+      }
+    }
+
+    this.refreshOverlays();
   }
 
   /**
@@ -213,7 +416,7 @@ export class GameScene extends Phaser.Scene {
       this.followTarget = sprite;
       this.toggleCameraFollow(true);
     }
-    this.overlay?.refresh();
+    this.refreshOverlays();
   }
 
   private setupNetwork(): void {
@@ -237,13 +440,17 @@ export class GameScene extends Phaser.Scene {
     // Speech bubbles for local utterances
     this.worldState.onUtterance((utterance) => this.showSpeechBubble(utterance));
 
-    // Keep the HTML overlay in sync
-    this.worldState.onStateUpdate(() => this.overlay?.refresh());
+    // Keep the HTML overlays in sync
+    this.worldState.onStateUpdate(() => this.refreshOverlays());
 
     // Handle object changes
     this.worldState.onObjectChange((action, obj) => {
       if (action === 'added') {
         this.createObjectSprite(obj);
+        if (this.pendingObjectId && obj.objectId === this.pendingObjectId) {
+          this.pendingObjectId = '';
+          this.selectObject(obj.objectId);
+        }
       } else if (action === 'removed') {
         this.removeObjectSprite(obj.objectId);
       } else if (action === 'updated') {
@@ -266,19 +473,28 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    // Create WebSocket client
-    this.wsClient = new WebSocketClient((message) => {
-      this.worldState.handleMessage(message);
+    // Create WebSocket client. The URL comes from the deep link: the replay
+    // server's default port when a run is named, the live one otherwise.
+    this.wsClient = new WebSocketClient(
+      (message) => {
+        this.worldState.handleMessage(message);
 
-      // Initialize world after first snapshot
-      if (!this.worldInitialized && this.worldState.isInitialized()) {
-        this.initializeWorld();
-      }
-    });
+        // Initialize world after first snapshot. Later snapshots (a replay
+        // seek sends one) must not recentre the camera or rebuild the chunks.
+        if (!this.worldInitialized && this.worldState.isInitialized()) {
+          this.initializeWorld();
+          this.applyDeepLink();
+        }
+      },
+      { url: resolveWsUrl(this.deepLink) }
+    );
 
     // Handle connection state changes
     this.wsClient.onStateChange((state) => {
       this.updateConnectionStatus(state);
+      if (state === 'connected' && this.deepLink.run) {
+        this.wsClient?.openRun(this.deepLink.run);
+      }
     });
 
     // Connect
@@ -326,22 +542,33 @@ export class GameScene extends Phaser.Scene {
 
     switch (state) {
       case 'connected':
-        this.connectionText.setText('Connected');
+        this.connectionLabel = 'Connected';
         this.connectionText.setColor('#00ff00');
         break;
       case 'connecting':
-        this.connectionText.setText('Connecting...');
+        this.connectionLabel = 'Connecting...';
         this.connectionText.setColor('#ffff00');
         break;
       case 'reconnecting':
-        this.connectionText.setText('Reconnecting...');
+        this.connectionLabel = 'Reconnecting...';
         this.connectionText.setColor('#ff8800');
         break;
       case 'disconnected':
-        this.connectionText.setText('Disconnected');
+        this.connectionLabel = 'Disconnected';
         this.connectionText.setColor('#ff0000');
         break;
     }
+    this.refreshConnectionText();
+  }
+
+  /** Connection state plus the replay badge and the current tick. */
+  private refreshConnectionText(): void {
+    if (!this.connectionText) return;
+    const badge = this.worldState.isReplay() ? ' [replay]' : '';
+    const tick = this.worldState.isInitialized()
+      ? ` t${this.worldState.getCurrentTick()}`
+      : '';
+    this.connectionText.setText(`${this.connectionLabel}${badge}${tick}`);
   }
 
   private createEntitySprite(entity: InterpolatedEntity): void {
@@ -468,6 +695,12 @@ export class GameScene extends Phaser.Scene {
     const animKey = `${spriteKey}-idle`;
     if (this.anims.exists(animKey)) {
       sprite.play(animKey);
+    }
+
+    // Chests, piles, boards and bushes open the object inspector when clicked.
+    if (INSPECTABLE_TYPES.has(obj.objectType)) {
+      sprite.setInteractive({ useHandCursor: true });
+      sprite.on('pointerdown', () => this.selectObject(obj.objectId));
     }
 
     this.objectSprites.set(obj.objectId, sprite);
@@ -691,6 +924,10 @@ export class GameScene extends Phaser.Scene {
     // Update viewport tracker (requests new chunks when camera moves)
     this.viewportTracker?.update();
 
+    // Status text and the address bar
+    this.refreshConnectionText();
+    this.syncUrl();
+
     // Update position display
     if (this.positionText) {
       const cam = this.cameras.main;
@@ -780,6 +1017,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   shutdown(): void {
+    if (this.keyHandler) {
+      window.removeEventListener('keydown', this.keyHandler);
+      this.keyHandler = undefined;
+    }
     // Cleanup network on scene shutdown
     if (this.wsClient) {
       this.wsClient.disconnect();

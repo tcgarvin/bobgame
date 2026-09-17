@@ -287,3 +287,59 @@ Will need to add:
 - Bresenham ray casting
 - Visibility filtering per observer
 - Enter/leave visibility events
+
+## Run Recording and Replay (Milestone 7)
+
+Contract: [docs/07_replay.md](../docs/07_replay.md). Every run is recorded to a
+run directory; the replay server serves it to the viewer over the live
+WebSocket protocol.
+
+### Recording
+
+- `recording.py` - `JsonlGzWriter` (one gzip member per file, sync-flushed at
+  most once a second so a killed run stays readable), `read_jsonl_gz` (tolerates
+  a truncated last block), `RunRecorder` and `generate_run_id`.
+- `viewer_payload.py` - the JSON shapes shared by the live viewer service, the
+  recorder and the replay server. Never duplicate an entity/object payload;
+  add it here.
+- `WorldServer` takes an optional `RunRecorder`: it starts it in `start()`,
+  appends a `tick` record from `_on_tick_complete`, appends an `agent_status`
+  record for every accepted status report, and closes it in `stop()` (which
+  fills in `finished_at` and `last_tick`). A write error after startup logs
+  once at ERROR and disables recording; it never takes the run down.
+
+```bash
+uv run python -m world.server --config foraging               # records to ../runs/<run id>
+uv run python -m world.server --config foraging --run-dir /tmp/run
+uv run python -m world.server --config foraging --no-record
+```
+
+`$BOBGAME_RUN_DIR` (exported by `dev.sh`) is the default when set.
+
+### Replay server
+
+```bash
+uv run python -m world.replay --runs-dir ../runs --port 8766
+```
+
+- `replay/loader.py` - `RunLoader`: meta, the tick records indexed by tick id,
+  the agent status records by tick, the light agent files, a byte-offset index
+  into `jev_states.jsonl.gz` (read on demand), and the cached `run_index`. The
+  object baseline is *streamed* (`iter_objects()`), not held in memory.
+  Loaders are cached per run id by the service.
+- `replay/session.py` - `ReplaySession`: terrain from `map_path`, objects from
+  `objects.jsonl.gz`, then tick deltas. Seeking forward applies object deltas;
+  seeking backward restores only the objects touched since the baseline
+  (copy-on-write in `_baseline`/`_added`) and replays from the first tick, so a
+  rollback never rebuilds the island's 700k objects. Entities are replaced
+  wholesale from the tick's `entity_updates`; dead entities stay in the world
+  but are detached from the position index, as in the live world.
+- `replay/service.py` - one `ReplaySession` per connected client, an asyncio
+  playback task honouring `speed`, and the message order from the contract
+  (snapshot, chunk_data, tick_completed, entity_log, agent_status,
+  replay_status).
+- `services/chunk_subscriptions.py` - chunk subscribe/unload/`chunk_data`
+  shared by the live and replay services.
+
+Opening an island run costs ~10 s and ~1.2 GB (726k objects, the same cost the
+live server pays at startup); it is paid once per run id. Seeks are sub-ms.

@@ -8,13 +8,16 @@ from .jevclient import JevClient, JevDecision, TypeSafeJevClient
 from .options import Option, TravelState, enumerate_options
 from .planner import Planner, describe_world
 from .stint import Brief, Stint, StintReport
+from .tracelog import AgentTrace, JsonlGzWriter, resolve_log_root
 from .worldmodel import WorldModel
 
 __all__ = [
+    "AgentTrace",
     "Brief",
     "JevAgent",
     "JevClient",
     "JevDecision",
+    "JsonlGzWriter",
     "Option",
     "Planner",
     "Stint",
@@ -24,5 +27,6 @@ __all__ = [
     "WorldModel",
     "describe_world",
     "enumerate_options",
+    "resolve_log_root",
     "run_agent",
 ]

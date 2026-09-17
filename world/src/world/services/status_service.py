@@ -21,12 +21,22 @@ logger = structlog.get_logger()
 BroadcastCallback = Callable[[dict[str, Any]], None]
 
 
-class AgentStatusServiceServicer(world_pb2_grpc.AgentStatusServiceServicer):
-    """Accepts agent status reports and forwards them to the viewer."""
+def _ignore(message: dict[str, Any]) -> None:
+    """Default recorder callback: drop the message."""
 
-    def __init__(self, lease_manager: LeaseManager, broadcast: BroadcastCallback):
+
+class AgentStatusServiceServicer(world_pb2_grpc.AgentStatusServiceServicer):
+    """Accepts agent status reports, forwards them to the viewer and recorder."""
+
+    def __init__(
+        self,
+        lease_manager: LeaseManager,
+        broadcast: BroadcastCallback,
+        record: BroadcastCallback = _ignore,
+    ):
         self.lease_manager = lease_manager
         self.broadcast = broadcast
+        self.record = record
 
     def ReportStatus(
         self, request: pb.AgentStatusReport, context: grpc.ServicerContext
@@ -51,16 +61,16 @@ class AgentStatusServiceServicer(world_pb2_grpc.AgentStatusServiceServicer):
                 )
                 return pb.AgentStatusAck(accepted=False)
 
-        self.broadcast(
-            {
-                "type": "agent_status",
-                "entity_id": request.entity_id,
-                "mode": request.mode,
-                "brief": request.brief,
-                "planner_thought": request.planner_thought,
-                "stint": stint,
-            }
-        )
+        status = {
+            "type": "agent_status",
+            "entity_id": request.entity_id,
+            "mode": request.mode,
+            "brief": request.brief,
+            "planner_thought": request.planner_thought,
+            "stint": stint,
+        }
+        self.broadcast(status)
+        self.record(status)
         logger.debug(
             "agent_status_reported",
             entity_id=request.entity_id,
