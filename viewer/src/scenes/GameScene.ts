@@ -71,7 +71,33 @@ const OBJECT_SPRITE_MAP: Record<string, string> = {
   chest: 'chest-closed',
   message_board: 'message-board',
   item_pile: 'item-pile',
+  // Natural building materials (docs/08_building.md).
+  reeds: 'reeds',
+  clay_deposit: 'clay-deposit',
+  // Ground layer.
+  road: 'road',
+  wood_floor: 'wood-floor',
+  stone_floor: 'stone-floor',
+  // Structure layer.
+  wood_wall: 'wood-wall',
+  stone_wall: 'stone-wall',
+  door: 'door',
+  bed: 'bed',
+  chair: 'chair',
+  table: 'table',
+  workshop_table: 'workshop-table',
 };
+
+/**
+ * Object types that lie on the ground layer: a tile may hold one of these plus
+ * one structure-layer object, so they draw underneath everything else
+ * (docs/08_building.md, "Layers and placement").
+ */
+const GROUND_LAYER_TYPES = new Set(['road', 'wood_floor', 'stone_floor']);
+
+/** Draw depths: ground objects, then structures, then entities. */
+const GROUND_OBJECT_DEPTH = 4;
+const STRUCTURE_OBJECT_DEPTH = 5;
 
 // Bush sprites are special - they have state-dependent sprites
 const BUSH_SPRITE_FULL = 'berry-bush-full';
@@ -81,6 +107,8 @@ const BAR_WIDTH = TILE_SIZE * SCALE - 8;
 const HEALTH_BAR_HEIGHT = 4;
 const HUNGER_BAR_HEIGHT = 2;
 const SPEECH_BUBBLE_MS = 3000;
+/** How long each step of the thinking-bubble dot animation lasts. */
+const THOUGHT_DOT_MS = 500;
 const DAMAGE_FLASH_MS = 350;
 
 /** How often the address bar is rewritten (about 4 Hz). */
@@ -116,6 +144,8 @@ export class GameScene extends Phaser.Scene {
   private entitySprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private objectSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private speechBubbles: Map<string, Phaser.GameObjects.Text> = new Map();
+  /** Small "..." bubbles over agents whose planner is thinking. */
+  private thoughtBubbles: Map<string, Phaser.GameObjects.Text> = new Map();
   private damageFlashUntil: Map<string, number> = new Map();
   private connectionText?: Phaser.GameObjects.Text;
   private statusBars?: Phaser.GameObjects.Graphics;
@@ -633,12 +663,14 @@ export class GameScene extends Phaser.Scene {
     }
     this.speechBubbles.get(entityId)?.destroy();
     this.speechBubbles.delete(entityId);
+    this.thoughtBubbles.get(entityId)?.destroy();
+    this.thoughtBubbles.delete(entityId);
     this.damageFlashUntil.delete(entityId);
   }
 
-  /** Show a `local` utterance above the speaker for a few seconds. */
+  /** Show a spoken (`local` or `shout`) utterance above the speaker for a few seconds. */
   private showSpeechBubble(utterance: UtteranceEvent): void {
-    if (utterance.channel !== 'local') return;
+    if (utterance.channel !== 'local' && utterance.channel !== 'shout') return;
 
     const existing = this.speechBubbles.get(utterance.speaker_id);
     if (existing) {
@@ -666,6 +698,39 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  /**
+   * Show an animated "..." bubble while the agent's planner is thinking
+   * (agent_status mode `planning`), and hide it otherwise.
+   */
+  private updateThoughtBubble(entityId: string, x: number, y: number, allowed: boolean): void {
+    const thinking =
+      allowed && this.worldState.getAgentStatus(entityId)?.mode === 'planning';
+    let bubble = this.thoughtBubbles.get(entityId);
+    if (!thinking) {
+      bubble?.setVisible(false);
+      return;
+    }
+    if (!bubble) {
+      bubble = this.add.text(0, 0, '', {
+        fontFamily: 'monospace',
+        fontSize: '12px',
+        fontStyle: 'bold',
+        color: '#333333',
+        backgroundColor: '#ffffffdd',
+        padding: { x: 4, y: 0 },
+      });
+      bubble.setOrigin(0, 1);
+      bubble.setDepth(29);
+      this.thoughtBubbles.set(entityId, bubble);
+    }
+    // One to three dots, stepping twice a second; fixed width so it does not jitter.
+    const dots = 1 + (Math.floor(this.time.now / THOUGHT_DOT_MS) % 3);
+    bubble.setText('.'.repeat(dots).padEnd(3, ' '));
+    bubble.setVisible(true);
+    bubble.x = x + (TILE_SIZE * SCALE) / 4;
+    bubble.y = y - (TILE_SIZE * SCALE) / 2 - 2;
+  }
+
   private createObjectSprite(obj: TrackedObject): void {
     const posX = obj.position.x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
     const posY = obj.position.y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
@@ -690,7 +755,9 @@ export class GameScene extends Phaser.Scene {
 
     const sprite = this.add.sprite(posX, posY, spriteData.textureKey, spriteData.frame);
     sprite.setScale(SCALE);
-    sprite.setDepth(5); // Between tiles and entities
+    sprite.setDepth(
+      GROUND_LAYER_TYPES.has(obj.objectType) ? GROUND_OBJECT_DEPTH : STRUCTURE_OBJECT_DEPTH
+    );
 
     const animKey = `${spriteKey}-idle`;
     if (this.anims.exists(animKey)) {
@@ -915,6 +982,8 @@ export class GameScene extends Phaser.Scene {
         bubble.x = x;
         bubble.y = y - (TILE_SIZE * SCALE) / 2 - 14;
       }
+      // Speech wins the space above the head; the thought bubble yields to it.
+      this.updateThoughtBubble(entity.entityId, x, y, entity.alive && !bubble);
 
       if (entity.alive) {
         this.drawEntityBars(entity, x, y, entity.entityId === selectedId);

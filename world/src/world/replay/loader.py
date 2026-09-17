@@ -416,7 +416,7 @@ class RunLoader:
                         action.get("details", ""),
                     )
             for utterance in record.get("utterances", ()):
-                if utterance.get("channel") == "local":
+                if utterance.get("channel") in ("local", "shout"):
                     add(
                         tick_id,
                         "say",

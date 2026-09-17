@@ -279,6 +279,7 @@ message Intent {
     DepositIntent deposit = 14;
     WithdrawIntent withdraw = 15;
     WriteNoteIntent write_note = 16;
+    RestIntent rest = 17;
   }
 }
 
@@ -340,6 +341,12 @@ message WriteNoteIntent {
   string text = 4;      // <= 500 chars
 }
 
+// Rest on a bed on the same or an adjacent tile; heals a little each tick.
+// See docs/08_building.md.
+message RestIntent {
+  string object_id = 1;
+}
+
 message MoveIntent {
   Direction direction = 1;
 }
@@ -356,6 +363,7 @@ message UseIntent {
 }
 
 // channel "local": heard by entities within earshot (Utterance event).
+// channel "shout": heard much farther away (60 tiles); for calling for help.
 // channel "thought": not heard by anyone; broadcast to the viewer only.
 message SayIntent {
   string text = 1;

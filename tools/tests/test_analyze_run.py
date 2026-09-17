@@ -287,3 +287,49 @@ def test_legacy_logs_layout(tmp_path: Path) -> None:
     assert bob["planner_turns"] == 1
     assert bob["tools"] == {"look": 1}
     assert bob["last_thought"] == "looking around"
+
+
+def _action(entity: str, action_type: str, details: str) -> dict:
+    return {"entity_id": entity, "action_type": action_type,
+            "success": True, "details": details}
+
+
+def test_building_actions_are_counted_and_only_firsts_become_moments(
+    tmp_path: Path,
+) -> None:
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(1, actions=[
+                _action("ada", "craft", "crafted plank x2"),
+                _action("ada", "craft", "crafted workshop_table"),
+                _action("bram", "craft", "crafted bed"),
+            ]),
+            tick_record(2, actions=[
+                _action("ada", "place", "placed wood_wall_7 at (3, 4)"),
+                _action("bram", "place", "placed wood_wall_8 at (3, 5)"),
+                _action("bram", "place", "placed bed_9 at (4, 5)"),
+            ]),
+            tick_record(3, actions=[
+                _action("bram", "rest", "rested at bed_9 (+2 health)"),
+                _action("ada", "extract", "dismantling wood_wall_7 (1/3)"),
+                _action("ada", "extract", "dismantled wood_wall_7 (+1 wood_wall)"),
+                _action("ada", "extract", "extracted wood from tree_1"),
+            ]),
+        ],
+    )
+
+    facts, moments = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.crafts == {"plank": 1, "workshop_table": 1, "bed": 1}
+    assert facts.workshop_crafts == 1
+    assert facts.placements == {"wood_wall": 2, "bed": 1}
+    assert facts.dismantles == {"wood_wall": 1}
+    assert facts.rests == 1
+    milestones = [m.text for m in moments if m.kind == "milestone"]
+    assert milestones == [
+        "first wood_wall: ada placed wood_wall_7 at (3, 4)",
+        "first bed: bram placed bed_9 at (4, 5)",
+    ]
+    assert [m for m in moments if m.kind in ("craft", "place")] == []

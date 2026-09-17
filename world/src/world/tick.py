@@ -40,7 +40,12 @@ from .foraging import (
     process_regeneration,
 )
 from .movement import MoveResult, process_movement_phase
-from .stats import process_health_regen, process_hunger_phase, process_respawns
+from .stats import (
+    process_health_regen,
+    process_hunger_phase,
+    process_respawns,
+    process_rest_phase,
+)
 from .state import World
 from .tick_context import TickContext
 from .types import (
@@ -54,6 +59,8 @@ from .types import (
     ExtractIntent,
     PickupIntent,
     PlaceIntent,
+    RestIntent,
+    SAY_CHANNELS,
     SayIntent,
     WaitIntent,
     WithdrawIntent,
@@ -170,7 +177,7 @@ def _process_say_phase(
     """Emit one utterance per speaker; channel filtering happens downstream."""
     for entity_id in sorted(intents):
         intent = intents[entity_id]
-        if intent.channel not in ("local", "thought"):
+        if intent.channel not in SAY_CHANNELS:
             events.acted(entity_id, "say", False, f"unknown channel {intent.channel}")
             continue
         entity = world.get_entity(entity_id)
@@ -283,11 +290,16 @@ def process_tick(
         events,
     )
 
-    # Phase 10: Eat, say
+    # Phase 10: Eat, rest, say
     eat_results = process_eat_phase(
         world, _living_subset(world, ctx.eat_intents, "eat", events)
     )
     _record_eat_results(eat_results, events)
+    process_rest_phase(
+        world,
+        _living_subset(world, ctx.intents_of(RestIntent), "rest", events),
+        events,
+    )
     _process_say_phase(
         world,
         _living_subset(world, ctx.intents_of(SayIntent), "say", events),
@@ -449,6 +461,11 @@ class TickLoop:
                     except asyncio.TimeoutError:
                         pass  # Normal - tick duration elapsed
 
+        except Exception:
+            # The task's exception is otherwise only seen when the server is
+            # stopped, with the frames that matter stripped; log it here.
+            logger.exception("tick_loop_crashed", tick=self.world.tick)
+            raise
         finally:
             self._running = False
             self._current_context = None

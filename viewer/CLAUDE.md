@@ -76,7 +76,26 @@ Key sprite mappings:
 - Bushes: `berry-bush-full`, `berry-bush-empty`
 - Objects: `oak-tree`, `rock-small`, `rock-medium`, `rock-large`, `boulder`,
   `chest-closed`, `message-board`, `item-pile`
+- Building materials and buildings (docs/08_building.md): `reeds`,
+  `clay-deposit`, `road`, `wood-floor`, `stone-floor`, `wood-wall`,
+  `stone-wall`, `door`, `bed`, `chair`, `table`, `workshop-table`
 - Item icons: `axe`, `pickaxe`, `sword`
+
+Sprite keys are kebab-case; `OBJECT_SPRITE_MAP` in `GameScene` maps the
+server's snake_case `object_type` onto them.
+
+### Object layers and depth
+
+A tile may hold one ground-layer object (`road`, `wood_floor`, `stone_floor`)
+and one structure-layer object, so both have to draw. Object sprites are keyed
+by `object_id`, never by position, and the two layers differ only in depth:
+ground objects at 4, structures at 5, entities at 10. Adding a building type
+means adding it to `OBJECT_SPRITE_MAP` and, if it lies flat, to
+`GROUND_LAYER_TYPES`.
+
+Walls are single sprites — a seamless full-block tile from `Wall.png`, not an
+autotile — so no neighbour lookup is needed and a wall looks the same however
+it is placed. Doors use one closed-door sprite.
 
 ## HTML Overlay UI
 
@@ -128,9 +147,12 @@ both. Example: `http://localhost:5173/?run=fake&tick=50&entity=ada`.
 - Keys (replay only): space play/pause, `,` / `.` step ±1, `[` / `]` step ±10.
   They are suppressed while a form field has focus, and focusing the tick input
   disables the Phaser keyboard so `F`/`P`/digits do not fire.
-- `src/ui/ObjectPanel.ts` — clicking a chest, item pile, message board or bush
-  opens an inspector with its contents / notes / berry state. The data comes
-  from `ObjectState.state`, where `contents` and `notes` are JSON strings.
+- `src/ui/ObjectPanel.ts` — clicking a chest, item pile, message board, bush,
+  reeds, clay deposit or any placed building opens an inspector. The data comes
+  from `ObjectState.state`, where `contents` and `notes` are JSON strings,
+  `owner` is an entity id, and `progress` is extraction or dismantle work.
+  Trees and rocks are deliberately not clickable: there are far too many of
+  them to make every one interactive.
 - `src/ui/OverlayUI.ts` — the agent panel: brief (with success condition,
   ticks used of max, notes), planner thought, the Jev decision with every
   option's probability as a bar (chosen one highlighted) plus confidence,
@@ -148,7 +170,8 @@ recentre the camera or rebuild the `ChunkManager` on it.
 ### Fake replay server
 
 `scripts/fake_replay_server.mjs` serves a synthetic 64x64 run (three settlers,
-a wolf, a chest, an item pile, a message board, a bush, 200 ticks of scripted
+a wolf, a chest, an item pile, a message board, a bush, a built hut with a
+walled workshop, a road, reeds and a clay deposit, 200 ticks of scripted
 movement, actions, chat, `agent_status`, `agent_detail` and `run_index`) so the
 replay UI can be developed without a recording. It is the only thing the `ws`
 devDependency is for.
@@ -203,3 +226,11 @@ npm run fake-replay   # Synthetic replay server for UI work (see above)
 
 Requires the world server on localhost:8765 for live entity updates, or the
 replay server on localhost:8766 (or `npm run fake-replay`) for replay mode.
+
+## Thinking bubble
+
+`GameScene.updateThoughtBubble` draws a small animated "..." bubble to the upper
+right of any entity whose latest `agent_status` has mode `planning`, in live and
+replay mode alike. It hides while a speech bubble is showing, when the entity is
+dead, and as soon as the mode changes (a stint started). Spoken utterances on
+the `shout` channel get the same speech bubble as `local` ones.

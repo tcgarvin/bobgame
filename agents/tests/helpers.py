@@ -119,6 +119,37 @@ def acted_event(
     )
 
 
+def utterance_event(
+    speaker_id: str,
+    text: str,
+    position: tuple[int, int],
+    channel: str = "local",
+) -> pb.ObservationEvent:
+    """An `Utterance` observation event spoken from `position`."""
+    return pb.ObservationEvent(
+        utterance=pb.Utterance(
+            speaker_id=speaker_id,
+            channel=channel,
+            text=text,
+            position=pb.Position(x=position[0], y=position[1]),
+        )
+    )
+
+
+def damaged_event(
+    entity_id: str, attacker_id: str, amount: int, remaining_health: int
+) -> pb.ObservationEvent:
+    """An `EntityDamaged` observation event."""
+    return pb.ObservationEvent(
+        entity_damaged=pb.EntityDamaged(
+            entity_id=entity_id,
+            attacker_id=attacker_id,
+            amount=amount,
+            remaining_health=remaining_health,
+        )
+    )
+
+
 @dataclass
 class FakeJevClient:
     """A `JevClient` that replays scripted answers and records what it saw."""

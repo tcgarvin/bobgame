@@ -211,8 +211,8 @@ if [ "$NEEDS_GENERATION" = true ]; then
     echo ""
     log_info "Terrain generation complete!"
 else
-    # Normal startup - 30 second timeout
-    wait_for_port 50051 "World gRPC" 30 || exit 1
+    # Normal startup - 120 second timeout (loading the island takes ~25 s)
+    wait_for_port 50051 "World gRPC" 120 || exit 1
     wait_for_port 8765 "World WebSocket" 30 || exit 1
 fi
 

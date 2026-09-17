@@ -1,4 +1,6 @@
-"""Tests for tree chopping and rock mining."""
+"""Tests for tree chopping, rock mining, reed cutting and clay digging."""
+
+import pytest
 
 from world.events import TickEvents
 from world.foraging import process_extract_phase
@@ -43,6 +45,64 @@ class TestExtractDefaults:
         assert default_remaining("rock_medium") == 2
         assert default_remaining("rock_large") == 4
         assert default_remaining("boulder") == 6
+        assert default_remaining("reeds") == 3
+        assert default_remaining("clay_deposit") == 6
+
+
+class TestNewNaturalResources:
+    @pytest.mark.parametrize(
+        "object_type,yielded,tool",
+        [("reeds", "fiber", ""), ("clay_deposit", "clay", "pickaxe")],
+    )
+    def test_extracting_yields_its_material(
+        self, object_type: str, yielded: str, tool: str
+    ) -> None:
+        world = World(width=10, height=10)
+        world.add_entity(
+            Entity(
+                entity_id="bob",
+                position=Position(x=5, y=5),
+                inventory=Inventory().add("pickaxe", 1),
+                wielded=tool,
+            )
+        )
+        world.add_object(
+            WorldObject(
+                object_id="source_1",
+                position=Position(x=6, y=5),
+                object_type=object_type,
+            )
+        )
+        events = TickEvents()
+        process_extract_phase(
+            world,
+            {"bob": ExtractIntent(entity_id="bob", object_id="source_1")},
+            events,
+        )
+
+        assert events.action_results[0].success
+        # A matching tool finishes one unit in a single action; bare hands do not.
+        expected = 1 if tool else 0
+        assert world.get_entity("bob").inventory.count(yielded) == expected
+
+    def test_reeds_do_not_regrow(self) -> None:
+        world = World(width=10, height=10)
+        world.add_entity(Entity(entity_id="bob", position=Position(x=5, y=5)))
+        world.add_object(
+            WorldObject(
+                object_id="reeds_1",
+                position=Position(x=6, y=5),
+                object_type="reeds",
+                state=(("remaining", "1"), ("progress", "2")),
+            )
+        )
+        events = TickEvents()
+        process_extract_phase(
+            world, {"bob": ExtractIntent(entity_id="bob", object_id="reeds_1")}, events
+        )
+
+        assert "reeds_1" not in world.all_objects()
+        assert [e.object_id for e in events.objects_removed] == ["reeds_1"]
 
 
 class TestExtractThresholds:

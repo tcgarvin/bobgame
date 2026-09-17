@@ -48,6 +48,7 @@ MOMENT_PRIORITY = (
     "planner_failed",
     "history_reset",
     "first_wolf",
+    "milestone",
     "write_note",
     "place",
     "craft",
@@ -56,10 +57,27 @@ MOMENT_PRIORITY = (
 CRAFT_ACTIONS = frozenset({"craft"})
 PLACE_ACTIONS = frozenset({"place"})
 NOTE_ACTIONS = frozenset({"write_note"})
+REST_ACTIONS = frozenset({"rest"})
+EXTRACT_ACTIONS = frozenset({"extract"})
+
+# Building kinds (docs/08_building.md). A town lays hundreds of these, so they
+# are counted but only the first of each kind becomes a notable moment.
+BUILDING_KINDS = frozenset(
+    {
+        "road", "wood_floor", "stone_floor", "wood_wall", "stone_wall",
+        "door", "bed", "chair", "table", "workshop_table",
+    }
+)
+# Bulk intermediates: counted, never a moment of their own.
+BULK_CRAFTS = BUILDING_KINDS | frozenset({"plank", "rope"})
+WORKSHOP_RECIPES = frozenset(
+    {"stone_wall", "stone_floor", "door", "bed", "chair", "table"}
+)
 
 # The world writes prose details, e.g. "crafted sword", "placed chest_3 at (1,2)".
 CRAFTED_RE = re.compile(r"crafted (\S+)")
 PLACED_RE = re.compile(r"placed (\S+?)(?:_\d+)? ")
+DISMANTLED_RE = re.compile(r"dismantled (\S+?)(?:_\d+)? ")
 
 
 # --------------------------------------------------------------------------
@@ -190,6 +208,8 @@ def summarise_planner_file(rows: list[dict]) -> dict:
     turns = 0
     turn_failures = 0
     history_resets = 0
+    budget_spent = 0
+    budget_hard_stops = 0
     for row in rows:
         event = row.get("event")
         if event == "turn_start":
@@ -204,10 +224,16 @@ def summarise_planner_file(rows: list[dict]) -> dict:
             turn_failures += 1
         elif event == "history_reset":
             history_resets += 1
+        elif event == "tool_budget_spent":
+            budget_spent += 1
+        elif event == "tool_budget_reached":
+            budget_hard_stops += 1
     return {
         "planner_turns": turns,
         "planner_turn_failures": turn_failures,
         "history_resets": history_resets,
+        "budget_spent": budget_spent,
+        "budget_hard_stops": budget_hard_stops,
         "tools": dict(tools.most_common()),
         "thoughts": thoughts,
     }
@@ -234,6 +260,8 @@ def summarise_planner_log(log_text: str) -> dict:
         "planner_turns": turns,
         "planner_turn_failures": turn_failures,
         "history_resets": 0,
+        "budget_spent": 0,
+        "budget_hard_stops": 0,
         "tools": dict(tools.most_common()),
         "thoughts": thoughts,
     }
@@ -295,6 +323,8 @@ def summarise_agent(agent_id: str, layout: RunLayout) -> dict:
         "planner_turns": planner["planner_turns"],
         "planner_turn_failures": planner["planner_turn_failures"],
         "history_resets": planner["history_resets"],
+        "budget_spent": planner["budget_spent"],
+        "budget_hard_stops": planner["budget_hard_stops"],
         "tools": planner["tools"],
         "rejected": dict(rejected),
         "last_thought": thoughts[-1] if thoughts else "",
@@ -341,8 +371,12 @@ class WorldFacts:
     wolves_despawned: Counter[str] = field(default_factory=Counter)
     crafts: Counter[str] = field(default_factory=Counter)
     placements: Counter[str] = field(default_factory=Counter)
+    dismantles: Counter[str] = field(default_factory=Counter)
+    workshop_crafts: int = 0
+    rests: int = 0
     notes_written: int = 0
     utterances: int = 0
+    shouts: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -355,8 +389,12 @@ class WorldFacts:
             "wolves_despawned": dict(self.wolves_despawned),
             "crafts": dict(self.crafts),
             "placements": dict(self.placements),
+            "dismantles": dict(self.dismantles),
+            "workshop_crafts": self.workshop_crafts,
+            "rests": self.rests,
             "notes_written": self.notes_written,
             "utterances": self.utterances,
+            "shouts": self.shouts,
         }
 
 
@@ -378,6 +416,9 @@ def scan_world_ticks(path: Path) -> tuple[WorldFacts, list[Moment]]:
             first_tick_set = True
         facts.last_tick = max(facts.last_tick, tick)
         facts.utterances += len(record.get("utterances", ()))
+        facts.shouts += sum(
+            1 for u in record.get("utterances", ()) if u.get("channel") == "shout"
+        )
 
         for spawn in record.get("entities_spawned", ()):
             if spawn.get("entity_type") == "wolf":
@@ -426,12 +467,33 @@ def scan_world_ticks(path: Path) -> tuple[WorldFacts, list[Moment]]:
             details = action.get("details", "")
             if action_type in CRAFT_ACTIONS:
                 match = CRAFTED_RE.search(details)
-                facts.crafts[match.group(1) if match else details or "?"] += 1
-                moments.append(Moment(tick, "craft", entity, f"{entity} {details}"))
+                kind = match.group(1) if match else details or "?"
+                facts.crafts[kind] += 1
+                if kind in WORKSHOP_RECIPES:
+                    facts.workshop_crafts += 1
+                if kind not in BULK_CRAFTS:
+                    moments.append(
+                        Moment(tick, "craft", entity, f"{entity} {details}")
+                    )
             elif action_type in PLACE_ACTIONS:
                 match = PLACED_RE.search(details)
-                facts.placements[match.group(1) if match else details or "?"] += 1
-                moments.append(Moment(tick, "place", entity, f"{entity} {details}"))
+                kind = match.group(1) if match else details or "?"
+                facts.placements[kind] += 1
+                if kind not in BUILDING_KINDS:
+                    moments.append(
+                        Moment(tick, "place", entity, f"{entity} {details}")
+                    )
+                elif facts.placements[kind] == 1:
+                    moments.append(
+                        Moment(tick, "milestone", entity,
+                               f"first {kind}: {entity} {details}")
+                    )
+            elif action_type in REST_ACTIONS:
+                facts.rests += 1
+            elif action_type in EXTRACT_ACTIONS:
+                match = DISMANTLED_RE.search(details)
+                if match:
+                    facts.dismantles[match.group(1)] += 1
             elif action_type in NOTE_ACTIONS:
                 facts.notes_written += 1
                 moments.append(
@@ -498,6 +560,8 @@ def aggregate(summaries: list[dict]) -> dict:
         "planner_turns": sum(s["planner_turns"] for s in summaries),
         "planner_turn_failures": sum(s["planner_turn_failures"] for s in summaries),
         "history_resets": sum(s["history_resets"] for s in summaries),
+        "budget_spent": sum(s["budget_spent"] for s in summaries),
+        "budget_hard_stops": sum(s["budget_hard_stops"] for s in summaries),
         "tools": dict(total_tools.most_common()),
         "actions": dict(total_actions.most_common()),
         "latency_p50_median": statistics.median(latencies) if latencies else 0,
@@ -523,7 +587,9 @@ def print_report(
     print(f"stints: {totals['stints']} ends={totals['end_reasons']}")
     print(f"planner turns: {totals['planner_turns']}"
           f" failures={totals['planner_turn_failures']}"
-          f" history_resets={totals['history_resets']}")
+          f" history_resets={totals['history_resets']}"
+          f" tool_budget_spent={totals['budget_spent']}"
+          f" tool_budget_hard_stops={totals['budget_hard_stops']}")
     print(f"tool calls: {totals['tools']}")
     print(f"jev actions: {totals['actions']}")
     if totals["latency_p50_median"]:
@@ -556,7 +622,10 @@ def print_report(
               f"despawned={dict(facts.wolves_despawned)}")
         print(f"crafts: {dict(facts.crafts)}")
         print(f"placements: {dict(facts.placements)}")
-        print(f"notes written: {facts.notes_written}  utterances: {facts.utterances}")
+        print(f"building: dismantles={dict(facts.dismantles)} "
+              f"workshop_crafts={facts.workshop_crafts} rests={facts.rests}")
+        print(f"notes written: {facts.notes_written}  utterances: {facts.utterances}"
+              f"  shouts: {facts.shouts}")
     elif not layout.meta:
         world_log = layout.root / "world.log"
         if world_log.exists():

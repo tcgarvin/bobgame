@@ -15,29 +15,27 @@ from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
 from .. import world_pb2 as pb
+from . import items
 from .geometry import Coord, chebyshev, direction_name
 
 VIEW_RADIUS = 8
 
-# Object types that occupy their tile. Mirrors world/src/world/settlement.py's
-# BLOCKING_OBJECT_TYPES; the agent stays conservative because treating a
-# passable tile as blocked only costs a slightly longer path.
-ROCK_TYPES: frozenset[str] = frozenset(
-    {"rock_small", "rock_medium", "rock_large", "boulder"}
+# Object types that occupy their tile. Walls really do block (the world says so
+# in `Tile.walkable` too); trees and rocks are treated as blocking only because
+# the agent stays conservative - a slightly longer path costs little. Doors are
+# deliberately absent: settlers walk through them, only wolves cannot.
+BLOCKING_OBJECT_TYPES: frozenset[str] = (
+    frozenset({items.TREE}) | items.ROCK_TYPES | items.BLOCKING_OBJECT_TYPES
 )
-BLOCKING_OBJECT_TYPES: frozenset[str] = frozenset({"tree"}) | ROCK_TYPES
-EXTRACTABLE_TYPES: frozenset[str] = frozenset({"tree"}) | ROCK_TYPES
 
-DEFAULT_REMAINING: Mapping[str, int] = {
-    "tree": 4,
-    "rock_small": 1,
-    "rock_medium": 2,
-    "rock_large": 4,
-    "boulder": 6,
-}
+# Re-exported so the rest of the agent can keep importing them from here.
+ROCK_TYPES = items.ROCK_TYPES
+EXTRACTABLE_TYPES = items.EXTRACTABLE_TYPES
+DEFAULT_REMAINING: Mapping[str, int] = items.DEFAULT_REMAINING
 
 HISTORY_LIMIT = 200
 UTTERANCE_LIMIT = 40
+DAMAGE_LOG_LIMIT = 40
 
 
 @dataclass(frozen=True)
@@ -119,12 +117,22 @@ class HistoryEntry:
 
 @dataclass(frozen=True)
 class HeardUtterance:
-    """Something another actor said within earshot."""
+    """Something an actor said within earshot, and where they stood."""
 
     tick: int
     speaker_id: str
     channel: str
     text: str
+    position: Coord
+
+
+@dataclass(frozen=True)
+class DamageTaken:
+    """One hit this actor took; `attacker_id` is empty for starvation."""
+
+    tick: int
+    amount: int
+    attacker_id: str
 
 
 @dataclass
@@ -193,6 +201,7 @@ class WorldModel:
         self.settlement_known = False
         self.history: deque[HistoryEntry] = deque(maxlen=HISTORY_LIMIT)
         self.heard: deque[HeardUtterance] = deque(maxlen=UTTERANCE_LIMIT)
+        self.damage_log: deque[DamageTaken] = deque(maxlen=DAMAGE_LOG_LIMIT)
         self.last_digest = TickDigest()
         # Position indexes rebuilt once per update() so that pathfinding's
         # walkability checks are O(1) instead of scanning every known object.
@@ -325,7 +334,11 @@ class WorldModel:
             elif kind == "utterance":
                 utterance = event.utterance
                 heard = HeardUtterance(
-                    tick, utterance.speaker_id, utterance.channel, utterance.text
+                    tick,
+                    utterance.speaker_id,
+                    utterance.channel,
+                    utterance.text,
+                    (utterance.position.x, utterance.position.y),
                 )
                 self.heard.append(heard)
                 digest.utterances.append(heard)
@@ -333,6 +346,9 @@ class WorldModel:
                 damaged = event.entity_damaged
                 if damaged.entity_id == self.entity_id:
                     digest.damage_taken += damaged.amount
+                    self.damage_log.append(
+                        DamageTaken(tick, damaged.amount, damaged.attacker_id)
+                    )
                     if damaged.attacker_id:
                         digest.attackers.append(damaged.attacker_id)
             elif kind == "entity_died":
@@ -391,6 +407,33 @@ class WorldModel:
         """Every known object standing on `position`."""
         return [obj for obj in self.objects.values() if obj.position == position]
 
+    def ground_objects_at(self, position: Coord) -> list[ObjectInfo]:
+        """Known ground-layer objects (road, floors) on `position`."""
+        return [
+            obj
+            for obj in self.object_at(position)
+            if obj.object_type in items.GROUND_LAYER_KINDS
+        ]
+
+    def structure_objects_at(self, position: Coord) -> list[ObjectInfo]:
+        """Known structure-layer objects (everything that is not ground) on `position`."""
+        return [
+            obj
+            for obj in self.object_at(position)
+            if obj.object_type not in items.GROUND_LAYER_KINDS
+        ]
+
+    def workshop_table_near(self) -> ObjectInfo | None:
+        """A placed workshop table on or next to the actor, if it knows of one.
+
+        Workshop recipes fail anywhere else, so this is the gate for offering
+        them at all.
+        """
+        for obj in self.objects_near(1):
+            if obj.object_type == items.WORKSHOP_TABLE:
+                return obj
+        return None
+
     def objects_near(self, radius: int) -> list[ObjectInfo]:
         """Known objects within `radius` of the actor, nearest first."""
         centre = self.position
@@ -426,6 +469,54 @@ class WorldModel:
         if not wolves:
             return None
         return min(wolves, key=lambda w: chebyshev(w.position, self.position))
+
+    def wolves_near(self, radius: int) -> list[EntityInfo]:
+        """Living wolves within `radius` of the actor, nearest first."""
+        return [
+            entity
+            for entity in self.entities_near(radius)
+            if entity.entity_type == "wolf" and entity.alive
+        ]
+
+    def allies_near(self, centre: Coord, radius: int) -> list[EntityInfo]:
+        """Other living settlers within `radius` of `centre`."""
+        return [
+            entity
+            for entity in self.entities.values()
+            if entity.entity_id != self.entity_id
+            and entity.entity_type != "wolf"
+            and entity.alive
+            and chebyshev(entity.position, centre) <= radius
+        ]
+
+    def recent_shouts(self, max_age: int) -> list[HeardUtterance]:
+        """The latest shout from each other settler in the last `max_age` ticks.
+
+        Newest first. A shout is a call across the map, usually for help.
+        """
+        latest: dict[str, HeardUtterance] = {}
+        for utterance in self.heard:
+            if utterance.channel != items.SHOUT_CHANNEL:
+                continue
+            if utterance.speaker_id == self.entity_id:
+                continue
+            if self.tick - utterance.tick > max_age:
+                continue
+            latest[utterance.speaker_id] = utterance
+        return sorted(latest.values(), key=lambda u: -u.tick)
+
+    def last_own_shout_tick(self) -> int:
+        """The tick of this actor's most recent shout, or -1 when it never has."""
+        ticks = [
+            u.tick
+            for u in self.heard
+            if u.speaker_id == self.entity_id and u.channel == items.SHOUT_CHANNEL
+        ]
+        return max(ticks, default=-1)
+
+    def damage_since(self, tick: int) -> list[DamageTaken]:
+        """Every hit the actor took at or after `tick`, oldest first."""
+        return [hit for hit in self.damage_log if hit.tick >= tick]
 
     def recent_history(self, count: int = 8) -> list[str]:
         """The last `count` lines of the actor's own action log."""

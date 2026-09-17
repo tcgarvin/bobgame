@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 import structlog
 
@@ -50,6 +50,33 @@ END_CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)
+class DriverChoice:
+    """What a code driver wants to do on one tick."""
+
+    option: Option
+    note: str = ""
+
+
+class StintDriver(Protocol):
+    """Code that replaces Jev for a stint, one deterministic decision per tick.
+
+    Used by the planner's `build` tool: laying out walls and roads is arithmetic,
+    not judgement, and Jev cannot reason about coordinates tick by tick.
+    """
+
+    name: str
+
+    def stop_reason(self, model: WorldModel) -> str:
+        """Why the stint should end now, or `""` to carry on."""
+
+    def choose(self, model: WorldModel) -> DriverChoice:
+        """The action for this tick. Only called when `stop_reason` was empty."""
+
+    def summary(self) -> str:
+        """A few lines of progress for the planner's report."""
+
+
+@dataclass(frozen=True)
 class Brief:
     """What the planner told Jev to do, and the limits it set."""
 
@@ -59,6 +86,8 @@ class Brief:
     notes: str = ""
     check_every: int = 1
     travel: TravelState | None = None
+    # The only phrases Jev may shout during this stint; empty means it cannot.
+    shouts: tuple[str, ...] = ()
 
     def summary(self) -> str:
         """One-line form for status reports and the viewer."""
@@ -73,6 +102,7 @@ class Brief:
             "max_ticks": self.max_ticks,
             "notes": self.notes,
             "check_every": self.check_every,
+            "shouts": list(self.shouts),
             "travel": (
                 None
                 if travel is None
@@ -100,33 +130,50 @@ class TickRecord:
     probabilities: Mapping[str, float] = field(default_factory=dict)
     intent_result: str = "pending"
     note: str = ""
+    driver: str = ""
 
     def as_payload(self, entity_id: str, stint_id: str) -> dict[str, Any]:
-        """Serialise for `stints.jsonl.gz`."""
-        return {
+        """Serialise for `stints.jsonl.gz`.
+
+        A driver tick made no Jev call, so it carries none of Jev's numbers:
+        writing zeroed latencies and ejects would quietly poison the run
+        analysis, which averages every tick row it finds.
+        """
+        payload: dict[str, Any] = {
             "entity_id": entity_id,
             "stint_id": stint_id,
             "tick": self.tick,
             "position": list(self.position),
             "health": self.health,
             "hunger": self.hunger,
-            "input_tokens": self.input_tokens,
             "options": self.option_count,
             "action": self.action,
             "top": [[key, round(value, 3)] for key, value in self.top],
-            "probabilities": {
-                key: round(value, 3) for key, value in self.probabilities.items()
-            },
-            "confidence": round(self.confidence, 3),
-            "eject": round(self.eject, 3),
-            "danger": round(self.danger, 3),
-            "latency_ms": self.latency_ms,
             "intent_result": self.intent_result,
             "note": self.note,
         }
+        if self.driver:
+            payload["driver"] = self.driver
+            return payload
+        payload.update(
+            {
+                "input_tokens": self.input_tokens,
+                "probabilities": {
+                    key: round(value, 3) for key, value in self.probabilities.items()
+                },
+                "confidence": round(self.confidence, 3),
+                "eject": round(self.eject, 3),
+                "danger": round(self.danger, 3),
+                "latency_ms": self.latency_ms,
+            }
+        )
+        return payload
 
     def as_line(self) -> str:
         """Compact human form used in the stint report's tail."""
+        if self.driver:
+            note = f" [{self.note}]" if self.note else ""
+            return f"t{self.tick} {self.action} -> {self.intent_result}{note}"
         return (
             f"t{self.tick} {self.action} -> {self.intent_result} "
             f"(eject {self.eject:.2f}, danger {self.danger:.2f})"
@@ -190,12 +237,14 @@ class Stint:
         jev: JevClient,
         *,
         trace: AgentTrace,
+        driver: StintDriver | None = None,
     ) -> None:
         self.brief = brief
         self.model = model
         self.jev = jev
         self.trace = trace
         self.travel = brief.travel
+        self.driver = driver
 
         self.stint_id = ""
         self.finished = False
@@ -244,7 +293,15 @@ class Stint:
             self.finish(reason)
             return pb.Intent(wait=pb.WaitIntent())
 
-        options = enumerate_options(self.model, self.travel, max_options=MAX_OPTIONS)
+        if self.driver is not None:
+            return self._driven_intent(self.driver)
+
+        options = enumerate_options(
+            self.model,
+            self.travel,
+            shouts=self.brief.shouts,
+            max_options=MAX_OPTIONS,
+        )
         ticks_left = self.brief.max_ticks - self.ticks_used
 
         if self._should_repeat_last(options):
@@ -315,6 +372,18 @@ class Stint:
         self._update_eject_streak(decision)
         self._commit(option, decision, len(options), note)
         return option.intent
+
+    def _driven_intent(self, driver: StintDriver) -> pb.Intent:
+        """One deterministic tick: no Jev call, no option list, no jev_states line."""
+        choice = driver.choose(self.model)
+        self._commit(
+            choice.option,
+            JevDecision(action=choice.option.key),
+            0,
+            choice.note,
+            driver=driver.name,
+        )
+        return choice.option.intent
 
     def record_intent_result(self, result: str) -> None:
         """Attach the world's verdict to this tick's record and flush it to disk."""
@@ -389,6 +458,10 @@ class Stint:
             return END_SUCCESS_OR_JUDGEMENT
         if self._failure_count >= REPEATED_FAILURE_LIMIT:
             return END_REPEATED_FAILURE
+        if self.driver is not None:
+            # Asked before the action, so the last tick's record is always
+            # flushed by the tick loop before the stint reports.
+            return self.driver.stop_reason(self.model)
         return ""
 
     def _update_eject_streak(self, decision: JevDecision) -> None:
@@ -427,6 +500,7 @@ class Stint:
         decision: JevDecision,
         option_count: int,
         note: str,
+        driver: str = "",
     ) -> None:
         if option.clears_travel:
             self.travel = None
@@ -450,6 +524,7 @@ class Stint:
             confidence=decision.confidence,
             probabilities=dict(decision.probabilities),
             note=note,
+            driver=driver,
         )
 
     # -- finishing ----------------------------------------------------------

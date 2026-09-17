@@ -37,4 +37,9 @@
    <property name="key" value="berry-bush-full"/>
   </properties>
  </tile>
+ <tile id="54" type="bobtile">
+  <properties>
+   <property name="key" value="clay-deposit"/>
+  </properties>
+ </tile>
 </tileset>

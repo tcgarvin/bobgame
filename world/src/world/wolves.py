@@ -12,7 +12,7 @@ import structlog
 
 from .events import EntityDespawnedEvent, EntitySpawnedEvent, TickEvents
 from .settlement import is_free_walkable
-from .state import Entity, World
+from .state import WOLF_ENTITY_TYPE, Entity, World
 from .tick_context import TickContext
 from .types import (
     DIRECTION_DELTAS,
@@ -25,8 +25,11 @@ from .types import (
 
 logger = structlog.get_logger()
 
-WOLF_TYPE = "wolf"
-WOLF_MAX_HEALTH = 8
+WOLF_TYPE = WOLF_ENTITY_TYPE
+# Tuned so a lone settler wins a wolf fight only at the cost of about half
+# their health, while two or three attacking together barely get scratched:
+# damage is simultaneous, so every extra attacker shortens the fight.
+WOLF_MAX_HEALTH = 16
 
 SPAWN_INTERVAL_TICKS = 40
 MAX_WOLVES = 3
@@ -171,7 +174,7 @@ class WolfSimulator:
                 dy = radius if self.rng.random() < 0.5 else -radius
 
             candidate = Position(x=anchor.x + dx, y=anchor.y + dy)
-            if not is_free_walkable(world, candidate):
+            if not is_free_walkable(world, candidate, WOLF_TYPE):
                 continue
 
             nearest = self._nearest_player(players, candidate)
@@ -224,7 +227,7 @@ class WolfSimulator:
         return [
             direction
             for direction in Direction
-            if is_free_walkable(world, position.offset(direction))
+            if is_free_walkable(world, position.offset(direction), WOLF_TYPE)
         ]
 
     def _chase_direction(

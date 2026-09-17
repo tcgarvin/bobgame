@@ -550,6 +550,7 @@ class Intent(_message.Message):
         "deposit",
         "withdraw",
         "write_note",
+        "rest",
     )
     MOVE_FIELD_NUMBER: _ClassVar[int]
     PICKUP_FIELD_NUMBER: _ClassVar[int]
@@ -567,6 +568,7 @@ class Intent(_message.Message):
     DEPOSIT_FIELD_NUMBER: _ClassVar[int]
     WITHDRAW_FIELD_NUMBER: _ClassVar[int]
     WRITE_NOTE_FIELD_NUMBER: _ClassVar[int]
+    REST_FIELD_NUMBER: _ClassVar[int]
     move: MoveIntent
     pickup: PickupIntent
     use: UseIntent
@@ -583,6 +585,7 @@ class Intent(_message.Message):
     deposit: DepositIntent
     withdraw: WithdrawIntent
     write_note: WriteNoteIntent
+    rest: RestIntent
     def __init__(
         self,
         move: _Optional[_Union[MoveIntent, _Mapping]] = ...,
@@ -601,6 +604,7 @@ class Intent(_message.Message):
         deposit: _Optional[_Union[DepositIntent, _Mapping]] = ...,
         withdraw: _Optional[_Union[WithdrawIntent, _Mapping]] = ...,
         write_note: _Optional[_Union[WriteNoteIntent, _Mapping]] = ...,
+        rest: _Optional[_Union[RestIntent, _Mapping]] = ...,
     ) -> None: ...
 
 class AttackIntent(_message.Message):
@@ -696,6 +700,12 @@ class WriteNoteIntent(_message.Message):
         title: _Optional[str] = ...,
         text: _Optional[str] = ...,
     ) -> None: ...
+
+class RestIntent(_message.Message):
+    __slots__ = ("object_id",)
+    OBJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    object_id: str
+    def __init__(self, object_id: _Optional[str] = ...) -> None: ...
 
 class MoveIntent(_message.Message):
     __slots__ = ("direction",)

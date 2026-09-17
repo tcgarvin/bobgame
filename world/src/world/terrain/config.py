@@ -60,18 +60,18 @@ class IslandConfig(BaseModel):
 class HydrologyConfig(BaseModel):
     """River and water feature parameters."""
 
-    river_count_min: int = Field(default=2, description="Minimum number of rivers")
-    river_count_max: int = Field(default=4, description="Maximum number of rivers")
+    river_count_min: int = Field(default=6, description="Minimum number of rivers")
+    river_count_max: int = Field(default=9, description="Maximum number of rivers")
     river_width_min: int = Field(default=2, description="Minimum river width in tiles")
     river_width_max: int = Field(default=3, description="Maximum river width in tiles")
     fords_per_river_min: int = Field(default=1, description="Min fords per river")
     fords_per_river_max: int = Field(default=3, description="Max fords per river")
     ford_length: int = Field(default=8, description="Ford length in tiles")
     source_min_distance_from_coast: int = Field(
-        default=250, description="Min distance from coast for river sources"
+        default=150, description="Min distance from coast for river sources"
     )
     source_min_spacing: int = Field(
-        default=600, description="Min spacing between river sources"
+        default=400, description="Min spacing between river sources"
     )
     meander_temperature: float = Field(
         default=0.1, description="Temperature for stochastic meander (higher=more)"
@@ -116,18 +116,81 @@ class ForestConfig(BaseModel):
 class ObjectPlacementConfig(BaseModel):
     """Natural object placement parameters."""
 
-    tree_base_density: float = Field(default=0.15, description="Base tree probability")
-    tree_coast_distance: int = Field(
-        default=80, description="Distance from water for full tree density"
+    # Trees: probability under full canopy, plus a thin scatter in the open.
+    tree_base_density: float = Field(
+        default=0.16, description="Tree probability under full canopy"
     )
-    bush_base_density: float = Field(default=0.08, description="Base bush probability")
+    tree_stray_density: float = Field(
+        default=0.004, description="Lone-tree probability in open country"
+    )
+    tree_coast_distance: int = Field(
+        default=40, description="Distance from the ocean for full tree density"
+    )
+    grove_wavelength: int = Field(
+        default=90, description="Wavelength of the grove/clearing noise"
+    )
+    canopy_threshold: float = Field(
+        default=0.56, description="Forest+grove level above which canopy closes"
+    )
+    canopy_edge_softness: float = Field(
+        default=0.06, description="Half-width of the canopy edge transition"
+    )
+
+    # Bushes: thickets along forest edges, in a band back from the water.
+    bush_base_density: float = Field(
+        default=0.05, description="Bush probability in a thicket or forest edge"
+    )
     bush_water_min_distance: int = Field(
-        default=10, description="Min distance from water for bushes"
+        default=4, description="Min distance from water for bushes"
     )
     bush_water_max_distance: int = Field(
-        default=60, description="Max distance from water for bushes"
+        default=60, description="Distance from water beyond which bushes thin out"
     )
-    rock_base_density: float = Field(default=0.05, description="Base rock probability")
+
+    # Rocks: outcrops and mountain-foot scree, plus strays.
+    rock_base_density: float = Field(
+        default=0.18, description="Rock probability inside an outcrop"
+    )
+    rock_stray_density: float = Field(
+        default=0.0015, description="Stray rock probability anywhere"
+    )
+    outcrop_wavelength: int = Field(
+        default=55, description="Wavelength of the outcrop patch noise"
+    )
+    outcrop_threshold: float = Field(
+        default=0.76, description="Rockiness above which an outcrop forms"
+    )
+    rock_mountain_reach: int = Field(
+        default=14, description="How far scree spreads from mountain feet"
+    )
+
+    # Reeds: fresh-water banks and ford shallows.
+    reed_base_density: float = Field(
+        default=0.45, description="Reed probability inside a reed bed"
+    )
+    reed_bank_width: float = Field(
+        default=2.0, description="Max distance from a river for bank reeds"
+    )
+    reed_wavelength: int = Field(
+        default=45, description="Wavelength of the reed-bed patch noise"
+    )
+    reed_coast_exclusion: int = Field(
+        default=12, description="No reeds this close to the ocean"
+    )
+
+    # Clay: tight clusters a little back from the river bank.
+    clay_base_density: float = Field(
+        default=0.22, description="Clay probability inside a clay pit patch"
+    )
+    clay_min_distance: float = Field(
+        default=2.0, description="Min distance from a river for clay"
+    )
+    clay_max_distance: float = Field(
+        default=7.0, description="Max distance from a river for clay"
+    )
+    clay_wavelength: int = Field(
+        default=30, description="Wavelength of the clay patch noise"
+    )
     forest: ForestConfig = Field(default_factory=ForestConfig)
 
 

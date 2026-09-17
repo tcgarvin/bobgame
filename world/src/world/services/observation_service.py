@@ -3,7 +3,7 @@
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Iterator
+from typing import Iterator, Mapping
 
 import grpc
 import structlog
@@ -15,7 +15,7 @@ from ..events import ActionResult
 from ..lease import LeaseManager
 from ..state import Entity, World
 from ..tick import TickContext, TickLoop, TickResult
-from ..types import Position
+from ..types import AUDIBLE_CHANNELS, LOCAL_CHANNEL, SHOUT_CHANNEL, Position
 
 logger = structlog.get_logger()
 
@@ -23,6 +23,13 @@ logger = structlog.get_logger()
 VIEW_RADIUS = 8
 # Earshot for `local` utterances.
 HEARING_RADIUS = 10
+# Earshot for `shout` utterances: far enough to call the settlement to a fight,
+# which is the point of shouting.
+SHOUT_RADIUS = 60
+HEARING_RADIUS_BY_CHANNEL: Mapping[str, int] = {
+    LOCAL_CHANNEL: HEARING_RADIUS,
+    SHOUT_CHANNEL: SHOUT_RADIUS,
+}
 
 
 def _within(a: Position, b: Position, radius: int) -> bool:
@@ -209,9 +216,10 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
 
         for utterance in result.utterances:
             # `thought` never reaches another agent's observation.
-            if utterance.channel != "local":
+            if utterance.channel not in AUDIBLE_CHANNELS:
                 continue
-            if not _within(utterance.position, centre, HEARING_RADIUS):
+            earshot = HEARING_RADIUS_BY_CHANNEL[utterance.channel]
+            if not _within(utterance.position, centre, earshot):
                 continue
             events.append(
                 pb.ObservationEvent(
@@ -340,14 +348,22 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
     def _get_nearby_tiles(
         self, center: Position, radius: int = VIEW_RADIUS
     ) -> list[pb.Tile]:
-        """Get tiles within a radius of the center position."""
+        """Get tiles within a radius of the center position.
+
+        A wall makes its tile `walkable = false` so agent path finding needs no
+        new concept (docs/08_building.md, "Blocking"). Doors stay walkable:
+        they only stop wolves, which have no observation stream.
+        """
         tiles = []
         for dx in range(-radius, radius + 1):
             for dy in range(-radius, radius + 1):
                 pos = Position(x=center.x + dx, y=center.y + dy)
-                if self.world.in_bounds(pos):
-                    tile = self.world.get_tile(pos)
-                    tiles.append(tile_to_proto(tile))
+                if not self.world.in_bounds(pos):
+                    continue
+                tile = self.world.get_tile(pos)
+                if tile.walkable and self.world.is_blocked(pos):
+                    tile = tile.model_copy(update={"walkable": False})
+                tiles.append(tile_to_proto(tile))
         return tiles
 
 

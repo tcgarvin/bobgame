@@ -4,9 +4,8 @@ import numpy as np
 import pytest
 
 from world.settlement import (
-    MIN_BUSHES,
-    MIN_ROCKS,
-    MIN_TREES,
+    CLEARING_SIZE,
+    MINIMUMS,
     NoSettlementSiteError,
     find_settlement_site,
     nearest_free_walkable,
@@ -22,6 +21,23 @@ MOUNTAIN = 5
 
 SIZE = 200
 
+# Where each resource block sits relative to the site centre: all inside the
+# settlement radius, all outside the central clearing.
+_BLOCK_OFFSETS = {
+    "tree": (0, -20),
+    "rock_medium": (0, 20),
+    "bush": (20, 0),
+    "reeds": (-20, -8),
+    "clay_deposit": (-20, 8),
+}
+_DEFAULT_SUPPLY = {
+    "tree": 150,
+    "rock_medium": 70,
+    "bush": 20,
+    "reeds": 35,
+    "clay_deposit": 20,
+}
+
 
 def _make_world(floor_value: int = GRASS) -> World:
     world = World(width=SIZE, height=SIZE)
@@ -29,92 +45,124 @@ def _make_world(floor_value: int = GRASS) -> World:
     return world
 
 
-def _cluster(
-    centre: Position,
-    object_type: str,
-    count: int,
-    prefix: str,
-    spread: int = 10,
+def _block(
+    centre: Position, object_type: str, count: int, prefix: str
 ) -> list[WorldObject]:
-    """Place `count` objects on distinct tiles around `centre`."""
+    """Place `count` objects on distinct tiles in a 15-wide block around centre."""
     objects: list[WorldObject] = []
-    index = 0
-    for dy in range(-spread, spread + 1):
-        for dx in range(-spread, spread + 1):
-            if len(objects) >= count:
-                return objects
-            # Skip the centre tile so it stays free for spawning.
-            if dx == 0 and dy == 0:
-                continue
-            objects.append(
-                WorldObject(
-                    object_id=f"{prefix}_{index}",
-                    position=Position(x=centre.x + dx, y=centre.y + dy),
-                    object_type=object_type,
-                )
+    for index in range(count):
+        dx, dy = index % 15 - 7, index // 15 - 5
+        objects.append(
+            WorldObject(
+                object_id=f"{prefix}_{object_type}_{index}",
+                position=Position(x=centre.x + dx, y=centre.y + dy),
+                object_type=object_type,
             )
-            index += 1
+        )
     return objects
 
 
-def _supplied_site(
-    world: World,
-    centre: Position,
-    trees: int = 20,
-    rocks: int = 20,
-    bushes: int = 12,
-) -> list[WorldObject]:
-    """Put a qualifying resource cluster and a water tile around centre."""
+def _supplied_site(world: World, centre: Position, **supply: int) -> list[WorldObject]:
+    """Surround centre with qualifying resources and one water tile."""
     floor = world._floor_array
     assert floor is not None
-    floor[centre.y, centre.x - 20] = SHALLOW_WATER
+    floor[centre.y, centre.x - 28] = SHALLOW_WATER
 
-    objects = []
-    objects += _cluster(
-        Position(x=centre.x, y=centre.y - 12), "tree", trees, f"tree{centre.x}"
-    )
-    objects += _cluster(
-        Position(x=centre.x, y=centre.y + 12), "rock_medium", rocks, f"rock{centre.x}"
-    )
-    objects += _cluster(
-        Position(x=centre.x + 12, y=centre.y), "bush", bushes, f"bush{centre.x}"
-    )
+    objects: list[WorldObject] = []
+    for object_type, (dx, dy) in _BLOCK_OFFSETS.items():
+        count = supply.get(object_type, _DEFAULT_SUPPLY[object_type])
+        block_centre = Position(x=centre.x + dx, y=centre.y + dy)
+        objects += _block(block_centre, object_type, count, f"s{centre.x}")
     return objects
 
 
 class TestFindSettlementSite:
-    def test_finds_the_supplied_site(self) -> None:
+    def test_finds_a_site_with_every_minimum_met(self) -> None:
         world = _make_world()
         centre = Position(x=100, y=100)
         objects = _supplied_site(world, centre)
 
         site = find_settlement_site(world, objects)
 
-        # The site has to sit within reach of the one supplied cluster.
-        assert abs(site.x - centre.x) <= 45
-        assert abs(site.y - centre.y) <= 45
         counts = resource_counts(world, objects, site)
-        assert counts["tree"] >= MIN_TREES
-        assert counts["rock"] >= MIN_ROCKS
-        assert counts["bush"] >= MIN_BUSHES
+        for category, minimum in MINIMUMS.items():
+            assert counts[category] >= minimum, category
+
+    @pytest.mark.parametrize("missing", sorted(_BLOCK_OFFSETS))
+    def test_every_resource_is_required(self, missing: str) -> None:
+        world = _make_world()
+        objects = _supplied_site(world, Position(x=100, y=100), **{missing: 3})
+
+        with pytest.raises(NoSettlementSiteError):
+            find_settlement_site(world, objects)
 
     def test_site_is_walkable_grass_or_dirt(self) -> None:
         world = _make_world(SAND)
         floor = world._floor_array
         assert floor is not None
         # Only a patch of grass, everything else sand: the site must land there.
-        floor[90:120, 90:120] = GRASS
-        objects = _supplied_site(world, Position(x=104, y=104))
+        floor[90:111, 90:111] = GRASS
+        objects = _supplied_site(world, Position(x=100, y=100))
 
         site = find_settlement_site(world, objects)
 
         tile = world.get_tile(site)
         assert tile.floor_type in ("grass", "dirt")
-        assert tile.walkable
+        assert 90 <= site.x <= 110 and 90 <= site.y <= 110
+
+    def test_site_has_a_clear_building_area(self) -> None:
+        world = _make_world()
+        objects = _supplied_site(world, Position(x=100, y=100))
+
+        site = find_settlement_site(world, objects)
+
+        half = CLEARING_SIZE // 2
+        cluttered = sum(
+            1
+            for obj in objects
+            if abs(obj.position.x - site.x) <= half
+            and abs(obj.position.y - site.y) <= half
+        )
+        assert cluttered <= 0.1 * CLEARING_SIZE**2
+
+    def test_rejects_a_site_with_no_room_to_build(self) -> None:
+        world = _make_world()
+        centre = Position(x=100, y=100)
+        objects = _supplied_site(world, centre)
+        # Fill every gap between the resource blocks with stray trees, so no
+        # 15 x 15 square anywhere near the supply is clear.
+        taken = {(obj.position.x, obj.position.y) for obj in objects}
+        index = 0
+        for y in range(60, 141, 2):
+            for x in range(60, 141, 2):
+                if (x, y) not in taken:
+                    objects.append(
+                        WorldObject(
+                            object_id=f"stray_{index}",
+                            position=Position(x=x, y=y),
+                            object_type="tree",
+                        )
+                    )
+                    index += 1
+
+        with pytest.raises(NoSettlementSiteError):
+            find_settlement_site(world, objects)
+
+    def test_rejects_a_site_that_is_mostly_water(self) -> None:
+        world = _make_world()
+        centre = Position(x=100, y=100)
+        objects = _supplied_site(world, centre)
+        floor = world._floor_array
+        assert floor is not None
+        floor[:, : centre.x - 9] = SHALLOW_WATER
+        floor[: centre.y - 9, :] = SHALLOW_WATER
+
+        with pytest.raises(NoSettlementSiteError):
+            find_settlement_site(world, objects)
 
     def test_deterministic_for_the_same_map(self) -> None:
         world = _make_world()
-        objects = _supplied_site(world, Position(x=60, y=60))
+        objects = _supplied_site(world, Position(x=50, y=50))
         objects += _supplied_site(world, Position(x=150, y=150))
 
         first = find_settlement_site(world, objects)
@@ -126,9 +174,13 @@ class TestFindSettlementSite:
         world = _make_world()
         lean = Position(x=50, y=50)
         balanced = Position(x=150, y=150)
-        # Plenty of trees but barely enough rocks/bushes.
-        objects = _supplied_site(world, lean, trees=200, rocks=15, bushes=8)
-        objects += _supplied_site(world, balanced, trees=40, rocks=40, bushes=24)
+        # Drowning in trees but only just enough of everything else.
+        objects = _supplied_site(
+            world, lean, tree=165, rock_medium=50, bush=12, reeds=25, clay_deposit=12
+        )
+        objects += _supplied_site(
+            world, balanced, rock_medium=100, bush=24, reeds=50, clay_deposit=24
+        )
 
         site = find_settlement_site(world, objects)
 
@@ -142,7 +194,7 @@ class TestFindSettlementSite:
         # Remove the water tile that _supplied_site added.
         floor = world._floor_array
         assert floor is not None
-        floor[centre.y, centre.x - 20] = GRASS
+        floor[centre.y, centre.x - 28] = GRASS
 
         with pytest.raises(NoSettlementSiteError):
             find_settlement_site(world, objects)

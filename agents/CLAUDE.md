@@ -26,7 +26,12 @@ Available intents (defined in `proto/world.proto`):
 - `CollectIntent` - Collect from an object at current position
 - `EatIntent` - Consume items from inventory
 - `WaitIntent` - Do nothing this tick
-- `SayIntent`, `PickupIntent`, `UseIntent` - Not yet implemented
+- `SayIntent` - Speak on a channel (`local` 10 tiles, `shout` 60 tiles, `thought` viewer only)
+- `AttackIntent`, `ExtractIntent` - Fight, and chop/mine/dismantle
+- `CraftIntent`, `EquipIntent`, `PlaceIntent` - Make, wield and put down items
+- `PickupIntent`, `DropIntent`, `DepositIntent`, `WithdrawIntent` - Piles and chests
+- `WriteNoteIntent` - Write a message board slot
+- `RestIntent` - Heal on a bed (see docs/08_building.md)
 
 ### Foraging Pattern
 
@@ -196,13 +201,15 @@ reader sees everything up to a Ctrl-C (readers must treat an `EOFError` or
 light one: a `stint_start` line with the whole brief, one record per tick with
 the chosen action, the full probability map, confidence, eject, danger, latency
 and the world's verdict, and a `stint_end` line carrying the end reason and the
-rendered `StintReport`. `jev_states.jsonl.gz` is the heavy one: the exact state
+rendered `StintReport`. A tick driven by code instead of Jev (the `build` tool)
+writes the same row with `"driver": "build"` and without Jev's numbers. `jev_states.jsonl.gz` is the heavy one: the exact state
 and criteria sent to Jev, one line per real call (repeats under `check_every`
 make no call and write no line; a timed-out call still wrote its state).
 `planner.jsonl.gz` holds the planner's turns: `turn_start` with the full prompt,
 `tool_call` and `tool_result` with untruncated args and results, `turn_end` with
 the reflection, tool count, duration and token usage, plus `turn_failed`,
-`tool_budget_reached` and `history_reset`. `memory.md`, the planner's persistent
+`tool_budget_spent` (the soft 30-call budget ran out and the turn ended
+normally), `tool_budget_reached` (the hard backstop fired) and `history_reset`. `memory.md`, the planner's persistent
 notes, sits in the same directory. A file that cannot be opened or written
 complains once and then goes inert - tracing never stops the agent.
 
@@ -216,6 +223,8 @@ once per process by `JevAgent`, closed in `run_agent`'s finally block) and
 | --- | --- |
 | `client.py` | Async wrapper over the sync gRPC stubs (stream on a thread, unary via `to_thread`), lease renewal every 10 s |
 | `geometry.py` | Direction tables, offsets, Chebyshev distance (`+y` is south) |
+| `items.py` | The agent-side mirror of `world/src/world/items.py`: recipes, item kinds, object layers, extraction yields |
+| `build.py` | Shape geometry and the `BuildExecutor` that drives the planner's `build` tool |
 | `pathfinding.py` | 8-connected A* with the world's diagonal-blocking rule; unknown tiles cost 3 |
 | `worldmodel.py` | Everything ever observed: tiles, objects, entities, own history, settlement |
 | `options.py` | The legal actions for this tick, each carrying its proto Intent |
@@ -238,6 +247,70 @@ once per process by `JevAgent`, closed in `run_agent`'s finally block) and
 
 Jev and the planner never run at the same time: during a stint the planner task
 is parked on the `start_stint` future, and during planning Jev is not called.
+
+### Building (docs/08_building.md)
+
+`items.py` restates the world's contract for the agent: the full recipe table
+(inputs, output count, `needs_workshop`), the ground/structure layer split, the
+building kinds, and what `reeds` and `clay_deposit` yield. It is a mirror, so a
+change in `world/src/world/items.py` has to be copied here in the same commit.
+
+What Jev may choose (`options.py`):
+
+- **craft** only when the recipe would actually succeed: the inputs are in the
+  pack and, for a workshop recipe, `WorldModel.workshop_table_near()` finds a
+  placed `workshop_table` on or next to the tile. Craft options are ordered by
+  `CRAFT_PRIORITY`, drop recipes for something already carried, and are capped
+  at `CRAFT_OPTION_LIMIT`, because `MAX_OPTIONS` is 40 and the movement options
+  must survive.
+- **place**: one option per carried building item, capped at
+  `PLACE_OPTION_LIMIT`. Ground kinds (road, floors) go on the actor's own tile
+  with `DIRECTION_UNSPECIFIED`; structures go on the first free neighbour.
+- **rest**: only when wounded, fed, and standing on or next to a bed.
+- **shout:<n>**: one option per phrase in `Brief.shouts`, which the planner
+  writes in `start_stint` (at most `MAX_BRIEF_SHOUTS`, with a cooldown). Jev
+  has no shout of its own and none is tied to wolves.
+  **travel_to:shout:<speaker>** walks to where a shout came from for
+  `HEARD_SHOUT_MAX_AGE_TICKS` after hearing it, whatever it said.
+  `jevstate.py` adds a `threat` block with wolf counts and wolf physics (no
+  tactics) whenever a wolf is in view.
+- **Tools, not rules**: the planner prompt (`SETTLEMENT_NARRATIVE`) gives the
+  setting, the goal "build a civilization", the physics with numbers, and how
+  to operate Jev. It gives no strategy, etiquette or uses for the tools; those
+  are meant to emerge. Keep advice out of option descriptions and alerts too. The wolf numbers in `items.py` mirror
+  `world/wolves.py` and `world/items.py`.
+- **extract** now covers `reeds` (fiber, no tool) and `clay_deposit` (clay,
+  pickaxe).
+- **dismantle is deliberately not offered.** It is `ExtractIntent` on a placed
+  building, and Jev reads "extract" as "gather", so it would cheerfully eat the
+  town wall. Dismantling is a planner tool only.
+
+The planner's `build` tool is the deterministic one, in the spirit of
+`travel_to`: `build(kind, shape, x1, y1, x2, y2, max_ticks, skip, tiles)` where
+the shape is `line`, `rect` (outline), `rect_filled` or `tiles`, and `skip` is
+the door gap, written `"x,y; x,y"`. `make_plan` resolves the shape to an
+ordered tile list (a bad kind or shape raises `BuildPlanError`, which the tool
+turns into a `ModelRetry`), and a `BuildExecutor` runs it as a **driven stint**:
+
+- `Stint` takes an optional `StintDriver`. With one, Jev is never called, no
+  option list is enumerated and no `jev_states` line is written; the driver's
+  `stop_reason(model)` is consulted where Jev's rules would be, and
+  `choose(model)` returns the tick's `Option`.
+- The executor walks with the ordinary path finder, standing on the tile for
+  ground kinds and next to it for structures, skipping tiles that already carry
+  that layer or are blocked by something else, and refusing any placement that
+  would shut the builder into a pocket (a capped flood fill from where it would
+  stand, so a wall ring gets closed from the outside).
+- Stop reasons: `build_done`, `build_out_of_items`, `build_blocked`,
+  `build_danger` (a wolf within `BUILD_DANGER_RADIUS`, or health below the
+  stint's `DANGER_HEALTH_FLOOR`), `build_would_seal_you_in`, plus the stint's
+  own `ticks_exhausted`, `death` and `repeated_failure`. The tool returns the
+  stint report followed by `BuildExecutor.summary()`.
+- Trace shape: driver ticks are ordinary `stints.jsonl.gz` tick rows with
+  `"driver": "build"` and an action of `build_step:<dir>` or
+  `build_place:<kind>:<x>,<y>`. They carry no `latency_ms`, `eject`, `danger`,
+  `confidence` or token count, because there was no Jev call and averaging
+  zeros would poison `tools/analyze_run.py`.
 
 ### Testing
 

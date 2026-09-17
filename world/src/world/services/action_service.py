@@ -21,6 +21,7 @@ from ..types import (
     MoveIntent,
     PickupIntent,
     PlaceIntent,
+    RestIntent,
     SayIntent,
     WaitIntent,
     WithdrawIntent,
@@ -128,13 +129,14 @@ def intent_from_proto(entity_id: str, intent: pb.Intent) -> EntityIntent:
         return EquipIntent(entity_id=entity_id, kind=intent.equip.kind)
 
     if action == "place":
-        direction = direction_from_proto(intent.place.direction)
-        if direction is None:
-            raise IntentConversionError("invalid_direction")
         if not intent.place.kind:
             raise IntentConversionError("missing_kind")
+        # An unspecified direction means "my own tile"; only ground-layer kinds
+        # may use it, which the place phase checks.
         return PlaceIntent(
-            entity_id=entity_id, kind=intent.place.kind, direction=direction
+            entity_id=entity_id,
+            kind=intent.place.kind,
+            direction=direction_from_proto(intent.place.direction),
         )
 
     if action == "write_note":
@@ -147,6 +149,11 @@ def intent_from_proto(entity_id: str, intent: pb.Intent) -> EntityIntent:
             title=intent.write_note.title,
             text=intent.write_note.text,
         )
+
+    if action == "rest":
+        if not intent.rest.object_id:
+            raise IntentConversionError("missing_object_id")
+        return RestIntent(entity_id=entity_id, object_id=intent.rest.object_id)
 
     if action == "say":
         return SayIntent(

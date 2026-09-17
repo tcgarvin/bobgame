@@ -26,13 +26,13 @@ from .containers import (
     read_contents,
     read_notes,
 )
-from .crafting import RECIPES, process_craft_phase
+from .crafting import RECIPES, Recipe, process_craft_phase
 from .items import ITEM_KINDS, attack_damage
 from .lease import Lease, LeaseManager
 from .movement import MoveClaim, MoveResult, MovementResolver, process_movement_phase
 from .server import WorldServer, run_server
 from .state import Entity, Tile, World
-from .stats import find_free_tile, process_respawns
+from .stats import find_free_tile, process_respawns, process_rest_phase
 from .tick import (
     TickConfig,
     TickContext,
@@ -58,6 +58,7 @@ from .types import (
     PickupIntent,
     PlaceIntent,
     Position,
+    RestIntent,
     SayIntent,
     WaitIntent,
     WithdrawIntent,
@@ -108,12 +109,15 @@ __all__ = [
     # Mechanics
     "ITEM_KINDS",
     "RECIPES",
+    "Recipe",
+    "RestIntent",
     "WolfSimulator",
     "attack_damage",
     "kill_entity",
     "process_attack_phase",
     "process_craft_phase",
     "process_respawns",
+    "process_rest_phase",
     "find_free_tile",
     "add_items_to_ground",
     "read_contents",

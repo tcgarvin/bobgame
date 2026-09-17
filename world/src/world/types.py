@@ -149,10 +149,14 @@ class EquipIntent(EntityIntent, frozen=True):
 
 
 class PlaceIntent(EntityIntent, frozen=True):
-    """Intent to place a placeable item on the adjacent tile in `direction`."""
+    """Intent to place a placeable item on the adjacent tile in `direction`.
+
+    `direction` is None only for ground-layer kinds (road, floors), which are
+    laid on the placer's own tile; structures always name a direction.
+    """
 
     kind: str
-    direction: Direction
+    direction: Direction | None = None
 
 
 class WriteNoteIntent(EntityIntent, frozen=True):
@@ -164,8 +168,22 @@ class WriteNoteIntent(EntityIntent, frozen=True):
     text: str = ""
 
 
+class RestIntent(EntityIntent, frozen=True):
+    """Intent to rest on a bed on the same or an adjacent tile."""
+
+    object_id: str
+
+
+# Channels other entities can hear; "thought" only reaches the viewer.
+LOCAL_CHANNEL = "local"
+SHOUT_CHANNEL = "shout"
+THOUGHT_CHANNEL = "thought"
+AUDIBLE_CHANNELS: frozenset[str] = frozenset({LOCAL_CHANNEL, SHOUT_CHANNEL})
+SAY_CHANNELS: frozenset[str] = AUDIBLE_CHANNELS | frozenset({THOUGHT_CHANNEL})
+
+
 class SayIntent(EntityIntent, frozen=True):
-    """Intent to speak on a channel ("local" or "thought")."""
+    """Intent to speak on a channel ("local", "shout" or "thought")."""
 
     text: str
     channel: str = "local"

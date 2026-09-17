@@ -19,6 +19,11 @@ D8_DX = np.array([0, 1, 1, 1, 0, -1, -1, -1], dtype=np.int32)
 FLOW_NODATA = 255
 
 
+# Gradient imposed across filled flats so every land cell keeps a downhill
+# neighbour. Large enough to survive float32, small enough not to matter.
+FILL_EPSILON = 2.0e-5
+
+
 def priority_flood_fill(
     elevation: NDArray[np.float32],
     ocean_mask: NDArray[np.bool_],
@@ -69,8 +74,12 @@ def priority_flood_fill(
             nx = x + D8_DX[d]
             if 0 <= ny < height and 0 <= nx < width and not closed[ny, nx]:
                 closed[ny, nx] = True
-                # Push with max of neighbor elevation and current
-                neighbor_elev = max(float(filled[ny, nx]), float(filled[y, x]))
+                # Raise the neighbour to at least a hair above this cell. The
+                # epsilon keeps filled depressions and flats draining (a dead
+                # flat has no D8 direction, which used to strand rivers inland).
+                neighbor_elev = max(
+                    float(filled[ny, nx]), float(filled[y, x]) + FILL_EPSILON
+                )
                 heapq.heappush(pq, (neighbor_elev, ny, nx))
                 filled[ny, nx] = neighbor_elev
 

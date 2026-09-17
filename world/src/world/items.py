@@ -17,16 +17,71 @@ SWORD = "sword"
 CHEST = "chest"
 MESSAGE_BOARD = "message_board"
 
-ITEM_KINDS: frozenset[str] = frozenset(
-    {BERRY, WOOD, STONE, AXE, PICKAXE, SWORD, CHEST, MESSAGE_BOARD}
+# Raw and intermediate building materials (docs/08_building.md).
+FIBER = "fiber"
+CLAY = "clay"
+PLANK = "plank"
+ROPE = "rope"
+
+# Building items. The placed object's object_type equals the item kind.
+ROAD = "road"
+WOOD_FLOOR = "wood_floor"
+STONE_FLOOR = "stone_floor"
+WOOD_WALL = "wood_wall"
+STONE_WALL = "stone_wall"
+DOOR = "door"
+BED = "bed"
+CHAIR = "chair"
+TABLE = "table"
+WORKSHOP_TABLE = "workshop_table"
+
+# Ground-layer kinds lie under structures and never block.
+GROUND_LAYER_KINDS: frozenset[str] = frozenset({ROAD, WOOD_FLOOR, STONE_FLOOR})
+
+# Everything the building update added; all of it can be dismantled.
+BUILDING_KINDS: frozenset[str] = GROUND_LAYER_KINDS | frozenset(
+    {WOOD_WALL, STONE_WALL, DOOR, BED, CHAIR, TABLE, WORKSHOP_TABLE}
+)
+
+ITEM_KINDS: frozenset[str] = (
+    frozenset(
+        {
+            BERRY,
+            WOOD,
+            STONE,
+            AXE,
+            PICKAXE,
+            SWORD,
+            CHEST,
+            MESSAGE_BOARD,
+            FIBER,
+            CLAY,
+            PLANK,
+            ROPE,
+        }
+    )
+    | BUILDING_KINDS
 )
 
 # Items that can be placed in the world as an object.
-PLACEABLE_KINDS: frozenset[str] = frozenset({CHEST, MESSAGE_BOARD})
+PLACEABLE_KINDS: frozenset[str] = frozenset({CHEST, MESSAGE_BOARD}) | BUILDING_KINDS
+
+# --- Blocking, dismantling, resting ------------------------------------------
+
+# Object types nobody can walk through.
+BLOCKING_OBJECT_TYPES: frozenset[str] = frozenset({WOOD_WALL, STONE_WALL})
+# Object types wolves cannot walk through (settlers open doors, wolves cannot).
+WOLF_BLOCKING_OBJECT_TYPES: frozenset[str] = BLOCKING_OBJECT_TYPES | frozenset({DOOR})
+
+# Work units (one per extract action, no tool bonus) to dismantle a building.
+DISMANTLE_WORK = 3
+
+# Health restored by one successful rest action on a bed.
+REST_HEAL = 2
 
 # --- Combat ---------------------------------------------------------------
 
-BASE_ATTACK_DAMAGE: Mapping[str, int] = {"wolf": 2}
+BASE_ATTACK_DAMAGE: Mapping[str, int] = {"wolf": 3}
 DEFAULT_ATTACK_DAMAGE = 2
 
 WIELD_DAMAGE_BONUS: Mapping[str, int] = {SWORD: 3, AXE: 2, PICKAXE: 1}
@@ -44,10 +99,16 @@ ITEM_PILE = "item_pile"
 CHEST_OBJECT = "chest"
 MESSAGE_BOARD_OBJECT = "message_board"
 
+REEDS = "reeds"
+CLAY_DEPOSIT = "clay_deposit"
+
 ROCK_TYPES: frozenset[str] = frozenset(
     {"rock_small", "rock_medium", "rock_large", "boulder"}
 )
-EXTRACTABLE_TYPES: frozenset[str] = frozenset({TREE}) | ROCK_TYPES
+EXTRACTABLE_TYPES: frozenset[str] = frozenset({TREE, REEDS, CLAY_DEPOSIT}) | ROCK_TYPES
+
+# Objects the terrain generator places; ground-layer items may not cover them.
+NATURAL_OBJECT_TYPES: frozenset[str] = EXTRACTABLE_TYPES | frozenset({BUSH})
 
 # object_type -> units of material the untouched object holds
 DEFAULT_REMAINING: Mapping[str, int] = {
@@ -56,6 +117,8 @@ DEFAULT_REMAINING: Mapping[str, int] = {
     "rock_medium": 2,
     "rock_large": 4,
     "boulder": 6,
+    REEDS: 3,
+    CLAY_DEPOSIT: 6,
 }
 
 # object_type -> item kind yielded per extracted unit
@@ -65,6 +128,8 @@ EXTRACT_YIELD: Mapping[str, str] = {
     "rock_medium": STONE,
     "rock_large": STONE,
     "boulder": STONE,
+    REEDS: FIBER,
+    CLAY_DEPOSIT: CLAY,
 }
 
 # object_type -> the wielded tool that speeds extraction up
@@ -74,6 +139,7 @@ EXTRACT_TOOL: Mapping[str, str] = {
     "rock_medium": PICKAXE,
     "rock_large": PICKAXE,
     "boulder": PICKAXE,
+    CLAY_DEPOSIT: PICKAXE,
 }
 
 # Work units needed for one unit of material.
@@ -85,6 +151,7 @@ EXTRACT_WORK_WITH_TOOL = 3
 PLACED_OBJECT_TYPE: Mapping[str, str] = {
     CHEST: CHEST_OBJECT,
     MESSAGE_BOARD: MESSAGE_BOARD_OBJECT,
+    **{kind: kind for kind in sorted(BUILDING_KINDS)},
 }
 
 

@@ -128,7 +128,56 @@ function objectsAt(tick) {
       object_type: 'tree',
       state: {},
     },
+    ...settlementObjects(tick),
   ];
+}
+
+/**
+ * A little built settlement so the building sprites and the two object layers
+ * (a floor under a bed) can be seen without a real recording.
+ */
+function settlementObjects(tick) {
+  const objects = [];
+  const push = (type, x, y, state = {}) =>
+    objects.push({
+      object_id: `${type}_${x}_${y}`,
+      position: { x, y },
+      object_type: type,
+      state: { owner: 'ada', ...state },
+    });
+
+  // A hut: wood walls round the outside, a door in the south wall.
+  for (let x = 20; x <= 24; x++) {
+    for (let y = 8; y <= 11; y++) {
+      const onEdge = x === 20 || x === 24 || y === 8 || y === 11;
+      if (!onEdge) continue;
+      if (x === 22 && y === 11) push('door', x, y);
+      else push('wood_wall', x, y);
+    }
+  }
+  // Wooden floor inside, with furniture standing on it.
+  for (let x = 21; x <= 23; x++) {
+    for (let y = 9; y <= 10; y++) push('wood_floor', x, y);
+  }
+  push('bed', 21, 9);
+  push('table', 22, 9);
+  push('chair', 22, 10);
+
+  // A stone workshop next door; its table is being taken apart.
+  for (let x = 26; x <= 27; x++) {
+    for (let y = 9; y <= 10; y++) push('stone_floor', x, y);
+  }
+  push('stone_wall', 26, 8);
+  push('stone_wall', 27, 8);
+  push('workshop_table', 27, 9, { progress: String(tick % 3) });
+
+  // A road out of the front door, and raw material by the water.
+  for (let x = 18; x <= 24; x++) push('road', x, 12);
+  push('reeds', 16, 16, { remaining: '3' });
+  push('reeds', 17, 16, { remaining: '3' });
+  push('clay_deposit', 16, 17, { remaining: String(6 - (tick % 7)) });
+
+  return objects;
 }
 
 /** Actions recorded at a tick. */

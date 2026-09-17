@@ -6,6 +6,8 @@ Quick reference for AI agents working on this codebase.
 
 **Current experiment**: the "settlement" scenario: 12 planner+Jev actors (pydantic-ai on OpenRouter for slow thinking, TypeSafe's Jev for per-tick action) building a settlement on the big island while wolves roam. Design and contract: [docs/05_jev_agents_design.md](docs/05_jev_agents_design.md).
 **Completed milestones**: 0, 1, 2, 3, 4, 5a, 5b, 6, procedural terrain generation, chunked terrain streaming, and the settlement mechanics (stats, hunger, combat, wolves, extraction, crafting, chests, message boards, say).
+**Building update**: settlers can gather fiber (reeds) and clay, craft planks, rope, roads, walls, floors, doors, beds, chairs, tables and a workshop table (which gates the advanced recipes), place them on two object layers, dismantle them, and rest on beds. Walls block everyone, doors block wolves. The planner has a deterministic `build` tool for lines and rectangles. The island was regenerated with groves, outcrops, reeds and clay; the settlement site is a lakeside clearing at (1540, 972). Contract: [docs/08_building.md](docs/08_building.md).
+**Cooperation update**: wolves are tuned so nobody beats them alone (16 health, bite 3, simultaneous damage: a lone swordsman loses 12 of 20 health, two armed settlers lose 6 between them). Settlers have a 60-tile `shout` channel whose events carry the speaker's position, Jev shouts when a wolf is in view and is offered a walk to anyone it hears shouting, Jev's state has a `threat` block and the actor's own name, and the planner's `look` lists every settler met. The planner is told it runs in real time: every tool result shows the tick, the ticks the turn has cost, and a `!!` alert when a wolf is near or biting that tells it to hand back to Jev with a fighting `start_stint`. The planner's tool budget is 30 per turn and soft: every tool result says what is left, and a spent budget refuses calls instead of discarding the turn. Details: "Implementation notes" in [docs/05_jev_agents_design.md](docs/05_jev_agents_design.md).
 **In progress**: milestone 7, run recording & replay — every run is recorded to `runs/<run_id>/` as gzip JSONL (not Parquet) and a replay server serves it to the viewer with seeking, playback and deep links. Contract: [docs/07_replay.md](docs/07_replay.md).
 **Not done**: milestone 8 (LLM agents) is superseded by `agents.jev_agent`.
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)
@@ -34,6 +36,7 @@ bobgame/
 
 ```bash
 ./dev.sh settlement   # 12 planner+Jev settlers on the island, wolves on (needs .env keys)
+./dev.sh settlement_peaceful   # same, wolves off: watch them build undisturbed
 ./dev.sh              # Uses 'island' config (4000x4000 procedural island, generated on first run)
 ./dev.sh foraging     # 10x10 world, alice + bob competing for berries
 ./dev.sh default      # Minimal config (single entity, no objects)
@@ -63,6 +66,13 @@ world and agents:
 Deep links are `http://localhost:5173/?run=<run_id>&tick=<n>&entity=<id>`
 (also `x`, `y`, `zoom`, `play`, `speed`, `panel`, `object`).
 
+**Detached live runs**: `tools/live_run.sh start <config> <seconds>` starts
+`./dev.sh` detached with an automatic stop, `status` prints a one-screen health
+and progress report with harmless log noise filtered out, `wait` blocks until
+the run ends, and `stop` ends it cleanly. The `live-run` sub-agent
+(`.claude/agents/live-run.md`, Haiku) drives this script and reports back; use
+it instead of babysitting a run yourself.
+
 **Analysis**: `python tools/analyze_run.py` summarises `runs/latest` — stints,
 Jev latency, planner tool use, failures, world-level deaths/wolves/crafts — and
 prints a "notable moments" list where every line carries a deep link. Pass a run
@@ -88,7 +98,7 @@ cd viewer && npm run dev
 **Terrain tools**:
 ```bash
 cd world && uv run python -m world.terrain              # Standalone terrain generation CLI
-uv run python tools/visualize_world.py <map.npz> [out]  # Render a saved map to PNG (output is gitignored)
+uv run --with pillow python tools/visualize_world.py <map.npz> [out] [--crop X,Y,SIZE --scale N --mark X,Y]  # Render a saved map (or a zoomed crop) to PNG
 ```
 
 ## Key Files by Component
@@ -98,6 +108,7 @@ uv run python tools/visualize_world.py <map.npz> [out]  # Render a saved map to 
 - `tick.py` - Async tick loop with deadline handling
 - `movement.py` - Claim-resolve-enact conflict resolution
 - `foraging.py` - Collect/eat/extract actions and bush regeneration
+- `items.py` - Item/object kinds, layers, blocking sets, extraction maps (the building contract in code; agents mirror it in `jev_agent/items.py`)
 - `combat.py`, `crafting.py`, `containers.py`, `stats.py`, `wolves.py` - settlement mechanics (see docs/05)
 - `settlement.py` - Settlement site finder and spawn placement
 - `tick_context.py` - TickContext with one `submit_intent` dispatcher for all intent types
@@ -147,6 +158,7 @@ See component CLAUDE.md files for detailed architecture decisions:
 - `viewer/CLAUDE.md` - Phaser rendering, WebSocket integration
 - `agents/CLAUDE.md` - Agent implementation patterns, foraging, intent submission
 - `docs/07_replay.md` - Run recording formats, replay protocol, deep links
+- `docs/08_building.md` - Materials, recipes, layers, blocking, dismantling, resting, site thresholds
 
 ## Sprite Index
 

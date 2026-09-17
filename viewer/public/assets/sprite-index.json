@@ -724,6 +724,11 @@
     "frame": 24,
     "spritesheet": "Items/ShortWep.png"
   },
+  "bed": {
+    "columns": 8,
+    "frame": 72,
+    "spritesheet": "Objects/Decor0.png"
+  },
   "berry-bush-empty": {
     "columns": 8,
     "frame": 34,
@@ -738,6 +743,11 @@
     "columns": 8,
     "frame": 10,
     "spritesheet": "Items/Rock.png"
+  },
+  "chair": {
+    "columns": 8,
+    "frame": 56,
+    "spritesheet": "Objects/Decor0.png"
   },
   "chest-closed": {
     "animationFrames": [
@@ -754,10 +764,20 @@
     "frame": 0,
     "spritesheet": "Items/Chest0.png"
   },
+  "clay-deposit": {
+    "columns": 8,
+    "frame": 54,
+    "spritesheet": "Objects/Ground0.png"
+  },
   "dirt-full": {
     "columns": 21,
     "frame": 400,
     "spritesheet": "Objects/Floor.png"
+  },
+  "door": {
+    "columns": 8,
+    "frame": 0,
+    "spritesheet": "Objects/Door0.png"
   },
   "grass-flavor-1": {
     "columns": 8,
@@ -819,6 +839,16 @@
     "frame": 26,
     "spritesheet": "Items/ShortWep.png"
   },
+  "reeds": {
+    "columns": 12,
+    "frame": 399,
+    "spritesheet": "Objects/Tree0.png"
+  },
+  "road": {
+    "columns": 21,
+    "frame": 99,
+    "spritesheet": "Objects/Floor.png"
+  },
   "rock-large": {
     "columns": 8,
     "frame": 8,
@@ -844,15 +874,30 @@
     "frame": 2,
     "spritesheet": "Objects/Tile.png"
   },
+  "stone-floor": {
+    "columns": 21,
+    "frame": 148,
+    "spritesheet": "Objects/Floor.png"
+  },
   "stone-ground": {
     "columns": 21,
     "frame": 162,
     "spritesheet": "Objects/Floor.png"
   },
+  "stone-wall": {
+    "columns": 20,
+    "frame": 123,
+    "spritesheet": "Objects/Wall.png"
+  },
   "sword": {
     "columns": 8,
     "frame": 8,
     "spritesheet": "Items/ShortWep.png"
+  },
+  "table": {
+    "columns": 8,
+    "frame": 57,
+    "spritesheet": "Objects/Decor0.png"
   },
   "water": {
     "columns": 8,
@@ -874,9 +919,24 @@
     "frame": 32,
     "spritesheet": "Characters/Dog0.png"
   },
+  "wood-floor": {
+    "columns": 21,
+    "frame": 652,
+    "spritesheet": "Objects/Floor.png"
+  },
   "wood-floor-full": {
     "columns": 21,
     "frame": 407,
     "spritesheet": "Objects/Floor.png"
+  },
+  "wood-wall": {
+    "columns": 20,
+    "frame": 130,
+    "spritesheet": "Objects/Wall.png"
+  },
+  "workshop-table": {
+    "columns": 8,
+    "frame": 39,
+    "spritesheet": "Objects/Decor0.png"
   }
 }

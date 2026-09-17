@@ -343,3 +343,105 @@ uv run python -m world.replay --runs-dir ../runs --port 8766
 
 Opening an island run costs ~10 s and ~1.2 GB (726k objects, the same cost the
 live server pays at startup); it is paid once per run id. Seeks are sub-ms.
+
+## Building Mechanics (docs/08_building.md)
+
+Contract: [docs/08_building.md](../docs/08_building.md); `items.py` is the same
+contract in code.
+
+### Recipes
+
+`crafting.RECIPES` maps a recipe name to a frozen `Recipe(inputs, output_count,
+needs_workshop)`. A workshop recipe only succeeds while the crafter stands on
+or 8-adjacent to a placed `workshop_table` (`crafting.workshop_nearby`, which
+scans the 9 neighbouring tiles rather than every object in the world).
+
+### Two placement layers
+
+`containers.process_place_phase` puts at most one ground-layer object (`road`,
+`wood_floor`, `stone_floor`) and one structure-layer object on a tile; a
+structure may stand on a ground object. Ground kinds go on the placer's own
+tile when `PlaceIntent.direction is None` (proto `DIRECTION_UNSPECIFIED`) and
+may not cover a natural object. Only structures need the tile free of entities.
+Placed objects carry `owner`; only message boards get `notes` and only chests
+get `contents`.
+
+### Blocking index
+
+Movement resolution treats a tile as free only when its occupant's own move
+succeeds. A follower whose leader lost a conflict fails with
+`destination_occupied`, and that failure propagates back along a chain. (Before
+this fix two settlers could end up on one tile, and the position index raised
+`KeyError` a few ticks later, killing the tick loop; the loop now also logs
+`tick_loop_crashed` with the traceback.)
+
+`World` keeps `_blocked_positions` / `_wolf_blocked_positions` (per-tile
+counts), maintained in `add_object`, `remove_object` and `update_object`. Use
+`world.is_passable(position, entity_type)` — never bare `is_walkable` — in
+movement validation (including the diagonal corner rule), wolf steering and
+spawn placement. Walls block everyone; doors block `entity_type == "wolf"`
+only. Observations flip `Tile.walkable` to false on wall tiles so agent path
+finding needs no new concept; door tiles stay walkable.
+
+### Dismantling and resting
+
+An `ExtractIntent` aimed at a `BUILDING_KINDS` object dismantles it:
+`DISMANTLE_WORK` work units, one per action, no tool bonus, progress in the
+object's `progress` state key, `ObjectRemoved` plus one item back to whoever
+lands the last blow. `RestIntent` heals `REST_HEAL` on a bed on or next to the
+entity's tile; one rester per bed per tick (smallest entity id wins) and only
+while hunger is above zero. The rest phase sits beside eat in `process_tick`.
+
+## Terrain Objects and the Settlement Site (docs/08_building.md)
+
+### Object placement (`terrain/objects.py`)
+
+Every pass is a vectorised Bernoulli draw against a probability field built
+from `PlacementFields` (floor, forest density, ridged noise, slope, and four
+distance fields: any water, ocean, fresh water, mountains). Noise masks go
+through `uniformise()` (z-score -> normal CDF) so a threshold of `t` leaves
+about `1 - t` of the map above it; tune thresholds as area fractions.
+
+- **Trees**: `canopy_field` = broad forest regions x grove-scale noise through a
+  narrow smoothstep: dense stands, clearings, soft edges, copses in the open.
+  Trees thin toward the *ocean* only; they come down to river and lake banks.
+  Outcrops suppress trees, so stony ground opens glades.
+- **Rocks**: `outcrop_field` = patch noise x ridged noise, plus patchy scree at
+  mountain feet, plus rare strays. Size follows the field: boulders at the
+  heart of an outcrop, small stones at the rim.
+- **Bushes**: thickets along canopy edges, in a band back from water.
+- **Reeds**: bank tiles within `reed_bank_width` of fresh water and in lake/ford
+  shallows, in stands; never near the ocean. Reeds can sit on shallow water.
+- **Clay**: tight clusters 2-7 tiles back from fresh water, on grass/dirt.
+- One natural object per tile. Order: reeds, clay, trees, rocks, bushes.
+
+Fresh water = rivers + fords + lakes; `split_ocean_and_lakes` labels open water
+and calls anything not touching the map border a lake.
+
+### Terrain fixes made alongside
+
+- `priority_flood_fill` adds `FILL_EPSILON` per step, so filled flats still
+  drain. Without it rivers died a few hundred tiles from their source.
+- `_apply_mountain_cap` keeps the highest-scoring candidates (it used to take a
+  random subset with the global numpy RNG: one-tile mountains, not reproducible).
+- Rivers: 6-9 per island, sources >= 150 tiles from open water, >= 400 apart.
+
+### Settlement site (`settlement.py`)
+
+`find_settlement_site` tests **every tile** exactly with integral-image box
+sums (about 2.5 s on 4000x4000). Requirements are the constants at the top of
+the module (`MINIMUMS`, `CLEARING_SIZE`, `MIN_LAND_FRACTION`). Score =
+min capped supply ratio + 0.3 x mean ratio + openness of the 27 x 27 square;
+ties go to the smallest (y, x).
+
+### Regenerating the island
+
+```bash
+cd world && uv run python -m world.terrain --seed 12345 -o saves/island.npz   # ~3 min
+uv run --with pillow python ../tools/visualize_world.py ../saves/island.npz out.png \
+    --crop 1540,972,120 --scale 8 --mark 1540,972
+```
+
+With seed 12345 the settlement centre is (1540, 972): a lakeside clearing on a
+neck of land between two lakes, forest behind, an outcrop and a mountain to the
+north-east.

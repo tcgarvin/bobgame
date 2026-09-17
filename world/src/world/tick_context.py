@@ -26,6 +26,7 @@ from .types import (
     MoveIntent,
     PickupIntent,
     PlaceIntent,
+    RestIntent,
     SayIntent,
     WaitIntent,
     WithdrawIntent,
@@ -51,6 +52,7 @@ INTENT_ACTION_TYPES: Mapping[type[EntityIntent], str] = {
     EquipIntent: "equip",
     PlaceIntent: "place",
     WriteNoteIntent: "write_note",
+    RestIntent: "rest",
     SayIntent: "say",
     WaitIntent: "wait",
 }
@@ -215,6 +217,12 @@ class TickContext:
         self, intent: WriteNoteIntent, enforce_deadline: bool = True
     ) -> bool:
         """Submit a write_note intent. Returns True if accepted."""
+        return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
+
+    def submit_rest_intent(
+        self, intent: RestIntent, enforce_deadline: bool = True
+    ) -> bool:
+        """Submit a rest intent. Returns True if accepted."""
         return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
 
     def submit_say_intent(

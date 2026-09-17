@@ -4,12 +4,15 @@
  <tile id="120" type="bobtile"/>
  <tile id="121" type="bobtile"/>
  <tile id="122" type="bobtile"/>
- <tile id="123" type="bobtile"/>
+ <tile id="123" type="bobtile">
+  <properties>
+   <property name="key" value="stone-wall"/>
+  </properties>
+ </tile>
  <tile id="124" type="bobtile"/>
  <tile id="127" type="bobtile"/>
  <tile id="128" type="bobtile"/>
  <tile id="129" type="bobtile"/>
- <tile id="130" type="bobtile"/>
  <tile id="131" type="bobtile"/>
  <tile id="140" type="bobtile"/>
  <tile id="141" type="bobtile"/>
@@ -27,4 +30,9 @@
  <tile id="167" type="bobtile"/>
  <tile id="169" type="bobtile"/>
  <tile id="171" type="bobtile"/>
+ <tile id="130" type="bobtile">
+  <properties>
+   <property name="key" value="wood-wall"/>
+  </properties>
+ </tile>
 </tileset>

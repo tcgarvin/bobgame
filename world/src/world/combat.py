@@ -13,12 +13,12 @@ from .events import (
 )
 from .exceptions import EntityNotFoundError
 from .items import attack_damage
-from .state import Entity, World
+from .state import WOLF_ENTITY_TYPE, Entity, World
 from .types import AttackIntent, is_adjacent
 
 logger = structlog.get_logger()
 
-WOLF_TYPE = "wolf"
+WOLF_TYPE = WOLF_ENTITY_TYPE
 
 
 def apply_damage(

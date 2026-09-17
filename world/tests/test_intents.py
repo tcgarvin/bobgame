@@ -23,6 +23,7 @@ from world.types import (
     MoveIntent,
     PickupIntent,
     PlaceIntent,
+    RestIntent,
     Position,
     SayIntent,
     WaitIntent,
@@ -118,6 +119,8 @@ class TestSubmitIntent:
             CraftIntent(entity_id="bob", recipe="axe"),
             EquipIntent(entity_id="bob", kind="axe"),
             PlaceIntent(entity_id="bob", kind="chest", direction=Direction.EAST),
+            PlaceIntent(entity_id="bob", kind="road"),
+            RestIntent(entity_id="bob", object_id="bed_1"),
             WriteNoteIntent(entity_id="bob", object_id="board_1", slot=0),
             SayIntent(entity_id="bob", text="hi"),
             WaitIntent(entity_id="bob"),
@@ -165,6 +168,7 @@ class TestProtoConversion:
                 pb.Intent(write_note=pb.WriteNoteIntent(object_id="b", slot=1)),
                 WriteNoteIntent,
             ),
+            (pb.Intent(rest=pb.RestIntent(object_id="bed_1")), RestIntent),
             (pb.Intent(say=pb.SayIntent(text="hi")), SayIntent),
             (pb.Intent(wait=pb.WaitIntent()), WaitIntent),
         ]
@@ -192,9 +196,17 @@ class TestProtoConversion:
             pb.Intent(eat=pb.EatIntent()),
             pb.Intent(attack=pb.AttackIntent()),
             pb.Intent(craft=pb.CraftIntent()),
+            pb.Intent(rest=pb.RestIntent()),
+            pb.Intent(place=pb.PlaceIntent(direction=pb.EAST)),
         ):
             with pytest.raises(IntentConversionError):
                 intent_from_proto("bob", proto_intent)
+
+    def test_place_without_a_direction_means_the_entitys_own_tile(self) -> None:
+        place = intent_from_proto("bob", pb.Intent(place=pb.PlaceIntent(kind="road")))
+
+        assert isinstance(place, PlaceIntent)
+        assert place.direction is None
 
 
 class TestTickPipeline:
@@ -223,6 +235,17 @@ class TestTickPipeline:
         result = process_tick(world, ctx)
 
         assert result.utterances[0].channel == "thought"
+
+    def test_shout_channel_is_accepted(self) -> None:
+        world = _world()
+        ctx = _context(world)
+        ctx.submit_intent(
+            "bob", SayIntent(entity_id="bob", text="wolf!", channel="shout")
+        )
+
+        result = process_tick(world, ctx)
+
+        assert result.utterances[0].channel == "shout"
 
     def test_attack_then_death_populates_every_list(self) -> None:
         world = _world()

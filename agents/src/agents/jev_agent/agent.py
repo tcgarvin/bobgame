@@ -22,7 +22,7 @@ from .. import world_pb2 as pb
 from .client import WorldClient
 from .jevclient import JevClient, TypeSafeJevClient
 from .planner import Planner
-from .stint import Brief, Stint, StintReport
+from .stint import Brief, Stint, StintDriver, StintReport
 from .tracelog import AgentTrace, resolve_log_root
 from .worldmodel import TickDigest, WorldModel
 
@@ -46,6 +46,7 @@ class _StintRequest:
 
     brief: Brief
     future: asyncio.Future[StintReport]
+    driver: StintDriver | None = None
 
 
 @dataclass
@@ -99,10 +100,18 @@ class JevAgent:
         """The shared world model, updated at the top of every tick."""
         return self._model
 
-    async def run_stint(self, brief: Brief) -> StintReport:
-        """Queue a stint and wait for the tick loop to finish running it."""
+    async def run_stint(
+        self, brief: Brief, driver: StintDriver | None = None
+    ) -> StintReport:
+        """Queue a stint and wait for the tick loop to finish running it.
+
+        With a `driver`, code chooses the action every tick and Jev is not
+        called at all; that is how the planner's `build` tool works.
+        """
         future: asyncio.Future[StintReport] = asyncio.get_running_loop().create_future()
-        await self._stint_requests.put(_StintRequest(brief=brief, future=future))
+        await self._stint_requests.put(
+            _StintRequest(brief=brief, future=future, driver=driver)
+        )
         return await future
 
     async def direct_action(self, intent: pb.Intent, description: str) -> str:
@@ -249,6 +258,7 @@ class JevAgent:
             self._model,
             self.jev,
             trace=self.trace,
+            driver=request.driver,
         )
         self._active_stint = stint
         self.mode = MODE_STINT
