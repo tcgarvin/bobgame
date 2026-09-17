@@ -169,3 +169,56 @@ The agent is submitting intents for an old tick. Ensure you use `observation.tic
 
 ### Intent rejected with "invalid_lease"
 Lease expired. Call `lease_stub.RenewLease()` periodically (default expiry is 30s).
+
+## JevAgent (planner + Jev)
+
+`agents.jev_agent` is the two-layer settler agent described in
+[docs/05_jev_agents_design.md](../docs/05_jev_agents_design.md). Run it with:
+
+```bash
+cd agents
+set -a; . ../.env; set +a          # TYPESAFE_API_KEY, OPENROUTER_API_KEY
+uv run python -m agents.jev_agent --entity ada --server localhost:50051
+```
+
+Flags: `--log-root` (default `./logs`), `--planner-model`, `--jev-model`,
+`--log-level`. Logs go to stderr; per-tick Jev traces go to
+`logs/agent-<id>/stints.jsonl` and planner notes to `logs/agent-<id>/memory.md`.
+
+### Module map
+
+| Module | Responsibility |
+| --- | --- |
+| `client.py` | Async wrapper over the sync gRPC stubs (stream on a thread, unary via `to_thread`), lease renewal every 10 s |
+| `geometry.py` | Direction tables, offsets, Chebyshev distance (`+y` is south) |
+| `pathfinding.py` | 8-connected A* with the world's diagonal-blocking rule; unknown tiles cost 3 |
+| `worldmodel.py` | Everything ever observed: tiles, objects, entities, own history, settlement |
+| `options.py` | The legal actions for this tick, each carrying its proto Intent |
+| `jevstate.py` | The compact JSON state (with the 17x17 ASCII map) Jev sees |
+| `jevclient.py` | The TypeSafe System One call; `JevClient` protocol for fakes |
+| `stint.py` | `Brief` -> one Jev call per tick -> Intent, plus the code rules and `StintReport` |
+| `planner.py` | The pydantic-ai agent, its tools, and the turn loop |
+| `agent.py` | The tick loop and the planner handshake |
+
+### The two modes
+
+- **Stint**: Jev picks one action per tick from the code-enumerated options.
+  The stint ends on two consecutive `eject >= 0.7`, an exhausted tick budget,
+  death, or the same failed action three times running.
+- **Planning**: the tick loop submits `Wait` (or one `Say` on the `thought`
+  channel when the planner produces a new reflection) while the planner task
+  thinks. Planner tools reach the tick loop through asyncio Futures, so
+  `start_stint` resolves only when the stint has actually finished.
+
+Jev and the planner never run at the same time: during a stint the planner task
+is parked on the `start_stint` future, and during planning Jev is not called.
+
+### Testing
+
+```bash
+cd agents && uv run pytest -q          # offline; a scripted fake replaces Jev
+uv run mypy src/agents/jev_agent
+uv run black src/agents/jev_agent tests
+```
+
+`tests/helpers.py` builds synthetic `Observation` protos and the `FakeJevClient`.

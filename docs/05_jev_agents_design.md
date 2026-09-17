@@ -461,3 +461,38 @@ observation and viewer services: `move_results`, `action_results`
   edible (20 hunger per unit).
 - `run_ticks()` accepts an optional `wolf_simulator`; `TickLoop` has
   `wolves_enabled: bool = False` plus `wolf_seed: int = 1337`.
+
+### Agents track
+
+- **Settlement position is inferred, not observed.** `Observation` carries no
+  settlement field, so `WorldModel` uses the first observed self position as the
+  settlement centre and re-anchors it on the actor's own `EntityRespawned`
+  event (respawns happen at the settlement spawn). If the observation proto
+  later gains a settlement field, `WorldModel.settlement` should read it.
+- **Module split.** The doc's "stint" responsibilities are spread over four
+  modules for readability: `options.py` (legal-option enumeration and the
+  option -> Intent mapping), `jevstate.py` (state building and the ASCII map),
+  `jevclient.py` (the TypeSafe call and the `JevClient` protocol that fakes
+  implement), and `stint.py` (the tick loop, code rules, JSONL log, and
+  `StintReport`). `geometry.py` holds directions and distance helpers.
+- **Blocking objects.** Pathfinding treats `tree` and all rock types as
+  occupying their tile (mirroring `world/settlement.py`'s
+  `BLOCKING_OBJECT_TYPES`). Travel to such an object finishes on an adjacent
+  tile. Being wrong here only costs a slightly longer path.
+- **`place:` options are capped at one direction per placeable kind** so the
+  40-option budget is not eaten by eight near-identical placements. The planner
+  can still call `place(kind, direction)` for any direction.
+- **`drop` is not offered to Jev** (it is not in the doc's option list either);
+  the planner's `drop` tool covers it.
+- **Say options** use a fixed phrase table (`help`, `wolf_here`, `come_here`,
+  `all_good`); free-text speech stays a planner tool.
+- **Planner tool errors use `ModelRetry`.** An unknown direction or recipe is
+  reported back to the model rather than raised, so the turn can correct itself.
+- **Per-turn tool budget.** The 12-call cap is enforced with pydantic-ai's
+  `UsageLimits(tool_calls_limit=12)`; hitting it ends the turn normally rather
+  than erroring.
+- **`PLANNER_MODEL`** is prefixed with `openrouter:` only when it looks like a
+  bare OpenRouter id (contains `/` and no `:`), so `provider:model` strings and
+  test models pass through unchanged.
+- **Status reporting** sends `(mode, brief, planner_thought, stint_json)` and
+  skips the RPC when nothing changed, so it is at most once per tick.
