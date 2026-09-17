@@ -21,11 +21,13 @@ from .exceptions import (
 from .combat import kill_entity, process_attack_phase
 from .containers import (
     add_items_to_ground,
+    process_give_phase,
     encode_contents,
     encode_notes,
     read_contents,
     read_notes,
 )
+from .conversations import process_conversation_phase
 from .crafting import RECIPES, Recipe, process_craft_phase
 from .items import ITEM_KINDS, attack_damage
 from .lease import Lease, LeaseManager
@@ -46,6 +48,7 @@ from .types import (
     DIRECTION_DELTAS,
     AttackIntent,
     CollectIntent,
+    ConverseIntent,
     CraftIntent,
     DepositIntent,
     Direction,
@@ -54,6 +57,7 @@ from .types import (
     EntityIntent,
     EquipIntent,
     ExtractIntent,
+    GiveIntent,
     MoveIntent,
     PickupIntent,
     PlaceIntent,
@@ -75,12 +79,14 @@ __all__ = [
     "EntityIntent",
     "AttackIntent",
     "CollectIntent",
+    "ConverseIntent",
     "CraftIntent",
     "DepositIntent",
     "DropIntent",
     "EatIntent",
     "EquipIntent",
     "ExtractIntent",
+    "GiveIntent",
     "PickupIntent",
     "PlaceIntent",
     "SayIntent",
@@ -115,7 +121,9 @@ __all__ = [
     "attack_damage",
     "kill_entity",
     "process_attack_phase",
+    "process_conversation_phase",
     "process_craft_phase",
+    "process_give_phase",
     "process_respawns",
     "process_rest_phase",
     "find_free_tile",

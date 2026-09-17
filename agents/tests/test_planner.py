@@ -6,7 +6,7 @@ import asyncio
 import gzip
 import json
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Mapping
 
 import pytest
 from pydantic_ai import ModelRetry
@@ -43,11 +43,14 @@ from agents.jev_agent.planner import (
     threat_alert,
     trim_history,
 )
+from agents.jev_agent.conversation import ConversationReport
+from agents.jev_agent.reflex import EMPTY_REFLEX, NO_REFLEX_LINE, ReflexBrief
 from agents.jev_agent.stint import Brief, StintReport
 from agents.jev_agent.tracelog import AgentTrace
-from agents.jev_agent.worldmodel import WorldModel
+from agents.jev_agent.worldmodel import TranscriptLine, WorldModel
 
 from helpers import (
+    converse_object,
     damaged_event,
     make_entity,
     make_object,
@@ -66,6 +69,10 @@ class RecordingBridge:
         self.actions: list[tuple[pb.Intent, str]] = []
         self.waits: list[int] = []
         self.thoughts: list[str] = []
+        self.reflex = EMPTY_REFLEX
+        self.reflex_notes: list[str] = []
+        self.conversation_reports: list[ConversationReport] = []
+        self.direct_result = ""
 
     @property
     def model(self) -> WorldModel:
@@ -92,11 +99,29 @@ class RecordingBridge:
 
     async def direct_action(self, intent: pb.Intent, description: str) -> str:
         self.actions.append((intent, description))
+        if self.direct_result:
+            return self.direct_result
         return f"{description} -> ok"
 
     async def wait_ticks(self, ticks: int) -> str:
         self.waits.append(ticks)
         return f"waited {ticks}"
+
+    async def await_conversation(self) -> ConversationReport | None:
+        if not self.conversation_reports:
+            return None
+        return self.conversation_reports.pop(0)
+
+    def set_reflex(self, brief: ReflexBrief) -> None:
+        self.reflex = brief
+
+    def clear_reflex(self) -> None:
+        self.reflex = EMPTY_REFLEX
+
+    def drain_reflex_notes(self, *, for_prompt: bool = False) -> list[str]:
+        notes = list(self.reflex_notes)
+        self.reflex_notes.clear()
+        return notes
 
     def set_thought(self, thought: str) -> None:
         self.thoughts.append(thought)
@@ -214,9 +239,12 @@ def test_the_prompt_states_physics_and_leaves_strategy_to_the_settlers() -> None
         assert phrase not in SETTLEMENT_NARRATIVE, phrase
 
 
-def test_the_prompt_shows_two_whole_briefs_including_shout_phrases() -> None:
-    for field in ("instruction:", "success_condition:", "max_ticks:", "shouts:"):
-        assert SETTLEMENT_NARRATIVE.count(field) == 2, field
+def test_the_prompt_shows_whole_briefs_including_shout_phrases() -> None:
+    """Two stint briefs and two reflex briefs, each shown in full."""
+    for field in ("instruction:", "success_condition:", "max_ticks:"):
+        assert SETTLEMENT_NARRATIVE.count(field) == 4, field
+    assert SETTLEMENT_NARRATIVE.count("shouts:") == 2
+    assert SETTLEMENT_NARRATIVE.count("trigger_distance:") == 2
 
 
 def test_the_example_shouts_are_not_about_wolves() -> None:
@@ -889,3 +917,199 @@ async def test_dismantle_and_rest_submit_their_intents(
     submitted = [intent for intent, _ in bridge.actions]
     assert any(intent.HasField("rest") for intent in submitted)
     assert any(intent.HasField("extract") for intent in submitted)
+
+
+# -- reflex and conversation tools (docs/09) ---------------------------------
+
+
+def _call_tool(tool_name: str, args: Mapping[str, object]) -> FunctionModel:
+    """A model that calls `tool_name` once with `args`, then writes a line."""
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if len(messages) == 1:
+            return ModelResponse(parts=[ToolCallPart(tool_name, json.dumps(args))])
+        return ModelResponse(parts=[TextPart(str(messages[-1].parts[0].content))])
+
+    return FunctionModel(respond)
+
+
+def _conversation_report() -> ConversationReport:
+    """A finished conversation, as the tick loop would hand it to a tool."""
+    return ConversationReport(
+        conversation_id="conv_1",
+        start_tick=5,
+        end_tick=20,
+        participants=("ada", "mira"),
+        end_reason="closed",
+        transcript=(TranscriptLine(6, "ada", "Who needs planks?"),),
+        note="mira needs planks",
+    )
+
+
+async def test_set_reflex_registers_a_brief_and_clear_reflex_removes_it(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(model=TestModel(call_tools=["set_reflex"])):
+        await agent.run("go", deps=deps)
+    assert bridge.reflex.registered
+    assert 1 <= bridge.reflex.trigger_distance <= 8
+
+    with agent.override(model=TestModel(call_tools=["clear_reflex"])):
+        await agent.run("go", deps=deps)
+    assert bridge.reflex == EMPTY_REFLEX
+
+
+async def test_an_out_of_range_trigger_distance_is_clamped(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool(
+            "set_reflex",
+            {
+                "instruction": "Go to the beds.",
+                "success_condition": "you stand by a bed",
+                "max_ticks": 10,
+                "trigger_distance": 40,
+            },
+        )
+    ):
+        await agent.run("go", deps=deps)
+    assert bridge.reflex.trigger_distance == 8
+
+
+async def test_the_prompt_shows_the_reflex_brief_and_any_reflex_report(
+    bridge: RecordingBridge, tmp_path: Path
+) -> None:
+    planner = Planner(bridge, "ada", model_name="test", trace=AgentTrace.disabled())
+    assert NO_REFLEX_LINE in planner.build_prompt()
+
+    bridge.reflex = ReflexBrief(
+        instruction="Walk to the beds.",
+        success_condition="you are next to a bed",
+        max_ticks=10,
+        trigger_distance=5,
+    )
+    bridge.reflex_notes = [
+        "[reflex ran ticks 3-9: ended because threat_gone; " "health 20 -> 17]"
+    ]
+    prompt = planner.build_prompt()
+    assert "Walk to the beds." in prompt
+    assert "[reflex ran ticks 3-9" in prompt
+
+
+async def test_a_reflex_report_is_appended_to_the_next_tool_result(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.reflex_notes = [
+        "[reflex ran ticks 3-9: ended because death; " "health 6 -> 0]"
+    ]
+    agent = build_planner_agent("test")
+    with agent.override(model=TestModel(call_tools=["recall"])):
+        result = await agent.run("go", deps=deps)
+    assert "[reflex ran ticks 3-9" in result.output
+
+
+async def test_look_lists_the_conversations_in_view(world_model: WorldModel) -> None:
+    world_model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            objects=[converse_object("conv_1", (11, 10), ["mira"], utterances=2)],
+        )
+    )
+    summary = describe_world(world_model)
+    assert "conversations in view:" in summary
+    assert "conv_1 at (11, 10): mira" in summary
+    assert "3 free seats" in summary
+
+
+async def test_open_conversation_submits_the_intent_and_returns_the_report(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.direct_result = "open a conversation to the E -> converse ok: open conv_1"
+    bridge.conversation_reports = [_conversation_report()]
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool(
+            "open_conversation",
+            {"direction": "E", "opening_line": "Who needs planks?"},
+        )
+    ):
+        result = await agent.run("go", deps=deps)
+
+    intent, _ = bridge.actions[-1]
+    assert intent.converse.action == "open"
+    assert intent.converse.text == "Who needs planks?"
+    assert intent.converse.direction == pb.EAST
+    assert "CONVERSATION REPORT: conv_1" in result.output
+
+
+async def test_a_refused_open_does_not_wait_for_a_conversation(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.direct_result = (
+        "open a conversation to the E -> converse failed: anchor is occupied by "
+        "an entity"
+    )
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool("open_conversation", {"direction": "E", "opening_line": "hi"})
+    ):
+        result = await agent.run("go", deps=deps)
+
+    assert "anchor is occupied" in result.output
+    assert "CONVERSATION REPORT" not in result.output
+
+
+async def test_join_conversation_refuses_a_conversation_it_cannot_see(
+    deps: PlannerDeps,
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool("join_conversation", {"conversation_id": "conv_9"})
+    ):
+        result = await agent.run("go", deps=deps)
+    assert "you have not seen a conversation" in result.output
+
+
+async def test_join_conversation_walks_then_joins(
+    deps: PlannerDeps, bridge: RecordingBridge, world_model: WorldModel
+) -> None:
+    world_model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            objects=[converse_object("conv_1", (11, 10), ["mira"])],
+        )
+    )
+    bridge.direct_result = "join conv_1 -> converse ok: join conv_1"
+    bridge.conversation_reports = [_conversation_report()]
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool("join_conversation", {"conversation_id": "conv_1"})
+    ):
+        result = await agent.run("go", deps=deps)
+
+    intent, _ = bridge.actions[-1]
+    assert intent.converse.action == "join"
+    assert intent.converse.conversation_id == "conv_1"
+    assert not bridge.briefs, "already next to the anchor: no walk is needed"
+    assert "CONVERSATION REPORT: conv_1" in result.output
+
+
+async def test_give_submits_a_give_intent(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool("give", {"entity_id": "mira", "kind": "plank", "amount": 3})
+    ):
+        await agent.run("go", deps=deps)
+
+    intent, description = bridge.actions[-1]
+    assert intent.give.target_entity_id == "mira"
+    assert intent.give.kind == "plank"
+    assert intent.give.amount == 3
+    assert description == "give 3 plank to mira"

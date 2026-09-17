@@ -9,7 +9,6 @@ moments (craft this, place that) where a whole stint would be overkill.
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,13 +25,30 @@ from pydantic_ai.messages import (
     ToolCallPart,
     UserPromptPart,
 )
-from pydantic_ai.models.openrouter import OpenRouterModelSettings
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.toolsets import FunctionToolset, ToolsetTool, WrapperToolset
 
 from .. import world_pb2 as pb
 from . import items
+from .conversation import (
+    ACTION_JOIN,
+    ACTION_OPEN,
+    ApproachDriver,
+    ConversationReport,
+    converse_intent,
+    free_seat_tiles,
+    give_intent,
+)
+from .llm import DEFAULT_PLANNER_MODEL, planner_model_settings, resolve_model_name
+from .reflex import (
+    MAX_TRIGGER_DISTANCE,
+    MIN_TRIGGER_DISTANCE,
+    REFLEX_CLEAR_TICKS,
+    REFLEX_COOLDOWN_TICKS,
+    ReflexBrief,
+    clamp_trigger_distance,
+)
 from .build import (
     BuildExecutor,
     BuildPlanError,
@@ -54,7 +70,6 @@ from .worldmodel import HeardUtterance, WorldModel
 
 logger = structlog.get_logger(__name__)
 
-DEFAULT_PLANNER_MODEL = "qwen/qwen3.7-flash"
 # The per-turn tool budget is soft: every tool result tells the model how many
 # calls are left, and a call past the budget is refused with a message instead
 # of being run. The turn then ends normally, with its reflection and history
@@ -71,25 +86,6 @@ STINT_REPORTS_KEPT = 10
 # A new turn opens with an alert when the actor was bitten this recently.
 RECENT_ATTACK_TICKS = 5
 TURN_RETRY_SECONDS = 5.0
-
-
-def planner_model_settings(model_name: str) -> OpenRouterModelSettings:
-    """Per-model settings: reasoning off where allowed, low effort otherwise.
-
-    Reasoning traces multiply planner latency; the planner gets its thinking
-    from tool calls and the reflection paragraph instead. Some endpoints
-    (GLM 5.x, MiniMax) refuse to disable reasoning, so they get low effort.
-    """
-    mandatory_reasoning = ("glm-5", "minimax")
-    if any(marker in model_name for marker in mandatory_reasoning):
-        reasoning: dict[str, object] = {"effort": "low"}
-    else:
-        reasoning = {"enabled": False}
-    return OpenRouterModelSettings(
-        openrouter_reasoning=reasoning,  # type: ignore[typeddict-item]
-        temperature=0.7,
-        timeout=90.0,
-    )
 
 
 SETTLEMENT_NARRATIVE = f"""\
@@ -122,6 +118,50 @@ Voices and writing:
 - A message board holds twenty notes that anyone standing near it can read and
   overwrite.
 - `look` lists every settler you have met by name and where you last saw them.
+
+Conversations:
+- A conversation is an object on an anchor tile. `open_conversation` puts one on
+  the tile next to you in the direction you name and says your opening line out
+  loud, so everyone within {items.SAY_RADIUS} tiles hears it and where it came from.
+  `join_conversation` walks you to a free tile beside an anchor and takes a
+  seat. `look` lists the conversations in view with their free seats.
+- A conversation holds {items.CONVERSATION_MAX_PARTICIPANTS} settlers. They take turns in the order they joined,
+  one line per turn, at most {items.CONVERSATION_TEXT_LIMIT} characters. A turn nobody uses within
+  {items.CONVERSATION_TURN_TICKS} ticks counts as a pass. It closes when fewer than two are left, when
+  everyone passes in one full round, or after {items.CONVERSATION_MAX_UTTERANCES} lines. An opener nobody
+  joins within {items.CONVERSATION_LONELY_TICKS} ticks closes too.
+- While you are in a conversation you answer turn by turn at world speed, not
+  as the planner; `open_conversation` and `join_conversation` return once it is
+  over, with the transcript, what changed hands and the note you kept.
+- `give` hands items to a settler standing next to you or seated in the same
+  conversation. It is a single-tick tool and it can be used inside or outside a
+  conversation.
+
+Reflex:
+- `set_reflex` registers one brief that code runs for you, without asking you,
+  the moment a living wolf comes within `trigger_distance` ({MIN_TRIGGER_DISTANCE} to {MAX_TRIGGER_DISTANCE} tiles) or
+  something damages you. It has the same fields as a Jev brief plus that
+  distance, it survives across turns, and `clear_reflex` removes it. There is
+  none until you write one. Two reflexes of opposite shape, to show the form
+  only; the content is yours:
+    instruction: "Walk back to the workshop table and wait there."
+    success_condition: "you are standing next to the workshop table"
+    max_ticks: 20
+    trigger_distance: 6
+  and
+    instruction: "Stay where you are and attack whatever is attacking you."
+    success_condition: "nothing next to you is attacking you"
+    max_ticks: 40
+    trigger_distance: 2
+- It fires while you are thinking, while a single-tick tool or a `wait` is in
+  flight, while you are in a conversation, and during a `build` or `travel_to`;
+  it never interrupts a `start_stint` you are already running. Whatever was in
+  flight comes back as "interrupted: reflex stint started".
+- The reflex stint ends when no wolf has been in view for {REFLEX_CLEAR_TICKS} ticks, or on its
+  own tick budget, on death, or the usual stint endings. After it ends, the
+  distance trigger is ignored for {REFLEX_COOLDOWN_TICKS} ticks; damage always triggers it. You are
+  told afterwards, in a line that says when it ran, why it stopped and what
+  your health did.
 
 Materials:
 - wood comes from a tree (4 units), faster with an axe.
@@ -207,6 +247,22 @@ class AgentBridge(Protocol):
 
     async def wait_ticks(self, ticks: int) -> str:
         """Do nothing for `ticks` ticks."""
+
+    async def await_conversation(self) -> ConversationReport | None:
+        """Block until the conversation just opened or joined has ended."""
+
+    @property
+    def reflex(self) -> ReflexBrief:
+        """The brief code runs when a wolf is close or the actor is bitten."""
+
+    def set_reflex(self, brief: ReflexBrief) -> None:
+        """Register (or replace) the reflex brief."""
+
+    def clear_reflex(self) -> None:
+        """Forget the reflex brief."""
+
+    def drain_reflex_notes(self, *, for_prompt: bool = False) -> list[str]:
+        """Reflex report lines not yet shown, emptied as they are taken."""
 
     def set_thought(self, thought: str) -> None:
         """Publish the planner's latest reflection to the viewer."""
@@ -337,7 +393,11 @@ class BudgetedToolset(WrapperToolset[PlannerDeps]):
         budget.used += 1
         result = await self.wrapped.call_tool(name, tool_args, ctx, tool)
         model = ctx.deps.bridge.model
-        lines = [str(result), turn_clock_line(model, budget.turn_start_tick)]
+        lines = [str(result)]
+        # A reflex may have run inside the tool call (or while the model was
+        # writing it); the planner is told as soon as it asks anything.
+        lines.extend(ctx.deps.bridge.drain_reflex_notes())
+        lines.append(turn_clock_line(model, budget.turn_start_tick))
         since_tick = alert_window_start(model.tick, budget.turn_start_tick)
         alert = threat_alert(model, since_tick)
         if alert:
@@ -426,6 +486,16 @@ def _roster_lines(model: WorldModel) -> list[str]:
             f"  {entity.entity_id} at {entity.position} "
             f"(d{chebyshev(entity.position, model.position)}, {when}{state})"
         )
+    return lines
+
+
+def _conversation_lines(model: WorldModel) -> list[str]:
+    """The conversations in view: id, anchor, who is seated, free seats."""
+    conversations = model.conversations()
+    if not conversations:
+        return ["conversations in view: none"]
+    lines = ["conversations in view:"]
+    lines.extend(f"  {conversation.summary()}" for conversation in conversations)
     return lines
 
 
@@ -530,6 +600,7 @@ def describe_world(model: WorldModel) -> str:
         lines.append("entities in view: none")
 
     lines.extend(_roster_lines(model))
+    lines.extend(_conversation_lines(model))
 
     heard = model.recent_utterances(5)
     if heard:
@@ -673,8 +744,170 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
         return f"{report.to_text()}\n{executor.summary()}"
 
     _register_single_tick_tools(tools)
+    _register_conversation_tools(tools)
+    _register_reflex_tools(tools)
     _register_memory_tools(tools)
     return agent
+
+
+def action_succeeded(outcome: str) -> bool:
+    """Whether a direct-action result line reports a successful world action.
+
+    `direct_action` renders the world's own event as `<what> -> <type> ok: ...`
+    or `<what> -> <type> failed: ...`, and `-> submitted` when no event came
+    back at all.
+    """
+    return " ok:" in outcome
+
+
+def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
+    async def _sit_through(ctx: RunContext[PlannerDeps], outcome: str) -> str:
+        """Wait out the conversation the last action started, then report it."""
+        if not action_succeeded(outcome):
+            return outcome
+        report = await ctx.deps.bridge.await_conversation()
+        if report is None:
+            return f"{outcome}\nno conversation started"
+        return f"{outcome}\n{report.to_text()}"
+
+    @tools.tool
+    async def open_conversation(
+        ctx: RunContext[PlannerDeps], direction: str, opening_line: str
+    ) -> str:
+        """Open a conversation next to you and stay in it until it is over.
+
+        The anchor is the neighbouring tile in `direction`; it must be free.
+        The opening line is said out loud, with the conversation attached to
+        it, so everyone within ten tiles hears it and can walk over and join.
+        This call returns when the conversation has ended, with the transcript,
+        what changed hands and the note you kept.
+
+        Args:
+            direction: N, NE, E, SE, S, SW, W or NW: where the anchor tile goes.
+            opening_line: what you say as you open it, at most 300 characters.
+        """
+        value = _direction_value(direction)
+        outcome = await ctx.deps.bridge.direct_action(
+            converse_intent(ACTION_OPEN, text=opening_line, direction=value),
+            f"open a conversation to the {direction.strip().upper()}",
+        )
+        return await _sit_through(ctx, outcome)
+
+    @tools.tool
+    async def join_conversation(
+        ctx: RunContext[PlannerDeps], conversation_id: str, max_ticks: int = 40
+    ) -> str:
+        """Walk to a conversation you can see, take a seat, and talk until it ends.
+
+        Code does the walking: it picks a free tile next to the anchor and goes
+        there. The call returns when the conversation has ended.
+
+        Args:
+            conversation_id: the id `look` printed for it.
+            max_ticks: tick budget for the walk there.
+        """
+        bridge = ctx.deps.bridge
+        conversation = bridge.model.conversation_by_id(conversation_id)
+        if conversation is None:
+            return f"you have not seen a conversation called {conversation_id!r}"
+        if conversation.free_seats <= 0:
+            return (
+                f"{conversation_id} has no free seat "
+                f"({len(conversation.participants)} settlers in it)"
+            )
+        walked = ""
+        if chebyshev(bridge.model.position, conversation.anchor) != 1:
+            walked = await _walk_to_anchor(ctx, conversation_id, max_ticks)
+            if chebyshev(bridge.model.position, conversation.anchor) != 1:
+                return f"{walked}\nyou are not next to {conversation_id} yet"
+        outcome = await bridge.direct_action(
+            converse_intent(ACTION_JOIN, conversation_id=conversation_id),
+            f"join {conversation_id}",
+        )
+        seated = await _sit_through(ctx, outcome)
+        return f"{walked}\n{seated}" if walked else seated
+
+    @tools.tool
+    async def give(
+        ctx: RunContext[PlannerDeps], entity_id: str, kind: str, amount: int = 1
+    ) -> str:
+        """Hand items to a settler next to you or seated in your conversation.
+
+        Args:
+            entity_id: who receives them.
+            kind: the item name, exactly as your inventory spells it.
+            amount: how many.
+        """
+        return await ctx.deps.bridge.direct_action(
+            give_intent(entity_id, kind, amount),
+            f"give {max(1, amount)} {kind} to {entity_id}",
+        )
+
+
+async def _walk_to_anchor(
+    ctx: RunContext[PlannerDeps], conversation_id: str, max_ticks: int
+) -> str:
+    """Run the code-owned walk to a free tile beside the conversation's anchor."""
+    bridge = ctx.deps.bridge
+    conversation = bridge.model.conversation_by_id(conversation_id)
+    if conversation is None:
+        return f"{conversation_id} is gone"
+    tiles = free_seat_tiles(bridge.model, conversation.anchor)
+    if not tiles:
+        return f"every tile next to {conversation_id} is taken or blocked"
+    driver = ApproachDriver(tiles, f"a free tile next to {conversation_id}")
+    brief = Brief(
+        instruction=f"Walk to a free tile next to {conversation_id}.",
+        success_condition=f"you are standing next to {conversation.anchor}",
+        max_ticks=max(1, max_ticks),
+    )
+    report = await bridge.run_stint(brief, driver)
+    return report.to_text()
+
+
+def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
+    @tools.tool
+    async def set_reflex(
+        ctx: RunContext[PlannerDeps],
+        instruction: str,
+        success_condition: str,
+        max_ticks: int,
+        trigger_distance: int,
+        notes: str = "",
+        shouts: Sequence[str] = (),
+    ) -> str:
+        """Register the brief code runs for you when a wolf is near or you are hit.
+
+        It replaces any reflex you had, it is kept across turns, and it fires
+        while you are thinking, while a single-tick tool or a wait is in
+        flight, while you are in a conversation, and during build or
+        travel_to. It never interrupts a start_stint.
+
+        Args:
+            instruction: what Jev should do, concretely, when it fires.
+            success_condition: what Jev should be able to see when it is done.
+            max_ticks: tick budget for the reflex stint.
+            trigger_distance: how close a living wolf must be to start it, 1 to 8
+                tiles. Damage from an attacker starts it whatever the distance.
+            notes: extra hints for Jev, as in start_stint.
+            shouts: the exact phrases Jev may shout while the reflex runs.
+        """
+        brief = ReflexBrief(
+            instruction=instruction,
+            success_condition=success_condition,
+            max_ticks=max(1, max_ticks),
+            trigger_distance=clamp_trigger_distance(trigger_distance),
+            notes=notes,
+            shouts=_validated_shouts(shouts),
+        )
+        ctx.deps.bridge.set_reflex(brief)
+        return f"reflex registered: {brief.prompt_line()}"
+
+    @tools.tool
+    async def clear_reflex(ctx: RunContext[PlannerDeps]) -> str:
+        """Remove your reflex brief; nothing runs for you until you set another."""
+        ctx.deps.bridge.clear_reflex()
+        return "reflex cleared"
 
 
 def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
@@ -975,12 +1208,7 @@ class Planner:
         model_name: str = "",
         trace: AgentTrace,
     ) -> None:
-        resolved = model_name or os.environ.get("PLANNER_MODEL", DEFAULT_PLANNER_MODEL)
-        # Bare OpenRouter ids look like "vendor/model"; anything else (such as
-        # "test" or an explicit "provider:model") is passed through untouched.
-        if ":" not in resolved and "/" in resolved:
-            resolved = f"openrouter:{resolved}"
-        self.model_name = resolved
+        self.model_name = resolve_model_name(model_name)
         self.bridge = bridge
         self.entity_id = entity_id
         self.trace = trace
@@ -1010,6 +1238,8 @@ class Planner:
         parts.append(describe_world(model))
         if self.reports:
             parts.append("Most recent stint:\n" + self.reports[-1].to_text())
+        parts.extend(self.bridge.drain_reflex_notes(for_prompt=True))
+        parts.append(self.bridge.reflex.prompt_line())
         parts.append("Your notes:\n" + read_memory(self.memory_path))
         parts.append(
             "Decide what to do next. Use start_stint for anything that takes "

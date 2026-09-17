@@ -15,6 +15,7 @@ from ..events import ActionResult
 from ..lease import LeaseManager
 from ..state import Entity, World
 from ..tick import TickContext, TickLoop, TickResult
+from ..items import CONVERSATION_CHANNEL
 from ..types import AUDIBLE_CHANNELS, LOCAL_CHANNEL, SHOUT_CHANNEL, Position
 
 logger = structlog.get_logger()
@@ -29,6 +30,8 @@ SHOUT_RADIUS = 60
 HEARING_RADIUS_BY_CHANNEL: Mapping[str, int] = {
     LOCAL_CHANNEL: HEARING_RADIUS,
     SHOUT_CHANNEL: SHOUT_RADIUS,
+    # Conversation lines carry at local range, so bystanders can listen in.
+    CONVERSATION_CHANNEL: HEARING_RADIUS,
 }
 
 
@@ -230,6 +233,7 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
                         position=pb.Position(
                             x=utterance.position.x, y=utterance.position.y
                         ),
+                        conversation_id=utterance.conversation_id,
                     )
                 )
             )

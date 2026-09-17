@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 import structlog
 
@@ -47,6 +47,19 @@ END_TICKS = "ticks_exhausted"
 END_DEATH = "death"
 END_REPEATED_FAILURE = "repeated_failure"
 END_CANCELLED = "cancelled"
+# A reflex stint pre-empted this one (docs/09 section 4.2).
+END_PREEMPTED_BY_REFLEX = "reflex"
+# The actor took a seat in a conversation, which owns the body from now on.
+END_JOINED_CONVERSATION = "joined_conversation"
+
+# `kind` on the `stint_start` trace line: what sort of stint this is.
+STINT_KIND_ORDINARY = "stint"
+STINT_KIND_REFLEX = "reflex"
+
+
+def _never_ends(model: "WorldModel") -> str:
+    """The default extra end rule: no stint ends because of it."""
+    return ""
 
 
 @dataclass(frozen=True)
@@ -195,6 +208,15 @@ class StintReport:
     action_counts: Mapping[str, tuple[int, int]]
     notable: Sequence[str]
     tail: Sequence[str]
+    # Blocks appended after the report body: the reflex line for a stint a
+    # reflex cut short, and the conversation report for a stint that ended by
+    # joining one. The planner's tool call returns all of it in one result.
+    appended: list[str] = field(default_factory=list)
+
+    def append(self, text: str) -> None:
+        """Add a block of text below the report body."""
+        if text:
+            self.appended.append(text)
 
     def to_text(self) -> str:
         """Render the report for the planner's prompt."""
@@ -224,6 +246,7 @@ class StintReport:
         if self.tail:
             lines.append("  last ticks:")
             lines.extend(f"    {item}" for item in self.tail)
+        lines.extend(self.appended)
         return "\n".join(lines)
 
 
@@ -238,8 +261,14 @@ class Stint:
         *,
         trace: AgentTrace,
         driver: StintDriver | None = None,
+        end_check: "Callable[[WorldModel], str]" = _never_ends,
+        kind: str = STINT_KIND_ORDINARY,
+        start_fields: Mapping[str, Any] | None = None,
     ) -> None:
         self.brief = brief
+        self.end_check = end_check
+        self.kind = kind
+        self.start_fields = dict(start_fields or {})
         self.model = model
         self.jev = jev
         self.trace = trace
@@ -280,7 +309,9 @@ class Stint:
                     "entity_id": self.model.entity_id,
                     "tick": self.model.tick,
                     "stint_id": self.stint_id,
+                    "kind": self.kind,
                     "brief": self.brief.as_payload(),
+                    **self.start_fields,
                 }
             )
 
@@ -458,6 +489,9 @@ class Stint:
             return END_SUCCESS_OR_JUDGEMENT
         if self._failure_count >= REPEATED_FAILURE_LIMIT:
             return END_REPEATED_FAILURE
+        extra = self.end_check(self.model)
+        if extra:
+            return extra
         if self.driver is not None:
             # Asked before the action, so the last tick's record is always
             # flushed by the tick loop before the stint reports.

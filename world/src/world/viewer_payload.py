@@ -136,6 +136,7 @@ def utterance_payload(utterance: UtteranceEvent) -> dict[str, Any]:
         "channel": utterance.channel,
         "text": utterance.text,
         "position": position_state(utterance.position),
+        "conversation_id": utterance.conversation_id,
     }
 
 

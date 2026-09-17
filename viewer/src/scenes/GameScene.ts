@@ -12,6 +12,7 @@ import { ChunkManager, ViewportTracker } from '../terrain';
 import { INSPECTABLE_TYPES, ObjectPanel, OverlayUI, ReplayBar } from '../ui';
 import type { DeepLinkParams, DeepLinkState } from '../DeepLink';
 import { buildQuery, buildUrl, parseDeepLink, resolveWsUrl } from '../DeepLink';
+import { CONVERSATION_TYPE, parseConversationParticipants } from '../conversation';
 
 const TILE_SIZE = 16;
 const SCALE = 3; // Scale up for visibility (16 * 3 = 48px per tile)
@@ -99,6 +100,18 @@ const GROUND_LAYER_TYPES = new Set(['road', 'wood_floor', 'stone_floor']);
 const GROUND_OBJECT_DEPTH = 4;
 const STRUCTURE_OBJECT_DEPTH = 5;
 
+/** Draw depths for the conversation marker and its lines to participants. */
+const CONVERSATION_LINE_DEPTH = 6;
+const CONVERSATION_MARKER_DEPTH = 7;
+
+/** Radius (px) of the conversation marker drawn on its anchor tile. */
+const CONVERSATION_MARKER_RADIUS = 10;
+const CONVERSATION_LINE_COLOR = 0x9aa0c0;
+const CONVERSATION_SPEAKER_COLOR = 0xffe066;
+
+/** Utterance channels rendered as speech bubbles (`local`, `shout`, `conversation`). */
+const SPEECH_BUBBLE_CHANNELS = new Set(['local', 'shout', 'conversation']);
+
 // Bush sprites are special - they have state-dependent sprites
 const BUSH_SPRITE_FULL = 'berry-bush-full';
 const BUSH_SPRITE_EMPTY = 'berry-bush-empty';
@@ -149,6 +162,10 @@ export class GameScene extends Phaser.Scene {
   private damageFlashUntil: Map<string, number> = new Map();
   private connectionText?: Phaser.GameObjects.Text;
   private statusBars?: Phaser.GameObjects.Graphics;
+  /** Marker on each conversation's anchor tile, keyed by object id. */
+  private conversationMarkers: Map<string, Phaser.GameObjects.Graphics> = new Map();
+  /** One shared graphics object for the anchor-to-participant lines, redrawn every frame. */
+  private conversationLines?: Phaser.GameObjects.Graphics;
 
   // Chunk-based terrain
   private chunkManager?: ChunkManager;
@@ -230,6 +247,10 @@ export class GameScene extends Phaser.Scene {
     // Graphics layer for health/hunger bars and the selection ring
     this.statusBars = this.add.graphics();
     this.statusBars.setDepth(15);
+
+    // Graphics layer for conversation anchor-to-participant lines
+    this.conversationLines = this.add.graphics();
+    this.conversationLines.setDepth(CONVERSATION_LINE_DEPTH);
 
     // Setup camera dev tools
     this.setupCameraControls();
@@ -475,6 +496,23 @@ export class GameScene extends Phaser.Scene {
 
     // Handle object changes
     this.worldState.onObjectChange((action, obj) => {
+      if (obj.objectType === CONVERSATION_TYPE) {
+        // Conversations have no sprite: a marker plus lines to participants,
+        // drawn with Phaser graphics (see createConversationMarker). `updated`
+        // needs no extra work here: the lines are redrawn every frame from
+        // the latest object state in `update()`.
+        if (action === 'added') {
+          this.createConversationMarker(obj);
+          if (this.pendingObjectId && obj.objectId === this.pendingObjectId) {
+            this.pendingObjectId = '';
+            this.selectObject(obj.objectId);
+          }
+        } else if (action === 'removed') {
+          this.removeConversationMarker(obj.objectId);
+        }
+        return;
+      }
+
       if (action === 'added') {
         this.createObjectSprite(obj);
         if (this.pendingObjectId && obj.objectId === this.pendingObjectId) {
@@ -668,9 +706,9 @@ export class GameScene extends Phaser.Scene {
     this.damageFlashUntil.delete(entityId);
   }
 
-  /** Show a spoken (`local` or `shout`) utterance above the speaker for a few seconds. */
+  /** Show a spoken (`local`, `shout` or `conversation`) utterance above the speaker for a few seconds. */
   private showSpeechBubble(utterance: UtteranceEvent): void {
-    if (utterance.channel !== 'local' && utterance.channel !== 'shout') return;
+    if (!SPEECH_BUBBLE_CHANNELS.has(utterance.channel)) return;
 
     const existing = this.speechBubbles.get(utterance.speaker_id);
     if (existing) {
@@ -771,6 +809,85 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.objectSprites.set(obj.objectId, sprite);
+  }
+
+  /**
+   * Draw the marker for a conversation object on its anchor tile. There is no
+   * sprite for this in the tileset, so it is drawn with Phaser graphics: a
+   * small speech-bubble shape, clickable to open the object inspector.
+   */
+  private createConversationMarker(obj: TrackedObject): void {
+    this.conversationMarkers.get(obj.objectId)?.destroy();
+
+    const posX = obj.position.x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+    const posY = obj.position.y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+
+    const marker = this.add.graphics();
+    marker.setDepth(CONVERSATION_MARKER_DEPTH);
+    marker.fillStyle(0xffe066, 0.9);
+    marker.lineStyle(2, 0x333333, 1);
+    marker.fillCircle(0, 0, CONVERSATION_MARKER_RADIUS);
+    marker.strokeCircle(0, 0, CONVERSATION_MARKER_RADIUS);
+    marker.fillTriangle(
+      -4,
+      CONVERSATION_MARKER_RADIUS - 2,
+      4,
+      CONVERSATION_MARKER_RADIUS - 2,
+      0,
+      CONVERSATION_MARKER_RADIUS + 6
+    );
+    marker.setPosition(posX, posY);
+    marker.setInteractive(
+      new Phaser.Geom.Circle(0, 0, CONVERSATION_MARKER_RADIUS),
+      Phaser.Geom.Circle.Contains
+    );
+    marker.on('pointerdown', () => this.selectObject(obj.objectId));
+
+    this.conversationMarkers.set(obj.objectId, marker);
+  }
+
+  private removeConversationMarker(objectId: string): void {
+    this.conversationMarkers.get(objectId)?.destroy();
+    this.conversationMarkers.delete(objectId);
+  }
+
+  /**
+   * Redraw the lines from every live conversation's anchor to each current
+   * participant's rendered position, highlighting the current speaker's line.
+   * Runs every frame since participants move; state (participants, speaker)
+   * comes straight from the latest tracked object.
+   */
+  private updateConversationLines(): void {
+    const g = this.conversationLines;
+    if (!g) return;
+    g.clear();
+
+    for (const obj of this.worldState.getObjects()) {
+      if (obj.objectType !== CONVERSATION_TYPE) continue;
+
+      const anchorX = obj.position.x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+      const anchorY = obj.position.y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+      const speaker = obj.state.speaker ?? '';
+
+      for (const participantId of parseConversationParticipants(obj.state.participants)) {
+        const entity = this.worldState.getEntity(participantId);
+        if (!entity || !entity.alive) continue;
+
+        const ex = entity.currentX * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+        const ey = entity.currentY * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+        const isSpeaker = participantId !== '' && participantId === speaker;
+
+        g.lineStyle(
+          isSpeaker ? 3 : 1,
+          isSpeaker ? CONVERSATION_SPEAKER_COLOR : CONVERSATION_LINE_COLOR,
+          isSpeaker ? 0.95 : 0.5
+        );
+        g.beginPath();
+        g.moveTo(anchorX, anchorY);
+        g.lineTo(ex, ey);
+        g.strokePath();
+      }
+    }
   }
 
   private objectSpriteKey(obj: TrackedObject): string | null {
@@ -990,6 +1107,9 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
+    // Redraw conversation anchor-to-participant lines
+    this.updateConversationLines();
+
     // Update viewport tracker (requests new chunks when camera moves)
     this.viewportTracker?.update();
 
@@ -1098,5 +1218,10 @@ export class GameScene extends Phaser.Scene {
     if (this.chunkManager) {
       this.chunkManager.clear();
     }
+    // Cleanup conversation markers (the shared lines graphics is destroyed with the scene)
+    for (const marker of this.conversationMarkers.values()) {
+      marker.destroy();
+    }
+    this.conversationMarkers.clear();
   }
 }

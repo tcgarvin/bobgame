@@ -321,16 +321,18 @@ class EntityActed(_message.Message):
     def __init__(self, entity_id: _Optional[str] = ..., action_type: _Optional[str] = ..., success: bool = ..., details: _Optional[str] = ...) -> None: ...
 
 class Utterance(_message.Message):
-    __slots__ = ("speaker_id", "channel", "text", "position")
+    __slots__ = ("speaker_id", "channel", "text", "position", "conversation_id")
     SPEAKER_ID_FIELD_NUMBER: _ClassVar[int]
     CHANNEL_FIELD_NUMBER: _ClassVar[int]
     TEXT_FIELD_NUMBER: _ClassVar[int]
     POSITION_FIELD_NUMBER: _ClassVar[int]
+    CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
     speaker_id: str
     channel: str
     text: str
     position: Position
-    def __init__(self, speaker_id: _Optional[str] = ..., channel: _Optional[str] = ..., text: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ...) -> None: ...
+    conversation_id: str
+    def __init__(self, speaker_id: _Optional[str] = ..., channel: _Optional[str] = ..., text: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ..., conversation_id: _Optional[str] = ...) -> None: ...
 
 class ObjectChanged(_message.Message):
     __slots__ = ("object_id", "field", "old_value", "new_value")
@@ -357,7 +359,7 @@ class SubmitIntentRequest(_message.Message):
     def __init__(self, lease_id: _Optional[str] = ..., entity_id: _Optional[str] = ..., tick_id: _Optional[int] = ..., intent: _Optional[_Union[Intent, _Mapping]] = ...) -> None: ...
 
 class Intent(_message.Message):
-    __slots__ = ("move", "pickup", "use", "say", "wait", "collect", "eat", "attack", "extract", "craft", "equip", "place", "drop", "deposit", "withdraw", "write_note", "rest")
+    __slots__ = ("move", "pickup", "use", "say", "wait", "collect", "eat", "attack", "extract", "craft", "equip", "place", "drop", "deposit", "withdraw", "write_note", "rest", "converse", "give")
     MOVE_FIELD_NUMBER: _ClassVar[int]
     PICKUP_FIELD_NUMBER: _ClassVar[int]
     USE_FIELD_NUMBER: _ClassVar[int]
@@ -375,6 +377,8 @@ class Intent(_message.Message):
     WITHDRAW_FIELD_NUMBER: _ClassVar[int]
     WRITE_NOTE_FIELD_NUMBER: _ClassVar[int]
     REST_FIELD_NUMBER: _ClassVar[int]
+    CONVERSE_FIELD_NUMBER: _ClassVar[int]
+    GIVE_FIELD_NUMBER: _ClassVar[int]
     move: MoveIntent
     pickup: PickupIntent
     use: UseIntent
@@ -392,7 +396,9 @@ class Intent(_message.Message):
     withdraw: WithdrawIntent
     write_note: WriteNoteIntent
     rest: RestIntent
-    def __init__(self, move: _Optional[_Union[MoveIntent, _Mapping]] = ..., pickup: _Optional[_Union[PickupIntent, _Mapping]] = ..., use: _Optional[_Union[UseIntent, _Mapping]] = ..., say: _Optional[_Union[SayIntent, _Mapping]] = ..., wait: _Optional[_Union[WaitIntent, _Mapping]] = ..., collect: _Optional[_Union[CollectIntent, _Mapping]] = ..., eat: _Optional[_Union[EatIntent, _Mapping]] = ..., attack: _Optional[_Union[AttackIntent, _Mapping]] = ..., extract: _Optional[_Union[ExtractIntent, _Mapping]] = ..., craft: _Optional[_Union[CraftIntent, _Mapping]] = ..., equip: _Optional[_Union[EquipIntent, _Mapping]] = ..., place: _Optional[_Union[PlaceIntent, _Mapping]] = ..., drop: _Optional[_Union[DropIntent, _Mapping]] = ..., deposit: _Optional[_Union[DepositIntent, _Mapping]] = ..., withdraw: _Optional[_Union[WithdrawIntent, _Mapping]] = ..., write_note: _Optional[_Union[WriteNoteIntent, _Mapping]] = ..., rest: _Optional[_Union[RestIntent, _Mapping]] = ...) -> None: ...
+    converse: ConverseIntent
+    give: GiveIntent
+    def __init__(self, move: _Optional[_Union[MoveIntent, _Mapping]] = ..., pickup: _Optional[_Union[PickupIntent, _Mapping]] = ..., use: _Optional[_Union[UseIntent, _Mapping]] = ..., say: _Optional[_Union[SayIntent, _Mapping]] = ..., wait: _Optional[_Union[WaitIntent, _Mapping]] = ..., collect: _Optional[_Union[CollectIntent, _Mapping]] = ..., eat: _Optional[_Union[EatIntent, _Mapping]] = ..., attack: _Optional[_Union[AttackIntent, _Mapping]] = ..., extract: _Optional[_Union[ExtractIntent, _Mapping]] = ..., craft: _Optional[_Union[CraftIntent, _Mapping]] = ..., equip: _Optional[_Union[EquipIntent, _Mapping]] = ..., place: _Optional[_Union[PlaceIntent, _Mapping]] = ..., drop: _Optional[_Union[DropIntent, _Mapping]] = ..., deposit: _Optional[_Union[DepositIntent, _Mapping]] = ..., withdraw: _Optional[_Union[WithdrawIntent, _Mapping]] = ..., write_note: _Optional[_Union[WriteNoteIntent, _Mapping]] = ..., rest: _Optional[_Union[RestIntent, _Mapping]] = ..., converse: _Optional[_Union[ConverseIntent, _Mapping]] = ..., give: _Optional[_Union[GiveIntent, _Mapping]] = ...) -> None: ...
 
 class AttackIntent(_message.Message):
     __slots__ = ("target_entity_id",)
@@ -505,6 +511,28 @@ class SayIntent(_message.Message):
 class WaitIntent(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class ConverseIntent(_message.Message):
+    __slots__ = ("action", "direction", "conversation_id", "text")
+    ACTION_FIELD_NUMBER: _ClassVar[int]
+    DIRECTION_FIELD_NUMBER: _ClassVar[int]
+    CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    action: str
+    direction: Direction
+    conversation_id: str
+    text: str
+    def __init__(self, action: _Optional[str] = ..., direction: _Optional[_Union[Direction, str]] = ..., conversation_id: _Optional[str] = ..., text: _Optional[str] = ...) -> None: ...
+
+class GiveIntent(_message.Message):
+    __slots__ = ("target_entity_id", "kind", "amount")
+    TARGET_ENTITY_ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    AMOUNT_FIELD_NUMBER: _ClassVar[int]
+    target_entity_id: str
+    kind: str
+    amount: int
+    def __init__(self, target_entity_id: _Optional[str] = ..., kind: _Optional[str] = ..., amount: _Optional[int] = ...) -> None: ...
 
 class CollectIntent(_message.Message):
     __slots__ = ("object_id", "item_type", "amount")

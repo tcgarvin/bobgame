@@ -15,7 +15,7 @@ class ActionResult:
     """Outcome of a non-movement action submitted by an entity."""
 
     entity_id: str
-    action_type: str  # attack, extract, collect, pickup, withdraw, drop, deposit, craft, equip, place, write_note, eat, say, wait
+    action_type: str  # attack, extract, collect, pickup, withdraw, drop, deposit, craft, equip, place, write_note, eat, say, converse, give, wait
     success: bool
     details: str = ""
 
@@ -45,9 +45,11 @@ class RespawnEvent:
 @dataclass(frozen=True)
 class UtteranceEvent:
     speaker_id: str
-    channel: str  # "local" | "thought"
+    channel: str  # "local" | "shout" | "conversation" | "thought"
     text: str
     position: Position
+    # Set for `conversation` lines and for a conversation's opening line.
+    conversation_id: str = ""
 
 
 @dataclass(frozen=True)

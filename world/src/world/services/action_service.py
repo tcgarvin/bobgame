@@ -9,8 +9,10 @@ from ..conversion import direction_from_proto
 from ..lease import LeaseManager
 from ..tick import TickLoop
 from ..types import (
+    CONVERSE_ACTIONS,
     AttackIntent,
     CollectIntent,
+    ConverseIntent,
     CraftIntent,
     DepositIntent,
     DropIntent,
@@ -18,6 +20,7 @@ from ..types import (
     EntityIntent,
     EquipIntent,
     ExtractIntent,
+    GiveIntent,
     MoveIntent,
     PickupIntent,
     PlaceIntent,
@@ -160,6 +163,29 @@ def intent_from_proto(entity_id: str, intent: pb.Intent) -> EntityIntent:
             entity_id=entity_id,
             text=intent.say.text,
             channel=intent.say.channel or "local",
+        )
+
+    if action == "converse":
+        if intent.converse.action not in CONVERSE_ACTIONS:
+            raise IntentConversionError("unknown_converse_action")
+        return ConverseIntent(
+            entity_id=entity_id,
+            action=intent.converse.action,
+            direction=direction_from_proto(intent.converse.direction),
+            conversation_id=intent.converse.conversation_id,
+            text=intent.converse.text,
+        )
+
+    if action == "give":
+        if not intent.give.target_entity_id:
+            raise IntentConversionError("missing_target")
+        if not intent.give.kind:
+            raise IntentConversionError("missing_kind")
+        return GiveIntent(
+            entity_id=entity_id,
+            target_entity_id=intent.give.target_entity_id,
+            kind=intent.give.kind,
+            amount=intent.give.amount or 1,
         )
 
     if action == "wait":

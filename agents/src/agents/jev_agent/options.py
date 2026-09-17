@@ -96,6 +96,11 @@ SHOUT_KEY_PREFIX = "shout:"
 HEARD_SHOUT_MAX_AGE_TICKS = 20
 HEARD_SHOUT_KEY_PREFIX = "travel_to:shout:"
 
+# Conversations. Joining one is a seat at a turn-taking table; the walk to a
+# free tile next to the anchor is code-owned, like the heard-shout walk.
+JOIN_CONVERSATION_KEY_PREFIX = "join_conversation:"
+JOIN_CONVERSATION_OPTION_LIMIT = 2
+
 # Object types worth walking across the map for.
 TRAVEL_TARGET_TYPES: frozenset[str] = (
     frozenset(
@@ -177,6 +182,7 @@ def enumerate_options(
     inventory = dict(model.self_info.inventory)
 
     options.extend(_survival_options(model, inventory, position, travel, shouts))
+    options.extend(_conversation_options(model, position, travel))
     options.extend(_travel_control_options(model, travel))
     options.extend(_interaction_options(model, inventory, position))
     options.extend(_crafting_options(model, inventory))
@@ -304,6 +310,69 @@ def _heard_shout_options(
             )
         ]
     return []
+
+
+def _conversation_options(
+    model: WorldModel, position: Coord, travel: TravelState | None
+) -> list[Option]:
+    """Joining a conversation in view that still has a free seat.
+
+    Next to the anchor the option is the join intent itself; further away it is
+    a code-owned walk to the anchor, exactly like the heard-shout option.
+    """
+    if model.my_conversation() is not None:
+        return []
+    options: list[Option] = []
+    for conversation in model.conversations():
+        if len(options) >= JOIN_CONVERSATION_OPTION_LIMIT:
+            break
+        if conversation.free_seats <= 0:
+            continue
+        distance = chebyshev(conversation.anchor, position)
+        seated = ", ".join(conversation.participants) or "nobody"
+        key = f"{JOIN_CONVERSATION_KEY_PREFIX}{conversation.conversation_id}"
+        if distance == 1:
+            options.append(
+                Option(
+                    key=key,
+                    description=(
+                        f"join the conversation {conversation.conversation_id} "
+                        f"with {seated}; in it you speak when your turn comes "
+                        f"round, and {conversation.free_seats} seats are free"
+                    ),
+                    intent=pb.Intent(
+                        converse=pb.ConverseIntent(
+                            action="join",
+                            conversation_id=conversation.conversation_id,
+                        )
+                    ),
+                    clears_travel=True,
+                )
+            )
+            continue
+        if distance == 0:
+            # Standing on the anchor is not a seat; a move option gets off it.
+            continue
+        path = find_path(model, position, conversation.anchor, stop_adjacent=True)
+        if not path:
+            continue
+        options.append(
+            Option(
+                key=key,
+                description=(
+                    f"walk to the conversation {conversation.conversation_id} "
+                    f"with {seated}, {distance} tiles away, and take one of its "
+                    f"{conversation.free_seats} free seats"
+                ),
+                intent=_move(direction_between(position, path[0])),
+                travel_target=TravelState(
+                    target=conversation.anchor,
+                    label=f"the conversation {conversation.conversation_id}",
+                    stop_adjacent=True,
+                ),
+            )
+        )
+    return options
 
 
 def _rest_options(model: WorldModel) -> list[Option]:

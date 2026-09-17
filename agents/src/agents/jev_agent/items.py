@@ -121,6 +121,19 @@ SHOUT_CHANNEL = "shout"
 SAY_RADIUS = 10
 SHOUT_RADIUS = 60
 
+# --- Conversations (mirrors world/items.py, docs/09) -------------------------
+
+CONVERSATION = "conversation"
+CONVERSATION_CHANNEL = "conversation"
+CONVERSATION_MAX_PARTICIPANTS = 4
+# A turn nobody used within this many ticks counts as a pass.
+CONVERSATION_TURN_TICKS = 10
+# A conversation with only its opener closes after this many ticks.
+CONVERSATION_LONELY_TICKS = 20
+CONVERSATION_MAX_UTTERANCES = 40
+CONVERSATION_TEXT_LIMIT = 300
+CONVERSATION_TRANSCRIPT_KEPT = 12
+
 
 # --- Recipes ---------------------------------------------------------------
 

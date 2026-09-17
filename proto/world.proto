@@ -237,6 +237,7 @@ message Utterance {
   string channel = 2;
   string text = 3;
   Position position = 4;
+  string conversation_id = 5;  // set for channel "conversation" and for the opening line
 }
 
 message ObjectChanged {
@@ -280,6 +281,8 @@ message Intent {
     WithdrawIntent withdraw = 15;
     WriteNoteIntent write_note = 16;
     RestIntent rest = 17;
+    ConverseIntent converse = 18;
+    GiveIntent give = 19;
   }
 }
 
@@ -371,6 +374,31 @@ message SayIntent {
 }
 
 message WaitIntent {}
+
+// Conversations (docs/09_conversation_and_reflex.md). A conversation is a
+// world object of type "conversation" on its anchor tile; participants stand
+// on tiles adjacent to the anchor and speak in world-enforced turns.
+//   action "open":  anchor is the neighbouring tile in `direction`; `text` is
+//                   the opening line, heard on the local channel.
+//   action "join":  `conversation_id` names the conversation; the entity must
+//                   be adjacent to its anchor.
+//   action "speak": `text` is said on the "conversation" channel; only the
+//                   participant whose turn it is may speak.
+//   action "pass":  give up the turn without speaking.
+//   action "leave": stop being a participant.
+message ConverseIntent {
+  string action = 1;
+  Direction direction = 2;
+  string conversation_id = 3;
+  string text = 4;
+}
+
+// Hand items to another entity that is adjacent or in the same conversation.
+message GiveIntent {
+  string target_entity_id = 1;
+  string kind = 2;
+  int32 amount = 3;  // default 1
+}
 
 message CollectIntent {
   string object_id = 1;   // Optional: specific object to collect from

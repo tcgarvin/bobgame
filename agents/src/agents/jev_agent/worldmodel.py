@@ -117,13 +117,128 @@ class HistoryEntry:
 
 @dataclass(frozen=True)
 class HeardUtterance:
-    """Something an actor said within earshot, and where they stood."""
+    """Something an actor said within earshot, and where they stood.
+
+    `conversation_id` is empty for ordinary speech; it names the conversation
+    for a line spoken in one, and for the opening line, which is heard on the
+    local channel.
+    """
 
     tick: int
     speaker_id: str
     channel: str
     text: str
     position: Coord
+    conversation_id: str = ""
+
+
+@dataclass(frozen=True)
+class TranscriptLine:
+    """One line of a conversation, as the actor heard it or as state records it."""
+
+    tick: int
+    speaker: str
+    text: str
+
+    def as_line(self) -> str:
+        """`t12 mira: hello`, the form both prompts and reports use."""
+        return f"t{self.tick} {self.speaker}: {self.text}"
+
+
+@dataclass(frozen=True)
+class ConversationInfo:
+    """A `conversation` object, parsed out of its string state.
+
+    The world's contract is docs/09_conversation_and_reflex.md section 2.1;
+    every value in object state is a string, so everything here is parsed
+    defensively and falls back to an empty or zero value.
+    """
+
+    conversation_id: str
+    anchor: Coord
+    participants: tuple[str, ...]
+    speaker: str
+    turn_started: int
+    opened_tick: int
+    opened_by: str
+    utterances: int
+    transcript: tuple[TranscriptLine, ...]
+
+    @property
+    def free_seats(self) -> int:
+        """Seats still open at this conversation."""
+        return max(0, items.CONVERSATION_MAX_PARTICIPANTS - len(self.participants))
+
+    def has(self, entity_id: str) -> bool:
+        """Whether `entity_id` currently holds a seat."""
+        return entity_id in self.participants
+
+    def summary(self) -> str:
+        """One line for `look`: who is there and how many seats are free."""
+        seated = ", ".join(self.participants) or "nobody"
+        return (
+            f"{self.conversation_id} at {self.anchor}: {seated} "
+            f"({self.free_seats} free seats, {self.utterances} lines said)"
+        )
+
+
+def _parse_participants(raw: str) -> tuple[str, ...]:
+    """Parse the `participants` JSON list; a bad value means nobody."""
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(str(entry) for entry in parsed)
+
+
+def _parse_transcript(raw: str) -> tuple[TranscriptLine, ...]:
+    """Parse the `transcript` JSON list; malformed entries are dropped."""
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    lines: list[TranscriptLine] = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        tick = entry.get("tick", 0)
+        lines.append(
+            TranscriptLine(
+                tick=tick if isinstance(tick, int) else 0,
+                speaker=str(entry.get("speaker", "")),
+                text=str(entry.get("text", "")),
+            )
+        )
+    return tuple(lines)
+
+
+def _parse_int(raw: str) -> int:
+    """A non-negative integer from object state; anything else is 0."""
+    return int(raw) if raw.isdigit() else 0
+
+
+def conversation_from_object(obj: ObjectInfo) -> ConversationInfo:
+    """Build a `ConversationInfo` from a `conversation` world object."""
+    state = obj.state
+    return ConversationInfo(
+        conversation_id=obj.object_id,
+        anchor=obj.position,
+        participants=_parse_participants(state.get("participants", "")),
+        speaker=state.get("speaker", ""),
+        turn_started=_parse_int(state.get("turn_started", "")),
+        opened_tick=_parse_int(state.get("opened_tick", "")),
+        opened_by=state.get("opened_by", ""),
+        utterances=_parse_int(state.get("utterances", "")),
+        transcript=_parse_transcript(state.get("transcript", "")),
+    )
 
 
 @dataclass(frozen=True)
@@ -141,6 +256,9 @@ class TickDigest:
 
     tick: int = 0
     own_actions: list[pb.EntityActed] = field(default_factory=list)
+    # Actions by other entities that this actor was shown, such as a `give`
+    # aimed at it. The world only sends these when they concern the actor.
+    others_actions: list[pb.EntityActed] = field(default_factory=list)
     damage_taken: int = 0
     attackers: list[str] = field(default_factory=list)
     deaths: list[str] = field(default_factory=list)
@@ -202,6 +320,10 @@ class WorldModel:
         self.history: deque[HistoryEntry] = deque(maxlen=HISTORY_LIMIT)
         self.heard: deque[HeardUtterance] = deque(maxlen=UTTERANCE_LIMIT)
         self.damage_log: deque[DamageTaken] = deque(maxlen=DAMAGE_LOG_LIMIT)
+        # Everything this actor heard inside a conversation, kept per
+        # conversation: `heard` is a short shared window, and a converser needs
+        # the whole exchange it sat through.
+        self.conversation_lines: dict[str, list[TranscriptLine]] = {}
         self.last_digest = TickDigest()
         # Position indexes rebuilt once per update() so that pathfinding's
         # walkability checks are O(1) instead of scanning every known object.
@@ -314,6 +436,7 @@ class WorldModel:
             if kind == "entity_acted":
                 acted = event.entity_acted
                 if acted.entity_id != self.entity_id:
+                    digest.others_actions.append(acted)
                     continue
                 digest.own_actions.append(acted)
                 outcome = "ok" if acted.success else "failed"
@@ -339,9 +462,12 @@ class WorldModel:
                     utterance.channel,
                     utterance.text,
                     (utterance.position.x, utterance.position.y),
+                    utterance.conversation_id,
                 )
                 self.heard.append(heard)
                 digest.utterances.append(heard)
+                if heard.conversation_id:
+                    self._remember_conversation_line(heard)
             elif kind == "entity_damaged":
                 damaged = event.entity_damaged
                 if damaged.entity_id == self.entity_id:
@@ -488,6 +614,39 @@ class WorldModel:
             and entity.alive
             and chebyshev(entity.position, centre) <= radius
         ]
+
+    def _remember_conversation_line(self, heard: HeardUtterance) -> None:
+        """Append a heard conversation line, ignoring a repeat of the last one."""
+        lines = self.conversation_lines.setdefault(heard.conversation_id, [])
+        line = TranscriptLine(heard.tick, heard.speaker_id, heard.text)
+        if lines and lines[-1] == line:
+            return
+        lines.append(line)
+
+    def conversations(self) -> list[ConversationInfo]:
+        """Every conversation object the actor knows about, nearest first."""
+        return [
+            conversation_from_object(obj)
+            for obj in self.objects_by_type([items.CONVERSATION])
+        ]
+
+    def conversation_by_id(self, conversation_id: str) -> ConversationInfo | None:
+        """The named conversation, or None when the actor cannot see it."""
+        obj = self.objects.get(conversation_id)
+        if obj is None or obj.object_type != items.CONVERSATION:
+            return None
+        return conversation_from_object(obj)
+
+    def my_conversation(self) -> ConversationInfo | None:
+        """The conversation this actor currently holds a seat in, if any."""
+        for conversation in self.conversations():
+            if conversation.has(self.entity_id):
+                return conversation
+        return None
+
+    def heard_conversation_lines(self, conversation_id: str) -> list[TranscriptLine]:
+        """Every line of `conversation_id` this actor heard, oldest first."""
+        return list(self.conversation_lines.get(conversation_id, ()))
 
     def recent_shouts(self, max_age: int) -> list[HeardUtterance]:
         """The latest shout from each other settler in the last `max_age` ticks.

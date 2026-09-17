@@ -10,6 +10,11 @@
  */
 
 import type { TrackedObject, WorldState } from '../network';
+import {
+  CONVERSATION_TYPE,
+  parseConversationParticipants,
+  parseConversationTranscript,
+} from '../conversation';
 
 export interface ObjectPanelCallbacks {
   /** Called when the user closes the panel (clears the selection). */
@@ -196,6 +201,24 @@ export class ObjectPanel {
           rows.push(this.noteBlock(slot, note));
         }
       }
+    } else if (obj.objectType === CONVERSATION_TYPE) {
+      const participants = parseConversationParticipants(obj.state.participants);
+      const speaker = obj.state.speaker ?? '';
+      rows.push(this.kvRow('participants', participants.join(', ') || '(none)'));
+      rows.push(this.kvRow('speaker', speaker || '(none)'));
+      if (obj.state.utterances) rows.push(this.kvRow('utterances', obj.state.utterances));
+      if (obj.state.opened_by) rows.push(this.kvRow('opened by', obj.state.opened_by));
+      if (obj.state.opened_tick) rows.push(this.kvRow('opened at', `t${obj.state.opened_tick}`));
+
+      rows.push(this.sectionLabel('Transcript'));
+      const transcript = parseConversationTranscript(obj.state.transcript);
+      if (transcript.length === 0) {
+        rows.push(this.muted('no lines yet'));
+      } else {
+        for (const line of transcript) {
+          rows.push(this.transcriptLine(line.tick, line.speaker, line.text));
+        }
+      }
     } else {
       rows.push(this.sectionLabel('Contents'));
       const contents = readContents(obj);
@@ -228,6 +251,23 @@ export class ObjectPanel {
     body.textContent = note.text ?? '';
 
     block.append(head, meta, body);
+    return block;
+  }
+
+  /** One transcript line: `t<tick> <speaker>: <text>`. */
+  private transcriptLine(tick: number, speaker: string, text: string): HTMLElement {
+    const block = document.createElement('div');
+    block.className = 'note';
+
+    const head = document.createElement('div');
+    head.className = 'note-meta';
+    head.textContent = `t${tick} ${speaker || 'unknown'}`;
+
+    const body = document.createElement('div');
+    body.className = 'note-text';
+    body.textContent = text;
+
+    block.append(head, body);
     return block;
   }
 

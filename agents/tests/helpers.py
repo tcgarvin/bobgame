@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
 from agents import world_pb2 as pb
+from agents.jev_agent.conversation import ConverserMove
 from agents.jev_agent.jevclient import JevDecision
 
 GRASS = "grass"
@@ -182,3 +184,72 @@ class FakeJevClient:
     def last_state(self) -> dict[str, Any]:
         """The state sent on the most recent call."""
         return self.calls[-1][0]
+
+
+def converse_object(
+    conversation_id: str,
+    anchor: tuple[int, int],
+    participants: Sequence[str],
+    *,
+    speaker: str = "",
+    turn_started: int = 0,
+    utterances: int = 0,
+    transcript: Sequence[Mapping[str, Any]] = (),
+) -> pb.WorldObject:
+    """A `conversation` world object with the state the world writes."""
+    return make_object(
+        conversation_id,
+        "conversation",
+        anchor,
+        {
+            "participants": json.dumps(list(participants)),
+            "speaker": speaker,
+            "turn_started": str(turn_started),
+            "opened_tick": "1",
+            "opened_by": participants[0] if participants else "",
+            "utterances": str(utterances),
+            "transcript": json.dumps(list(transcript)),
+        },
+    )
+
+
+def conversation_utterance_event(
+    speaker_id: str,
+    text: str,
+    position: tuple[int, int],
+    conversation_id: str,
+    channel: str = "conversation",
+) -> pb.ObservationEvent:
+    """An `Utterance` event that belongs to a conversation."""
+    return pb.ObservationEvent(
+        utterance=pb.Utterance(
+            speaker_id=speaker_id,
+            channel=channel,
+            text=text,
+            position=pb.Position(x=position[0], y=position[1]),
+            conversation_id=conversation_id,
+        )
+    )
+
+
+@dataclass
+class FakeConverser:
+    """A `Converser` that replays scripted moves and records its prompts."""
+
+    script: list[ConverserMove] = field(default_factory=list)
+    default_action: str = "pass"
+    note_text: str = ""
+    prompts: list[str] = field(default_factory=list)
+    note_prompts: list[str] = field(default_factory=list)
+
+    async def move(self, prompt: str) -> ConverserMove:
+        """Pop the next scripted move, falling back to `default_action`."""
+        self.prompts.append(prompt)
+        if self.script:
+            return self.script.pop(0)
+        return ConverserMove(action=self.default_action)
+
+    async def note(self, prompt: str) -> str:
+        """Return the fixed note text."""
+        self.note_prompts.append(prompt)
+        return self.note_text

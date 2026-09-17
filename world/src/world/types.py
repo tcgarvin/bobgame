@@ -4,6 +4,8 @@ from enum import IntEnum
 
 from pydantic import BaseModel
 
+from .items import CONVERSATION_CHANNEL
+
 
 class Direction(IntEnum):
     """8-direction movement enum matching proto Direction."""
@@ -178,8 +180,15 @@ class RestIntent(EntityIntent, frozen=True):
 LOCAL_CHANNEL = "local"
 SHOUT_CHANNEL = "shout"
 THOUGHT_CHANNEL = "thought"
-AUDIBLE_CHANNELS: frozenset[str] = frozenset({LOCAL_CHANNEL, SHOUT_CHANNEL})
-SAY_CHANNELS: frozenset[str] = AUDIBLE_CHANNELS | frozenset({THOUGHT_CHANNEL})
+AUDIBLE_CHANNELS: frozenset[str] = frozenset(
+    {LOCAL_CHANNEL, SHOUT_CHANNEL, CONVERSATION_CHANNEL}
+)
+# Channels a bare SayIntent may use. The conversation channel is deliberately
+# absent: only a ConverseIntent can put a line on it, so every such utterance
+# carries a conversation_id the world agrees with.
+SAY_CHANNELS: frozenset[str] = frozenset(
+    {LOCAL_CHANNEL, SHOUT_CHANNEL, THOUGHT_CHANNEL}
+)
 
 
 class SayIntent(EntityIntent, frozen=True):
@@ -187,6 +196,39 @@ class SayIntent(EntityIntent, frozen=True):
 
     text: str
     channel: str = "local"
+
+
+# ConverseIntent actions (docs/09_conversation_and_reflex.md, section 2.3).
+CONVERSE_OPEN = "open"
+CONVERSE_JOIN = "join"
+CONVERSE_SPEAK = "speak"
+CONVERSE_PASS = "pass"
+CONVERSE_LEAVE = "leave"
+CONVERSE_ACTIONS: frozenset[str] = frozenset(
+    {CONVERSE_OPEN, CONVERSE_JOIN, CONVERSE_SPEAK, CONVERSE_PASS, CONVERSE_LEAVE}
+)
+
+
+class ConverseIntent(EntityIntent, frozen=True):
+    """Intent to open, join, speak in, pass in or leave a conversation.
+
+    `direction` names the anchor tile for `open`; `conversation_id` names the
+    conversation for `join`. `speak` and `pass` act on the conversation the
+    entity already sits in.
+    """
+
+    action: str
+    direction: Direction | None = None
+    conversation_id: str = ""
+    text: str = ""
+
+
+class GiveIntent(EntityIntent, frozen=True):
+    """Intent to hand items to an adjacent entity or a fellow participant."""
+
+    target_entity_id: str
+    kind: str
+    amount: int = 1
 
 
 class WaitIntent(EntityIntent, frozen=True):

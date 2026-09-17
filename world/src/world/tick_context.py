@@ -15,6 +15,7 @@ from .state import World
 from .types import (
     AttackIntent,
     CollectIntent,
+    ConverseIntent,
     CraftIntent,
     DepositIntent,
     Direction,
@@ -23,6 +24,7 @@ from .types import (
     EntityIntent,
     EquipIntent,
     ExtractIntent,
+    GiveIntent,
     MoveIntent,
     PickupIntent,
     PlaceIntent,
@@ -54,6 +56,8 @@ INTENT_ACTION_TYPES: Mapping[type[EntityIntent], str] = {
     WriteNoteIntent: "write_note",
     RestIntent: "rest",
     SayIntent: "say",
+    ConverseIntent: "converse",
+    GiveIntent: "give",
     WaitIntent: "wait",
 }
 
@@ -229,6 +233,18 @@ class TickContext:
         self, intent: SayIntent, enforce_deadline: bool = True
     ) -> bool:
         """Submit a say intent. Returns True if accepted."""
+        return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
+
+    def submit_converse_intent(
+        self, intent: ConverseIntent, enforce_deadline: bool = True
+    ) -> bool:
+        """Submit a converse intent. Returns True if accepted."""
+        return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
+
+    def submit_give_intent(
+        self, intent: GiveIntent, enforce_deadline: bool = True
+    ) -> bool:
+        """Submit a give intent. Returns True if accepted."""
         return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
 
     def submit_wait_intent(

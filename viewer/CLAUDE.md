@@ -234,3 +234,32 @@ right of any entity whose latest `agent_status` has mode `planning`, in live and
 replay mode alike. It hides while a speech bubble is showing, when the entity is
 dead, and as soon as the mode changes (a stint started). Spoken utterances on
 the `shout` channel get the same speech bubble as `local` ones.
+
+## Conversations and reflex (docs/09_conversation_and_reflex.md)
+
+- `src/conversation.ts` has the shared, defensive parsing for a `conversation`
+  object's `participants` and `transcript` state (both JSON strings); it is
+  used by `GameScene`, `OverlayUI` and `ObjectPanel` so the three don't drift.
+- A `conversation` object has no sprite: there is no tileset entry for it, and
+  the contract says to draw one with Phaser graphics instead of touching the
+  tileset. `GameScene.createConversationMarker` draws a small speech-bubble
+  shape on the anchor tile (clickable, opens the object inspector) and
+  `updateConversationLines` redraws, every frame, a line from the anchor to
+  each current participant's interpolated position, thicker and gold for
+  whoever `state.speaker` says has the turn. Both are keyed by object id and
+  cleaned up on `removed` (including the blanket removal a replay snapshot
+  sends for every existing object before seeking).
+- Utterances on the `conversation` channel get the same speech bubble as
+  `local`/`shout` (`SPEECH_BUBBLE_CHANNELS` in `GameScene`).
+- The agent panel (`OverlayUI`) shows `reflex` and `conversation` as their own
+  mode-badge colors (`.mode-badge.reflex`/`.mode-badge.conversation` in
+  `index.html`), and adds a "Conversation" section — participants, speaker,
+  transcript — whenever the selected entity is a participant in one, found by
+  scanning `WorldState.getObjects()` for a `conversation` object that lists it.
+- The replay object inspector (`ObjectPanel`) formats a selected conversation's
+  participants, speaker and transcript as readable rows instead of raw JSON.
+- Not verified live: no world-side `conversation` object exists yet to test
+  against (concurrent work), and the fake replay server/browser automation
+  were unavailable in this pass, so the marker, lines and panels are checked
+  by `tsc`/`vite build` and code reading only. `scripts/fake_replay_server.mjs`
+  would be the place to add a scripted conversation object for a real check.

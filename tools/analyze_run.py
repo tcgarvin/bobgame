@@ -27,7 +27,7 @@ import re
 import statistics
 import sys
 import zlib
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -44,10 +44,14 @@ DEFAULT_MAX_MOMENTS = 60
 # Notable moment kinds, most interesting first. The cap keeps the rarest kinds.
 MOMENT_PRIORITY = (
     "death",
+    "reflex_death",
     "wolf_killed",
     "planner_failed",
     "history_reset",
     "first_wolf",
+    "reflex_during_conversation",
+    "conversation_give",
+    "conversation_joined",
     "milestone",
     "write_note",
     "place",
@@ -59,6 +63,8 @@ PLACE_ACTIONS = frozenset({"place"})
 NOTE_ACTIONS = frozenset({"write_note"})
 REST_ACTIONS = frozenset({"rest"})
 EXTRACT_ACTIONS = frozenset({"extract"})
+CONVERSE_ACTIONS = frozenset({"converse"})
+GIVE_ACTIONS = frozenset({"give"})
 
 # Building kinds (docs/08_building.md). A town lays hundreds of these, so they
 # are counted but only the first of each kind becomes a notable moment.
@@ -78,6 +84,18 @@ WORKSHOP_RECIPES = frozenset(
 CRAFTED_RE = re.compile(r"crafted (\S+)")
 PLACED_RE = re.compile(r"placed (\S+?)(?:_\d+)? ")
 DISMANTLED_RE = re.compile(r"dismantled (\S+?)(?:_\d+)? ")
+
+# Conversation and give details, docs/09_conversation_and_reflex.md sections 2.3
+# and 3: "open conv_12", "join conv_12", "gave 3 stone to mira".
+CONVERSE_OPEN_RE = re.compile(r"^open (conv_\S+)$")
+CONVERSE_JOIN_RE = re.compile(r"^join (conv_\S+)$")
+GAVE_RE = re.compile(r"^gave (\d+) (\S+) to (\S+)$")
+
+# The stint report's stats line, e.g. "stats: hp 12/20, hunger 5/10 -> hp
+# 8/20, hunger 3/10" (agents/src/agents/jev_agent/stint.py StintReport.to_text).
+STINT_HEALTH_RE = re.compile(r"stats: hp (\d+)/\d+.*? -> hp (\d+)/\d+")
+
+REFLEX_KIND = "reflex"
 
 
 # --------------------------------------------------------------------------
@@ -337,6 +355,14 @@ def summarise_agent(agent_id: str, layout: RunLayout) -> dict:
 # --------------------------------------------------------------------------
 
 
+def deep_link(viewer_url: str, run_id: str, tick: int, entity_id: str = "") -> str:
+    """A viewer deep link for one tick, optionally focused on one entity."""
+    link = f"{viewer_url}/?run={run_id}&tick={tick}"
+    if entity_id:
+        link += f"&entity={entity_id}"
+    return link
+
+
 @dataclass
 class Moment:
     tick: int
@@ -345,10 +371,7 @@ class Moment:
     text: str
 
     def link(self, viewer_url: str, run_id: str) -> str:
-        link = f"{viewer_url}/?run={run_id}&tick={self.tick}"
-        if self.entity_id:
-            link += f"&entity={self.entity_id}"
-        return link
+        return deep_link(viewer_url, run_id, self.tick, self.entity_id)
 
     def as_dict(self, viewer_url: str, run_id: str) -> dict:
         return {
@@ -358,6 +381,58 @@ class Moment:
             "text": self.text,
             "link": self.link(viewer_url, run_id),
         }
+
+
+@dataclass
+class ConversationRecord:
+    """Everything the world's own ticks say about one `conversation` object.
+
+    Built from `converse` actions (which carry the conversation id only for
+    `open`/`join`, docs/09 section 2.3) and from utterances on the
+    `conversation` channel (which carry it for every line, section 2.3).
+    """
+
+    conversation_id: str
+    opened_tick: int = -1
+    opened_by: str = ""
+    joins: list[tuple[int, str]] = field(default_factory=list)
+    participants: set[str] = field(default_factory=set)
+    utterance_ticks: list[int] = field(default_factory=list)
+    end_tick: int = -1
+
+    @property
+    def utterance_count(self) -> int:
+        return len(self.utterance_ticks)
+
+    @property
+    def duration_ticks(self) -> int:
+        """Ticks from open to close, or 0 when either end is unknown."""
+        if self.opened_tick < 0 or self.end_tick < 0:
+            return 0
+        return self.end_tick - self.opened_tick
+
+    def active_at(self, entity_id: str, tick: int) -> bool:
+        """Whether `entity_id` was seated in this conversation at `tick`.
+
+        A conversation with no recorded close yet is treated as still open.
+        """
+        if entity_id not in self.participants or self.opened_tick < 0:
+            return False
+        if tick < self.opened_tick:
+            return False
+        end = self.end_tick if self.end_tick >= 0 else tick
+        return tick <= end
+
+
+@dataclass
+class GiveEvent:
+    """One successful `give` action, parsed from its `EntityActed.details`."""
+
+    tick: int
+    giver: str
+    receiver: str
+    kind: str
+    amount: int
 
 
 @dataclass
@@ -398,13 +473,22 @@ class WorldFacts:
         }
 
 
-def scan_world_ticks(path: Path) -> tuple[WorldFacts, list[Moment]]:
-    """Read world/ticks.jsonl.gz into aggregate counts plus notable moments."""
+def scan_world_ticks(
+    path: Path,
+) -> tuple[WorldFacts, list[Moment], dict[str, ConversationRecord], list[GiveEvent]]:
+    """Read world/ticks.jsonl.gz into aggregate counts plus notable moments.
+
+    Also returns the conversation objects seen (keyed by id) and every
+    successful `give`, since both the Conversations and Giving report
+    sections and several notable-moment kinds need this same single pass.
+    """
     facts = WorldFacts()
     moments: list[Moment] = []
     wolf_ids: set[str] = set()
     seen_first_wolf = False
     first_tick_set = False
+    conversations: dict[str, ConversationRecord] = {}
+    giving: list[GiveEvent] = []
 
     for record in iter_jsonl(path):
         if record.get("type") != "tick":
@@ -419,6 +503,23 @@ def scan_world_ticks(path: Path) -> tuple[WorldFacts, list[Moment]]:
         facts.shouts += sum(
             1 for u in record.get("utterances", ()) if u.get("channel") == "shout"
         )
+        for utterance in record.get("utterances", ()):
+            if utterance.get("channel") != "conversation":
+                continue
+            conv_id = utterance.get("conversation_id", "")
+            if not conv_id:
+                continue
+            record_conv = conversations.setdefault(
+                conv_id, ConversationRecord(conv_id)
+            )
+            record_conv.utterance_ticks.append(tick)
+            speaker = utterance.get("speaker_id", "")
+            if speaker:
+                record_conv.participants.add(speaker)
+
+        for object_id in record.get("objects_removed", ()):
+            if object_id in conversations:
+                conversations[object_id].end_tick = tick
 
         for spawn in record.get("entities_spawned", ()):
             if spawn.get("entity_type") == "wolf":
@@ -499,8 +600,69 @@ def scan_world_ticks(path: Path) -> tuple[WorldFacts, list[Moment]]:
                 moments.append(
                     Moment(tick, "write_note", entity, f"{entity} wrote a note: {details}")
                 )
+            elif action_type in CONVERSE_ACTIONS:
+                open_match = CONVERSE_OPEN_RE.match(details)
+                join_match = CONVERSE_JOIN_RE.match(details)
+                if open_match:
+                    conv_id = open_match.group(1)
+                    record_conv = conversations.setdefault(
+                        conv_id, ConversationRecord(conv_id)
+                    )
+                    record_conv.opened_tick = tick
+                    record_conv.opened_by = entity
+                    record_conv.participants.add(entity)
+                elif join_match:
+                    conv_id = join_match.group(1)
+                    record_conv = conversations.setdefault(
+                        conv_id, ConversationRecord(conv_id)
+                    )
+                    record_conv.joins.append((tick, entity))
+                    record_conv.participants.add(entity)
+            elif action_type in GIVE_ACTIONS:
+                match = GAVE_RE.match(details)
+                if match:
+                    giving.append(
+                        GiveEvent(
+                            tick=tick,
+                            giver=entity,
+                            receiver=match.group(3),
+                            kind=match.group(2),
+                            amount=int(match.group(1)),
+                        )
+                    )
 
-    return facts, moments
+    for conv in conversations.values():
+        if conv.joins:
+            joiners = ", ".join(entity for _, entity in conv.joins)
+            moments.append(
+                Moment(
+                    conv.opened_tick,
+                    "conversation_joined",
+                    conv.opened_by,
+                    f"{conv.opened_by} opened {conv.conversation_id}, "
+                    f"joined by {joiners}",
+                )
+            )
+
+    for give in giving:
+        shared = [
+            conv
+            for conv in conversations.values()
+            if conv.active_at(give.giver, give.tick)
+            and conv.active_at(give.receiver, give.tick)
+        ]
+        if shared:
+            moments.append(
+                Moment(
+                    give.tick,
+                    "conversation_give",
+                    give.giver,
+                    f"{give.giver} gave {give.amount} {give.kind} to "
+                    f"{give.receiver} during {shared[0].conversation_id}",
+                )
+            )
+
+    return facts, moments, conversations, giving
 
 
 def planner_moments(agent_id: str, layout: RunLayout) -> list[Moment]:
@@ -525,6 +687,231 @@ def planner_moments(agent_id: str, layout: RunLayout) -> list[Moment]:
                 Moment(tick, "history_reset", agent_id, f"{agent_id} planner history reset")
             )
     return moments
+
+
+# --------------------------------------------------------------------------
+# conversations, giving and reflexes
+# --------------------------------------------------------------------------
+
+
+def _agent_conversation_ends(agent_id: str, layout: RunLayout) -> Iterator[dict]:
+    """`conversation_end` rows from one agent's `conversations.jsonl.gz`.
+
+    Runs recorded before this feature shipped have no such file, so an
+    absent file simply yields nothing.
+    """
+    path = layout.agents_dir / f"agent-{agent_id}" / "conversations.jsonl.gz"
+    if not path.exists():
+        return
+    for row in iter_jsonl(path):
+        if row.get("event") == "conversation_end":
+            yield row
+
+
+def summarise_conversations(
+    conversations: dict[str, ConversationRecord],
+    agent_ids: list[str],
+    layout: RunLayout,
+    viewer_url: str,
+    run_id: str,
+) -> dict:
+    """The Conversations report section: world facts plus agent-side endings.
+
+    `opened`/`joined`/`utterances`/duration come from the world recording
+    (ground truth); `end_reasons` and `notes_written` come from each
+    participant's own `conversation_end` report, since ending is a per-actor
+    view (docs/09_conversation_and_reflex.md section 4.3).
+    """
+    end_reasons: Counter[str] = Counter()
+    notes_written = 0
+    for agent_id in agent_ids:
+        for row in _agent_conversation_ends(agent_id, layout):
+            end_reasons[row.get("end_reason", "?")] += 1
+            if str(row.get("note", "")).strip():
+                notes_written += 1
+
+    records = list(conversations.values())
+    opened = sum(1 for record in records if record.opened_tick >= 0)
+    joined = sum(len(record.joins) for record in records)
+    distinct_participants = len(
+        {participant for record in records for participant in record.participants}
+    )
+    utterances = sum(record.utterance_count for record in records)
+    durations = [record.duration_ticks for record in records if record.end_tick >= 0]
+    line_counts = [record.utterance_count for record in records]
+
+    longest = sorted(
+        records, key=lambda r: (r.duration_ticks, r.utterance_count), reverse=True
+    )[:3]
+
+    return {
+        "opened": opened,
+        "joined": joined,
+        "distinct_participants": distinct_participants,
+        "utterances": utterances,
+        "end_reasons": dict(end_reasons),
+        "notes_written": notes_written,
+        "mean_duration_ticks": statistics.mean(durations) if durations else 0,
+        "mean_lines": statistics.mean(line_counts) if line_counts else 0,
+        "longest": [
+            {
+                "conversation_id": record.conversation_id,
+                "opened_by": record.opened_by,
+                "opened_tick": record.opened_tick,
+                "end_tick": record.end_tick,
+                "duration_ticks": record.duration_ticks,
+                "utterances": record.utterance_count,
+                "participants": sorted(record.participants),
+                "link": deep_link(
+                    viewer_url, run_id, max(record.opened_tick, 0), record.opened_by
+                ),
+            }
+            for record in longest
+        ],
+    }
+
+
+def summarise_giving(events: list[GiveEvent]) -> dict:
+    """The Giving report section: totals by kind and by giver/receiver pair."""
+    kinds: Counter[str] = Counter()
+    pairs: Counter[tuple[str, str]] = Counter()
+    for event in events:
+        kinds[event.kind] += event.amount
+        pairs[(event.giver, event.receiver)] += event.amount
+
+    return {
+        "count": len(events),
+        "kinds": dict(kinds.most_common()),
+        "pairs": {
+            f"{giver}->{receiver}": amount
+            for (giver, receiver), amount in pairs.most_common()
+        },
+    }
+
+
+def summarise_reflexes(
+    agent_ids: list[str], layout: RunLayout
+) -> tuple[dict, list[Moment]]:
+    """The Reflexes report section, plus the moments only it can see.
+
+    Combines `planner.jsonl.gz` (when and what a settler registered) with
+    `stints.jsonl.gz` (when the reflex fired, on what trigger, over what it
+    interrupted, how it ended, and the health change from its report text).
+    A run recorded before `kind` existed on `stint_start` has no reflex
+    stints at all, which reports cleanly as zero.
+    """
+    per_agent: dict[str, dict] = {}
+    trigger_counts: Counter[str] = Counter()
+    interrupted_counts: Counter[str] = Counter()
+    end_reason_counts: Counter[str] = Counter()
+    health_deltas: list[int] = []
+    ticks_to_first_action: list[int] = []
+    moments: list[Moment] = []
+
+    for agent_id in agent_ids:
+        registered_tick, digest = _first_reflex_registration(agent_id, layout)
+        if registered_tick is not None:
+            per_agent[agent_id] = {"registered_tick": registered_tick, "digest": digest}
+
+        stints_path = first_existing(
+            layout.agents_dir / f"agent-{agent_id}" / "stints.jsonl.gz",
+            layout.agents_dir / f"agent-{agent_id}" / "stints.jsonl",
+        )
+        if stints_path is None:
+            continue
+        rows = list(iter_jsonl(stints_path))
+        starts: dict[str, dict] = {
+            row["stint_id"]: row
+            for row in rows
+            if row.get("event") == "stint_start" and row.get("kind") == REFLEX_KIND
+        }
+        if not starts:
+            continue
+        ticks_by_stint: dict[str, list[dict]] = defaultdict(list)
+        for row in rows:
+            stint_id = row.get("stint_id", "")
+            if stint_id in starts and "action" in row and "top" in row:
+                ticks_by_stint[stint_id].append(row)
+
+        for row in rows:
+            if row.get("event") != "stint_end":
+                continue
+            stint_id = row.get("stint_id", "")
+            start_row = starts.get(stint_id)
+            if start_row is None:
+                continue
+            trigger = start_row.get("trigger", "?")
+            interrupted = start_row.get("interrupted", "?")
+            end_reason = row.get("end_reason", "?")
+            trigger_counts[trigger] += 1
+            interrupted_counts[interrupted] += 1
+            end_reason_counts[end_reason] += 1
+
+            match = STINT_HEALTH_RE.search(str(row.get("report", "")))
+            if match:
+                health_deltas.append(int(match.group(2)) - int(match.group(1)))
+
+            start_tick = int(start_row.get("tick", 0))
+            first_action_tick = next(
+                (
+                    int(tick_row["tick"])
+                    for tick_row in ticks_by_stint.get(stint_id, ())
+                    if str(tick_row.get("action", "wait")).split(":")[0] != "wait"
+                ),
+                None,
+            )
+            if first_action_tick is not None:
+                ticks_to_first_action.append(first_action_tick - start_tick)
+
+            if end_reason == "death":
+                moments.append(
+                    Moment(
+                        int(row.get("tick", start_tick)),
+                        "reflex_death",
+                        agent_id,
+                        f"{agent_id} died during a reflex ({trigger})",
+                    )
+                )
+            if interrupted == "conversation":
+                moments.append(
+                    Moment(
+                        start_tick,
+                        "reflex_during_conversation",
+                        agent_id,
+                        f"{agent_id}'s reflex fired mid-conversation ({trigger})",
+                    )
+                )
+
+    summary = {
+        "agents": per_agent,
+        "firings_by_trigger": dict(trigger_counts),
+        "firings_by_interrupted": dict(interrupted_counts),
+        "end_reasons": dict(end_reason_counts),
+        "mean_health_change": (statistics.mean(health_deltas) if health_deltas else 0),
+        "mean_ticks_to_first_action": (
+            statistics.mean(ticks_to_first_action) if ticks_to_first_action else 0
+        ),
+    }
+    return summary, moments
+
+
+def _first_reflex_registration(
+    agent_id: str, layout: RunLayout
+) -> tuple[int | None, str]:
+    """The tick and instruction digest of a settler's first `set_reflex` call."""
+    planner_path = first_existing(
+        layout.agents_dir / f"agent-{agent_id}" / "planner.jsonl.gz",
+        layout.agents_dir / f"agent-{agent_id}" / "planner.jsonl",
+    )
+    if planner_path is None:
+        return None, ""
+    for row in iter_jsonl(planner_path):
+        if row.get("event") != "tool_call" or row.get("tool") != "set_reflex":
+            continue
+        args = row.get("args") or {}
+        instruction = str(args.get("instruction", ""))
+        return int(row.get("tick", 0)), instruction[:80]
+    return None, ""
 
 
 def select_moments(moments: list[Moment], limit: int) -> tuple[list[Moment], Counter[str]]:
@@ -573,6 +960,9 @@ def print_report(
     summaries: list[dict],
     totals: dict,
     facts: WorldFacts | None,
+    conversation_summary: dict,
+    giving_summary: dict,
+    reflex_summary: dict,
     moments: list[Moment],
     omitted: Counter[str],
     viewer_url: str,
@@ -635,6 +1025,59 @@ def print_report(
             print()
             print(f"world.log: death mentions={deaths} wolf spawns={wolves}")
 
+    print()
+    print("== conversations ==")
+    if conversation_summary["opened"] or conversation_summary["end_reasons"]:
+        print(
+            f"opened: {conversation_summary['opened']}  "
+            f"joined: {conversation_summary['joined']}  "
+            f"distinct participants: {conversation_summary['distinct_participants']}  "
+            f"utterances: {conversation_summary['utterances']}"
+        )
+        print(f"ended by: {conversation_summary['end_reasons']}")
+        print(
+            f"mean length: {conversation_summary['mean_duration_ticks']:.1f} ticks, "
+            f"{conversation_summary['mean_lines']:.1f} lines"
+        )
+        print(f"notes written: {conversation_summary['notes_written']}")
+        if conversation_summary["longest"]:
+            print("longest conversations:")
+            for entry in conversation_summary["longest"]:
+                print(
+                    f"  {entry['conversation_id']} opened by {entry['opened_by']} "
+                    f"at t{entry['opened_tick']}: {entry['duration_ticks']} ticks, "
+                    f"{entry['utterances']} lines, with "
+                    f"{', '.join(entry['participants'])}"
+                )
+                print(f"    {entry['link']}")
+    else:
+        print("none")
+
+    print()
+    print("== giving ==")
+    if giving_summary["count"]:
+        print(f"gives: {giving_summary['count']}  kinds: {giving_summary['kinds']}")
+        print(f"pairs: {giving_summary['pairs']}")
+    else:
+        print("none")
+
+    print()
+    print("== reflexes ==")
+    if reflex_summary["agents"] or reflex_summary["end_reasons"]:
+        print("registered:")
+        for agent_id, info in reflex_summary["agents"].items():
+            print(f"  {agent_id} at t{info['registered_tick']}: {info['digest']}")
+        print(f"firings by trigger: {reflex_summary['firings_by_trigger']}")
+        print(f"firings by interrupted: {reflex_summary['firings_by_interrupted']}")
+        print(f"end reasons: {reflex_summary['end_reasons']}")
+        print(
+            f"mean health change: {reflex_summary['mean_health_change']:.1f}  "
+            "mean ticks trigger->first action: "
+            f"{reflex_summary['mean_ticks_to_first_action']:.1f}"
+        )
+    else:
+        print("none")
+
     if moments:
         print()
         print(f"== notable moments ({len(moments)} shown) ==")
@@ -683,15 +1126,24 @@ def main(argv: list[str] | None = None) -> int:
 
     summaries = [summarise_agent(agent_id, layout) for agent_id in ids]
     totals = aggregate(summaries)
+    viewer_url = args.viewer_url.rstrip("/")
 
     facts: WorldFacts | None = None
     moments: list[Moment] = []
+    conversations: dict[str, ConversationRecord] = {}
+    giving: list[GiveEvent] = []
     if layout.ticks_path is not None:
-        facts, moments = scan_world_ticks(layout.ticks_path)
+        facts, moments, conversations, giving = scan_world_ticks(layout.ticks_path)
     for agent_id in ids:
         moments.extend(planner_moments(agent_id, layout))
 
-    viewer_url = args.viewer_url.rstrip("/")
+    conversation_summary = summarise_conversations(
+        conversations, ids, layout, viewer_url, layout.run_id
+    )
+    giving_summary = summarise_giving(giving)
+    reflex_summary, reflex_moments = summarise_reflexes(ids, layout)
+    moments.extend(reflex_moments)
+
     shown, omitted = select_moments(moments, max(0, args.max_moments))
 
     if args.json:
@@ -702,6 +1154,9 @@ def main(argv: list[str] | None = None) -> int:
             "totals": totals,
             "agents": summaries,
             "world": facts.as_dict() if facts else None,
+            "conversations": conversation_summary,
+            "giving": giving_summary,
+            "reflexes": reflex_summary,
             "moments": [m.as_dict(viewer_url, layout.run_id) for m in shown],
             "moments_omitted": dict(omitted),
         }
@@ -709,7 +1164,18 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write("\n")
         return 0
 
-    print_report(layout, summaries, totals, facts, shown, omitted, viewer_url)
+    print_report(
+        layout,
+        summaries,
+        totals,
+        facts,
+        conversation_summary,
+        giving_summary,
+        reflex_summary,
+        shown,
+        omitted,
+        viewer_url,
+    )
     return 0
 
 

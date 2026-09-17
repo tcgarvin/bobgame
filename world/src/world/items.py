@@ -79,6 +79,25 @@ DISMANTLE_WORK = 3
 # Health restored by one successful rest action on a bed.
 REST_HEAL = 2
 
+# --- Conversations (docs/09_conversation_and_reflex.md) -------------------
+
+# Object type of a conversation, sitting on its anchor tile.
+CONVERSATION = "conversation"
+# Utterance channel used by `speak`; heard at the `local` radius.
+CONVERSATION_CHANNEL = "conversation"
+# Seats, including the opener.
+CONVERSATION_MAX_PARTICIPANTS = 4
+# A turn not used within this many ticks counts as a pass.
+CONVERSATION_TURN_TICKS = 10
+# A conversation that never gained a second participant closes after this.
+CONVERSATION_LONELY_TICKS = 20
+# A conversation closes after this many `speak` actions.
+CONVERSATION_MAX_UTTERANCES = 40
+# Characters per line; longer text is truncated.
+CONVERSATION_TEXT_LIMIT = 300
+# Transcript lines kept in object state.
+CONVERSATION_TRANSCRIPT_KEPT = 12
+
 # --- Combat ---------------------------------------------------------------
 
 BASE_ATTACK_DAMAGE: Mapping[str, int] = {"wolf": 3}

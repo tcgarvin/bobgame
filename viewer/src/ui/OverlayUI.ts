@@ -10,7 +10,7 @@
  * through `onRequestAgentDetail` whenever the selection or the tick changes.
  */
 
-import type { WorldState } from '../network';
+import type { TrackedObject, WorldState } from '../network';
 import type {
   AgentDetailMessage,
   AgentStint,
@@ -18,6 +18,14 @@ import type {
   StintBrief,
   StintOptionProbability,
 } from '../network';
+import {
+  CONVERSATION_TYPE,
+  parseConversationParticipants,
+  parseConversationTranscript,
+} from '../conversation';
+
+/** Modes with a distinct badge color (index.html `.mode-badge.*`). */
+const KNOWN_MODES = ['planning', 'stint', 'idle', 'reflex', 'conversation'];
 
 export interface OverlayCallbacks {
   /** Called when the user picks an entity (via dropdown or by clicking it). */
@@ -89,6 +97,8 @@ export class OverlayUI {
   private jevStateEl: HTMLElement;
   private plannerEl: HTMLElement;
   private memoryEl: HTMLElement;
+  private conversationEl: HTMLElement;
+  private conversationBodyEl: HTMLElement;
 
   private pickerSignature: string = '';
   private requestedDetailKey: string = '';
@@ -114,6 +124,8 @@ export class OverlayUI {
     this.jevStateEl = requireElement('ap-jev-state');
     this.plannerEl = requireElement('ap-planner');
     this.memoryEl = requireElement('ap-memory');
+    this.conversationEl = requireElement('ap-conversation');
+    this.conversationBodyEl = requireElement('ap-conversation-body');
 
     this.picker.addEventListener('change', () => {
       this.callbacks.onSelectEntity(this.picker.value);
@@ -200,6 +212,7 @@ export class OverlayUI {
       this.setText(this.inventoryEl, '');
       this.logEl.replaceChildren(this.mutedItem('-'));
       this.replayEl.classList.add('hidden');
+      this.conversationEl.classList.add('hidden');
       return;
     }
 
@@ -210,18 +223,62 @@ export class OverlayUI {
 
     const mode = status?.mode ?? (entity.entityType === PLAYER_TYPE ? 'idle' : entity.entityType);
     this.modeEl.textContent = mode;
-    this.modeEl.className = `mode-badge ${['planning', 'stint', 'idle'].includes(mode) ? mode : ''}`;
+    this.modeEl.className = `mode-badge ${KNOWN_MODES.includes(mode) ? mode : ''}`;
 
     this.renderStats(entity.health, entity.maxHealth, entity.hunger, entity.maxHunger,
       entity.entityType === PLAYER_TYPE, entity.alive, entity.wielded);
 
     const stint = detail?.record ?? status?.stint ?? null;
     this.renderBrief(status?.brief ?? '', stint, detail);
+    this.renderConversation(entityId);
     this.setText(this.thoughtEl, status?.planner_thought ?? detail?.planner_turn?.thought ?? '');
     this.renderJev(stint);
     this.renderInventory(entity.inventory);
     this.renderLog(entityId);
     this.renderReplaySections(detail);
+  }
+
+  /** Find the conversation object, if any, this entity currently sits in. */
+  private findConversation(entityId: string): TrackedObject | undefined {
+    for (const obj of this.worldState.getObjects()) {
+      if (obj.objectType !== CONVERSATION_TYPE) continue;
+      if (parseConversationParticipants(obj.state.participants).includes(entityId)) {
+        return obj;
+      }
+    }
+    return undefined;
+  }
+
+  /** Show the conversation's participants, speaker and transcript when the selected entity is seated in one. */
+  private renderConversation(entityId: string): void {
+    const conversation = this.findConversation(entityId);
+    if (!conversation) {
+      this.conversationEl.classList.add('hidden');
+      this.conversationBodyEl.replaceChildren();
+      return;
+    }
+    this.conversationEl.classList.remove('hidden');
+
+    const participants = parseConversationParticipants(conversation.state.participants);
+    const speaker = conversation.state.speaker ?? '';
+    const transcript = parseConversationTranscript(conversation.state.transcript);
+
+    const rows: HTMLElement[] = [
+      this.kvRow('Participants', participants.join(', ') || '-'),
+      this.kvRow('Speaker', speaker || '-'),
+    ];
+
+    if (transcript.length === 0) {
+      rows.push(this.mutedDiv('no lines yet'));
+    } else {
+      for (const line of transcript) {
+        const row = document.createElement('div');
+        row.className = 'text';
+        row.textContent = `t${line.tick} ${line.speaker}: ${line.text}`;
+        rows.push(row);
+      }
+    }
+    this.conversationBodyEl.replaceChildren(...rows);
   }
 
   /**

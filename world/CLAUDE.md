@@ -392,6 +392,53 @@ lands the last blow. `RestIntent` heals `REST_HEAL` on a bed on or next to the
 entity's tile; one rester per bed per tick (smallest entity id wins) and only
 while hunger is above zero. The rest phase sits beside eat in `process_tick`.
 
+## Conversations and Giving (docs/09_conversation_and_reflex.md)
+
+Contract: [docs/09_conversation_and_reflex.md](../docs/09_conversation_and_reflex.md),
+sections 2 and 3. The world owns the rules; the agents own who talks and when.
+
+### Conversations (`conversations.py`)
+
+A conversation is a `WorldObject` of type `conversation` (id `conv_<n>`) on its
+**anchor tile**. It blocks nobody, is in neither building layer and is not
+extractable, so it needs no entry in the `items.py` blocking or placement maps —
+but because it is *not* a ground-layer kind, `process_place_phase` already
+refuses a structure on its tile.
+
+State keys (all strings, see the contract): `participants` (JSON list in join
+order, opener first), `speaker`, `turn_started`, `opened_tick`, `opened_by`,
+`utterances`, `passes`, `transcript` (last 12 lines). Constants live in
+`items.py` (`CONVERSATION*`).
+
+`process_conversation_phase` runs **once per tick after movement and combat**:
+it applies `open`, `join`, `speak`, `pass` and `leave` in that order (each group
+sorted by entity id, so conflicts resolve lexicographically like every other
+conflict), then runs the lifecycle for every conversation — drop participants
+who died or walked out of adjacency, move the turn on when the speaker goes,
+count an unused turn as a pass after `CONVERSATION_TURN_TICKS`, and close on a
+full round of passes, the utterance cap, dropping below two after having had
+two, or the lonely timeout.
+
+Every state write goes through `_commit`, which emits one `ObjectChange` per
+changed key, so the existing object machinery carries conversations to agent
+observations, the viewer WebSocket, the recorder and the replay server with no
+new code on those paths.
+
+Utterances now carry a `conversation_id`: the opening line goes out on `local`,
+`speak` lines on the `conversation` channel (earshot = the `local` radius, so
+bystanders overhear). `conversation` is in `AUDIBLE_CHANNELS` but deliberately
+**not** in `SAY_CHANNELS`, so only a `ConverseIntent` can put a line on it.
+
+### Giving (`containers.process_give_phase`)
+
+`GiveIntent` moves items straight between inventories when the target is a
+living non-wolf entity that is adjacent or seated in the same conversation
+(which is how participants reach across the anchor tile). A wielded kind that
+runs out is unequipped. The phase runs just before the conversation phase, so a
+hand-over still works on the tick a conversation closes. The receiving agent
+already sees the giver's `EntityActed` event: `_build_events` shows any action
+whose actor is within `VIEW_RADIUS`.
+
 ## Terrain Objects and the Settlement Site (docs/08_building.md)
 
 ### Object placement (`terrain/objects.py`)

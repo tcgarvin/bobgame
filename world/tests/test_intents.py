@@ -13,6 +13,7 @@ from world.tick_context import TickContext
 from world.types import (
     AttackIntent,
     CollectIntent,
+    ConverseIntent,
     CraftIntent,
     DepositIntent,
     Direction,
@@ -20,6 +21,7 @@ from world.types import (
     EatIntent,
     EquipIntent,
     ExtractIntent,
+    GiveIntent,
     MoveIntent,
     PickupIntent,
     PlaceIntent,
@@ -123,6 +125,10 @@ class TestSubmitIntent:
             RestIntent(entity_id="bob", object_id="bed_1"),
             WriteNoteIntent(entity_id="bob", object_id="board_1", slot=0),
             SayIntent(entity_id="bob", text="hi"),
+            ConverseIntent(
+                entity_id="bob", action="open", direction=Direction.EAST, text="hi"
+            ),
+            GiveIntent(entity_id="bob", target_entity_id="alice", kind="wood"),
             WaitIntent(entity_id="bob"),
         ]
 
@@ -170,6 +176,18 @@ class TestProtoConversion:
             ),
             (pb.Intent(rest=pb.RestIntent(object_id="bed_1")), RestIntent),
             (pb.Intent(say=pb.SayIntent(text="hi")), SayIntent),
+            (
+                pb.Intent(
+                    converse=pb.ConverseIntent(
+                        action="open", direction=pb.EAST, text="hello"
+                    )
+                ),
+                ConverseIntent,
+            ),
+            (
+                pb.Intent(give=pb.GiveIntent(target_entity_id="mira", kind="stone")),
+                GiveIntent,
+            ),
             (pb.Intent(wait=pb.WaitIntent()), WaitIntent),
         ]
 
@@ -189,6 +207,19 @@ class TestProtoConversion:
         assert isinstance(say, SayIntent)
         assert say.channel == "local"
 
+        give = intent_from_proto(
+            "bob", pb.Intent(give=pb.GiveIntent(target_entity_id="mira", kind="stone"))
+        )
+        assert isinstance(give, GiveIntent)
+        assert give.amount == 1
+
+        # An unspecified direction is only meaningful for `open`.
+        speak = intent_from_proto(
+            "bob", pb.Intent(converse=pb.ConverseIntent(action="speak", text="hi"))
+        )
+        assert isinstance(speak, ConverseIntent)
+        assert speak.direction is None
+
     def test_malformed_intents_raise(self) -> None:
         for proto_intent in (
             pb.Intent(),
@@ -198,6 +229,10 @@ class TestProtoConversion:
             pb.Intent(craft=pb.CraftIntent()),
             pb.Intent(rest=pb.RestIntent()),
             pb.Intent(place=pb.PlaceIntent(direction=pb.EAST)),
+            pb.Intent(converse=pb.ConverseIntent()),
+            pb.Intent(converse=pb.ConverseIntent(action="shout")),
+            pb.Intent(give=pb.GiveIntent(kind="stone")),
+            pb.Intent(give=pb.GiveIntent(target_entity_id="mira")),
         ):
             with pytest.raises(IntentConversionError):
                 intent_from_proto("bob", proto_intent)
