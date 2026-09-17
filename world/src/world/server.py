@@ -113,8 +113,10 @@ class WorldServer:
         self.discovery_service.register_entity_spawn(entity.entity_id, self.world.tick)
 
     def add_object(self, obj: WorldObject) -> None:
-        """Add an object to the world."""
+        """Add an object to the world and register with chunk manager."""
         self.world.add_object(obj)
+        # Register with chunk manager so it gets sent to viewers
+        self.viewer_ws_service.chunk_manager.add_object(obj.object_id, obj.position)
 
     async def start(self) -> None:
         """Start the gRPC server and tick loop."""

@@ -1,24 +1,17 @@
 /**
  * ChunkManager handles chunk-based terrain rendering using Phaser Tilemaps.
  * Each chunk is a separate tilemap for efficient loading/unloading.
+ *
+ * Uses multiple tilesets (Floor, Tile, Hill0) with GID offsets to support
+ * terrain sprites from different spritesheets.
  */
 
 import Phaser from 'phaser';
+import type { SpriteIndex } from '../sprites';
+import { TERRAIN_TILESETS, buildFloorTypeToTileId } from './TerrainConfig';
 
 const TILE_SIZE = 16;
 const SCALE = 3;
-
-// Floor type values from backend (world/src/world/state.py)
-// Maps to sprite frames in Objects/Floor.png
-const FLOOR_TYPE_TO_FRAME: Record<number, number> = {
-  0: 8,    // deep_water -> water tile
-  1: 8,    // shallow_water -> water tile (lighter)
-  2: 407,  // sand -> sand/dirt tile
-  3: 155,  // grass -> grass-full
-  4: 400,  // dirt -> dirt-full
-  5: 400,  // mountain -> use dirt for now (should be rock)
-  6: 407,  // stone -> stone/floor tile
-};
 
 interface LoadedChunk {
   chunkX: number;
@@ -32,11 +25,23 @@ export class ChunkManager {
   private scene: Phaser.Scene;
   private chunks: Map<string, LoadedChunk> = new Map();
   private chunkSize: number = 32;
-  private tilesetKey: string = 'Objects-Floor';
 
-  constructor(scene: Phaser.Scene, chunkSize: number = 32) {
+  /** Floor type → global tile ID lookup (built from sprite index) */
+  private floorTypeToTileId: Record<number, number> = {};
+  private defaultTileId: number = 155; // Fallback to grass-full frame
+
+  constructor(scene: Phaser.Scene, chunkSize: number = 32, spriteIndex?: SpriteIndex) {
     this.scene = scene;
     this.chunkSize = chunkSize;
+
+    // Build floor type to tile ID mapping from sprite index
+    if (spriteIndex) {
+      this.floorTypeToTileId = buildFloorTypeToTileId(spriteIndex);
+      this.defaultTileId = this.floorTypeToTileId[-1] ?? 155;
+      console.log('ChunkManager: Floor type mappings:', this.floorTypeToTileId);
+    } else {
+      console.warn('ChunkManager: No sprite index provided, using fallback mappings');
+    }
   }
 
   /**
@@ -75,6 +80,7 @@ export class ChunkManager {
 
   /**
    * Convert flat terrain array to 2D tile index array for Phaser.
+   * Uses sprite-key-based mappings resolved to global tile IDs.
    */
   private terrainToTileData(terrain: Uint8Array): number[][] {
     const data: number[][] = [];
@@ -82,8 +88,8 @@ export class ChunkManager {
       const row: number[] = [];
       for (let x = 0; x < this.chunkSize; x++) {
         const floorType = terrain[y * this.chunkSize + x];
-        const frame = FLOOR_TYPE_TO_FRAME[floorType] ?? 155; // Default to grass
-        row.push(frame);
+        const tileId = this.floorTypeToTileId[floorType] ?? this.defaultTileId;
+        row.push(tileId);
       }
       data.push(row);
     }
@@ -117,10 +123,27 @@ export class ChunkManager {
       tileHeight: TILE_SIZE,
     });
 
-    // Add the tileset (must be preloaded)
-    const tileset = tilemap.addTilesetImage('terrain', this.tilesetKey);
-    if (!tileset) {
-      console.error('Failed to add tileset for chunk', chunkX, chunkY);
+    // Add all tilesets with their GID offsets
+    const tilesets: Phaser.Tilemaps.Tileset[] = [];
+    for (const config of TERRAIN_TILESETS) {
+      const tileset = tilemap.addTilesetImage(
+        config.name,
+        config.textureKey,
+        TILE_SIZE,
+        TILE_SIZE,
+        0,
+        0,
+        config.gid
+      );
+      if (tileset) {
+        tilesets.push(tileset);
+      } else {
+        console.warn(`Failed to add tileset: ${config.name}`);
+      }
+    }
+
+    if (tilesets.length === 0) {
+      console.error('No tilesets loaded for chunk', chunkX, chunkY);
       return;
     }
 
@@ -128,8 +151,8 @@ export class ChunkManager {
     const worldX = chunkX * this.chunkSize * TILE_SIZE * SCALE;
     const worldY = chunkY * this.chunkSize * TILE_SIZE * SCALE;
 
-    // Create the layer at the correct world position
-    const layer = tilemap.createLayer(0, tileset, worldX, worldY);
+    // Create the layer with all tilesets (array enables multi-tileset rendering)
+    const layer = tilemap.createLayer(0, tilesets, worldX, worldY);
     if (!layer) {
       console.error('Failed to create layer for chunk', chunkX, chunkY);
       return;
@@ -179,8 +202,8 @@ export class ChunkManager {
     const chunk = this.chunks.get(key);
 
     if (chunk) {
-      const frame = FLOOR_TYPE_TO_FRAME[floorType] ?? 155;
-      chunk.layer.putTileAt(frame, localX, localY);
+      const tileId = this.floorTypeToTileId[floorType] ?? this.defaultTileId;
+      chunk.layer.putTileAt(tileId, localX, localY);
     }
   }
 

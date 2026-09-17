@@ -18,6 +18,23 @@ const ENTITY_SPRITE_MAP: Record<string, string> = {
 };
 const DEFAULT_ACTOR_SPRITE = 'actor-1';
 
+/**
+ * Object type to sprite key mapping.
+ * Maps backend ObjectType values to sprite keys from TSX files.
+ */
+const OBJECT_SPRITE_MAP: Record<string, string> = {
+  tree: 'oak-tree',
+  // Rocks not yet defined in TSX - add keys when sprites are identified
+  // rock_small: 'rock-small',
+  // rock_medium: 'rock-medium',
+  // rock_large: 'rock-large',
+  // boulder: 'boulder',
+};
+
+// Bush sprites are special - they have state-dependent sprites
+const BUSH_SPRITE_FULL = 'berry-bush-full';
+const BUSH_SPRITE_EMPTY = 'berry-bush-empty';
+
 export class GameScene extends Phaser.Scene {
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasdKeys?: {
@@ -40,6 +57,11 @@ export class GameScene extends Phaser.Scene {
   private viewportTracker?: ViewportTracker;
   private worldInitialized: boolean = false;
 
+  // Camera controls
+  private cameraFollowing: boolean = true;
+  private followTarget?: Phaser.GameObjects.Sprite;
+  private positionText?: Phaser.GameObjects.Text;
+
   constructor() {
     super({ key: 'GameScene' });
   }
@@ -60,22 +82,34 @@ export class GameScene extends Phaser.Scene {
 
     // Display instructions and connection status
     this.add
-      .text(10, 10, 'Arrow keys/WASD to pan camera\nScroll wheel to zoom', {
+      .text(10, 10, 'Arrow keys/WASD: pan | Scroll: zoom | F: toggle follow | 1-5: jump to location', {
         fontFamily: 'monospace',
-        fontSize: '14px',
+        fontSize: '12px',
         color: '#ffffff',
       })
       .setScrollFactor(0)
       .setDepth(100);
 
     this.connectionText = this.add
-      .text(10, 50, 'Connecting...', {
+      .text(10, 30, 'Connecting...', {
         fontFamily: 'monospace',
-        fontSize: '14px',
+        fontSize: '12px',
         color: '#ffff00',
       })
       .setScrollFactor(0)
       .setDepth(100);
+
+    this.positionText = this.add
+      .text(10, 50, 'Pos: (0, 0) Tile: (0, 0)', {
+        fontFamily: 'monospace',
+        fontSize: '12px',
+        color: '#aaaaaa',
+      })
+      .setScrollFactor(0)
+      .setDepth(100);
+
+    // Setup camera dev tools
+    this.setupCameraControls();
 
     // Setup network
     this.setupNetwork();
@@ -142,8 +176,8 @@ export class GameScene extends Phaser.Scene {
 
     console.log(`Initializing world: ${worldSize.width}x${worldSize.height}, chunk_size=${chunkSize}`);
 
-    // Initialize chunk manager
-    this.chunkManager = new ChunkManager(this, chunkSize);
+    // Initialize chunk manager with sprite index for terrain mappings
+    this.chunkManager = new ChunkManager(this, chunkSize, this.spriteIndex);
 
     // Setup camera bounds
     const worldWidth = worldSize.width * TILE_SIZE * SCALE;
@@ -215,9 +249,12 @@ export class GameScene extends Phaser.Scene {
       `Created sprite for entity ${entity.entityId} (${spriteKey}) at (${entity.currentX}, ${entity.currentY})`
     );
 
-    // If this is the first entity, follow it with camera
+    // If this is the first entity, set it as follow target
     if (this.entitySprites.size === 1) {
-      this.cameras.main.startFollow(sprite, true, 0.1, 0.1);
+      this.followTarget = sprite;
+      if (this.cameraFollowing) {
+        this.cameras.main.startFollow(sprite, true, 0.1, 0.1);
+      }
     }
   }
 
@@ -234,13 +271,27 @@ export class GameScene extends Phaser.Scene {
     const posX = obj.position.x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
     const posY = obj.position.y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
 
-    // Get the appropriate bush sprite based on state
-    const hasBerry = obj.state.berry_count === '1';
-    const spriteKey = hasBerry ? 'berry-bush-full' : 'berry-bush-empty';
+    // Determine sprite key based on object type
+    let spriteKey: string | null = null;
+
+    if (obj.objectType === 'bush') {
+      // Bushes have state-dependent sprites
+      const hasBerry = obj.state.berry_count === '1';
+      spriteKey = hasBerry ? BUSH_SPRITE_FULL : BUSH_SPRITE_EMPTY;
+    } else {
+      // Look up sprite key from object type mapping
+      spriteKey = OBJECT_SPRITE_MAP[obj.objectType] ?? null;
+    }
+
+    if (!spriteKey) {
+      console.warn(`No sprite mapping for object type: ${obj.objectType}`);
+      return;
+    }
+
     const spriteData = this.spriteIndex ? getSpriteFrame(this.spriteIndex, spriteKey) : null;
 
     if (!spriteData) {
-      console.warn(`No sprite found for ${spriteKey}`);
+      console.warn(`No sprite found for key: ${spriteKey} (object type: ${obj.objectType})`);
       return;
     }
 
@@ -250,7 +301,7 @@ export class GameScene extends Phaser.Scene {
 
     this.objectSprites.set(obj.objectId, sprite);
     console.log(
-      `Created bush ${obj.objectId} at (${obj.position.x}, ${obj.position.y}) ${hasBerry ? 'with berry' : 'empty'}`
+      `Created ${obj.objectType} ${obj.objectId} at (${obj.position.x}, ${obj.position.y})`
     );
   }
 
@@ -265,16 +316,19 @@ export class GameScene extends Phaser.Scene {
 
   private updateObjectSprite(obj: TrackedObject): void {
     const sprite = this.objectSprites.get(obj.objectId);
-    if (sprite && obj.objectType === 'bush' && this.spriteIndex) {
-      // Get the appropriate bush sprite based on state
+    if (!sprite || !this.spriteIndex) return;
+
+    // Only bushes have state-dependent sprite changes currently
+    if (obj.objectType === 'bush') {
       const hasBerry = obj.state.berry_count === '1';
-      const spriteKey = hasBerry ? 'berry-bush-full' : 'berry-bush-empty';
+      const spriteKey = hasBerry ? BUSH_SPRITE_FULL : BUSH_SPRITE_EMPTY;
       const spriteData = getSpriteFrame(this.spriteIndex, spriteKey);
 
       if (spriteData) {
         sprite.setTexture(spriteData.textureKey, spriteData.frame);
       }
     }
+    // Trees and rocks don't have state-dependent sprites (yet)
   }
 
   private setupKeyboardControls(): void {
@@ -290,6 +344,99 @@ export class GameScene extends Phaser.Scene {
       S: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
       D: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D),
     };
+  }
+
+  private setupCameraControls(): void {
+    if (!this.input.keyboard) return;
+
+    // F key to toggle camera follow
+    this.input.keyboard.on('keydown-F', () => {
+      this.toggleCameraFollow();
+    });
+
+    // Number keys for quick navigation
+    // 1: Top-left, 2: Top-right, 3: Bottom-left, 4: Bottom-right, 5: Center
+    this.input.keyboard.on('keydown-ONE', () => this.jumpToCorner('top-left'));
+    this.input.keyboard.on('keydown-TWO', () => this.jumpToCorner('top-right'));
+    this.input.keyboard.on('keydown-THREE', () => this.jumpToCorner('bottom-left'));
+    this.input.keyboard.on('keydown-FOUR', () => this.jumpToCorner('bottom-right'));
+    this.input.keyboard.on('keydown-FIVE', () => this.jumpToCorner('center'));
+
+    // Expose camera controls to window for console access
+    (window as unknown as Record<string, unknown>).cam = {
+      goto: (tileX: number, tileY: number) => this.gotoTile(tileX, tileY),
+      follow: () => this.toggleCameraFollow(true),
+      free: () => this.toggleCameraFollow(false),
+      zoom: (level: number) => {
+        this.cameras.main.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, level));
+      },
+      pos: () => {
+        const cam = this.cameras.main;
+        const tileX = Math.floor(cam.scrollX / (TILE_SIZE * SCALE));
+        const tileY = Math.floor(cam.scrollY / (TILE_SIZE * SCALE));
+        return { x: cam.scrollX, y: cam.scrollY, tileX, tileY };
+      },
+    };
+    console.log('Camera controls available: cam.goto(x,y), cam.follow(), cam.free(), cam.zoom(n), cam.pos()');
+  }
+
+  private toggleCameraFollow(follow?: boolean): void {
+    if (follow !== undefined) {
+      this.cameraFollowing = follow;
+    } else {
+      this.cameraFollowing = !this.cameraFollowing;
+    }
+
+    if (this.cameraFollowing && this.followTarget) {
+      this.cameras.main.startFollow(this.followTarget, true, 0.1, 0.1);
+      console.log('Camera: following entity');
+    } else {
+      this.cameras.main.stopFollow();
+      console.log('Camera: free mode');
+    }
+  }
+
+  private jumpToCorner(corner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'center'): void {
+    if (!this.worldInitialized) return;
+
+    const worldSize = this.worldState.getWorldSize();
+    const margin = 100; // Tiles from edge
+
+    let tileX: number, tileY: number;
+    switch (corner) {
+      case 'top-left':
+        tileX = margin;
+        tileY = margin;
+        break;
+      case 'top-right':
+        tileX = worldSize.width - margin;
+        tileY = margin;
+        break;
+      case 'bottom-left':
+        tileX = margin;
+        tileY = worldSize.height - margin;
+        break;
+      case 'bottom-right':
+        tileX = worldSize.width - margin;
+        tileY = worldSize.height - margin;
+        break;
+      case 'center':
+        tileX = worldSize.width / 2;
+        tileY = worldSize.height / 2;
+        break;
+    }
+
+    this.gotoTile(tileX, tileY);
+  }
+
+  private gotoTile(tileX: number, tileY: number): void {
+    // Stop following when jumping
+    this.toggleCameraFollow(false);
+
+    const worldX = tileX * TILE_SIZE * SCALE;
+    const worldY = tileY * TILE_SIZE * SCALE;
+    this.cameras.main.centerOn(worldX, worldY);
+    console.log(`Camera: jumped to tile (${tileX}, ${tileY})`);
   }
 
   private setupScrollZoom(): void {
@@ -329,6 +476,17 @@ export class GameScene extends Phaser.Scene {
 
     // Update viewport tracker (requests new chunks when camera moves)
     this.viewportTracker?.update();
+
+    // Update position display
+    if (this.positionText) {
+      const cam = this.cameras.main;
+      const centerX = cam.scrollX + cam.width / 2;
+      const centerY = cam.scrollY + cam.height / 2;
+      const tileX = Math.floor(centerX / (TILE_SIZE * SCALE));
+      const tileY = Math.floor(centerY / (TILE_SIZE * SCALE));
+      const followStatus = this.cameraFollowing ? ' [Following]' : ' [Free]';
+      this.positionText.setText(`Tile: (${tileX}, ${tileY}) Zoom: ${cam.zoom.toFixed(1)}x${followStatus}`);
+    }
 
     // Camera panning
     const camSpeed = 5;

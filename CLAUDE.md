@@ -4,8 +4,8 @@ Quick reference for AI agents working on this codebase.
 
 ## Current Status
 
-**Next Milestone**: 7 - Logging & Replay
-**Completed**: 0, 1, 2, 3, 4, 5a, 5b, 6
+**Next Milestone**: 7 - Logging & Replay (per implementation plan)
+**Completed**: 0, 1, 2, 3, 4, 5a, 5b, 6, plus procedural terrain generation and chunked terrain streaming (done out of plan order; see `docs/terrain_generation_proposal.md`)
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)
 
 ## Project Structure
@@ -31,7 +31,8 @@ bobgame/
 ## Running the System
 
 ```bash
-./dev.sh              # Uses 'foraging' config (alice + bob competing for berries)
+./dev.sh              # Uses 'island' config (4000x4000 procedural island, generated on first run)
+./dev.sh foraging     # 10x10 world, alice + bob competing for berries
 ./dev.sh default      # Minimal config (single entity, no objects)
 ```
 
@@ -44,8 +45,16 @@ cd viewer && npm run dev
 ```
 
 **Configs** are in `world/configs/`:
+- `island.toml` - 4000x4000 procedural island, saved to `saves/island.npz` after first generation
+- `island_small.toml` - 500x500 island for quick testing
 - `foraging.toml` - 10x10 world with alice (2,2), bob (8,8), and 3 bushes
 - `default.toml` - Minimal 10x10 world
+
+**Terrain tools**:
+```bash
+cd world && uv run python -m world.terrain              # Standalone terrain generation CLI
+uv run python tools/visualize_world.py <map.npz> [out]  # Render a saved map to PNG (output is gitignored)
+```
 
 ## Key Files by Component
 
@@ -56,6 +65,9 @@ cd viewer && npm run dev
 - `foraging.py` - Collect/eat actions and bush regeneration
 - `server.py` - WorldServer entry point
 - `services/` - gRPC service implementations
+- `chunks.py` - Server-side chunk manager (terrain + object chunks sent to viewers)
+- `terrain_types.py` - FloorType enum (numeric values must match `viewer/src/terrain/TerrainConfig.ts`)
+- `terrain/` - Procedural generation (noise, island shaping, hydrology, classification, object placement, persistence)
 
 **Agents** (`agents/src/agents/`):
 - `random_agent.py` - SimpleAgent with state machine (WANDER/SEEK/COLLECT/EAT)
@@ -70,7 +82,10 @@ cd viewer && npm run dev
 - Sprite index generated to `viewer/public/assets/sprite-index.json`
 
 **Viewer** (`viewer/src/`):
-- `scenes/GameScene.ts` - Main rendering
+- `scenes/GameScene.ts` - Main rendering, object sprites, camera dev controls (F toggles follow, 1-5 jump to corners, `window.cam` helpers in console)
+- `terrain/TerrainConfig.ts` - Floor type → sprite key mapping and multi-tileset GID offsets
+- `terrain/ChunkManager.ts` - Per-chunk Phaser tilemaps built from the sprite index
+- `terrain/ViewportTracker.ts` - Requests chunks as the camera moves
 - `network/WebSocketClient.ts` - Server connection
 - `network/WorldState.ts` - Entity interpolation
 

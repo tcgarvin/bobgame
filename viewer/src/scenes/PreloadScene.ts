@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import type { SpriteIndex } from '../sprites';
 import { spritesheetToKey, getUniqueSpritesheets, getAnimationFrames } from '../sprites';
+import { TERRAIN_TILESETS } from '../terrain';
 
 const TILE_SIZE = 16;
 
@@ -70,12 +71,16 @@ export class PreloadScene extends Phaser.Scene {
       });
     }
 
-    // Always load Floor.png for terrain chunks (may already be in spritesheets)
-    if (!spritesheets.includes('Objects/Floor.png')) {
-      this.load.spritesheet('Objects-Floor', 'assets/dawnlike/Objects/Floor.png', {
-        frameWidth: TILE_SIZE,
-        frameHeight: TILE_SIZE,
-      });
+    // Load all terrain tilesets (Floor, Tile, Hill0)
+    for (const tileset of TERRAIN_TILESETS) {
+      // Convert texture key to spritesheet path
+      const spritesheetPath = `assets/dawnlike/${tileset.textureKey.replace('-', '/')}.png`;
+      if (!this.load.textureManager?.exists(tileset.textureKey)) {
+        this.load.spritesheet(tileset.textureKey, spritesheetPath, {
+          frameWidth: TILE_SIZE,
+          frameHeight: TILE_SIZE,
+        });
+      }
     }
 
     // Load spritesheets and then create animations

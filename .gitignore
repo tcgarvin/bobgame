@@ -57,3 +57,6 @@ runs/
 # Local settings
 .env
 .env.local
+
+# Generated terrain renders (tools/visualize_world.py)
+world_map*.png

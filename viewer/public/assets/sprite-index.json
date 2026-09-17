@@ -759,6 +759,11 @@
     "frame": 155,
     "spritesheet": "Objects/Floor.png"
   },
+  "mountain": {
+    "columns": 16,
+    "frame": 199,
+    "spritesheet": "Objects/Hill0.png"
+  },
   "oak-tree": {
     "columns": 12,
     "frame": 39,
@@ -768,6 +773,21 @@
     "columns": 16,
     "frame": 74,
     "spritesheet": "GUI/GUI0.png"
+  },
+  "shallow-water": {
+    "columns": 8,
+    "frame": 2,
+    "spritesheet": "Objects/Tile.png"
+  },
+  "stone-ground": {
+    "columns": 21,
+    "frame": 162,
+    "spritesheet": "Objects/Floor.png"
+  },
+  "water": {
+    "columns": 8,
+    "frame": 1,
+    "spritesheet": "Objects/Tile.png"
   },
   "wood-floor-full": {
     "columns": 21,
