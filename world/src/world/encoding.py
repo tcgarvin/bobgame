@@ -62,9 +62,7 @@ def decode_terrain_rle(data: bytes, shape: tuple[int, int]) -> NDArray[np.uint8]
         value = data[i]
         count = data[i + 1]
         if pos + count > expected_size:
-            raise ValueError(
-                f"RLE decode overflow: {pos + count} > {expected_size}"
-            )
+            raise ValueError(f"RLE decode overflow: {pos + count} > {expected_size}")
         result[pos : pos + count] = value
         pos += count
         i += 2
@@ -104,9 +102,7 @@ def decode_terrain_base64(data: str, shape: tuple[int, int]) -> NDArray[np.uint8
     return decode_terrain_rle(rle_bytes, shape)
 
 
-def encode_terrain_changes(
-    changes: list[tuple[int, int, int]]
-) -> list[dict[str, int]]:
+def encode_terrain_changes(changes: list[tuple[int, int, int]]) -> list[dict[str, int]]:
     """Encode sparse terrain changes as JSON-serializable list.
 
     Args:
@@ -118,9 +114,7 @@ def encode_terrain_changes(
     return [{"x": x, "y": y, "floor_type": ft} for x, y, ft in changes]
 
 
-def decode_terrain_changes(
-    data: list[dict[str, int]]
-) -> list[tuple[int, int, int]]:
+def decode_terrain_changes(data: list[dict[str, int]]) -> list[tuple[int, int, int]]:
     """Decode sparse terrain changes from JSON.
 
     Args:

@@ -98,9 +98,7 @@ def generate_terrain(config: TerrainConfig) -> GenerationResult:
     sea_level = compute_sea_level(elevation, config.island.land_fraction)
     land_mask = create_land_mask(elevation, sea_level)
 
-    logger.info(
-        f"Sea level: {sea_level:.3f}, land fraction: {np.mean(land_mask):.2%}"
-    )
+    logger.info(f"Sea level: {sea_level:.3f}, land fraction: {np.mean(land_mask):.2%}")
 
     # Stage C: Coastal refinement
     logger.info("Stage C: Refining coastline...")
@@ -137,9 +135,7 @@ def generate_terrain(config: TerrainConfig) -> GenerationResult:
     dist_to_land = compute_distance_to_land(land_mask)
 
     # Generate moisture field with water influence
-    moisture = make_moisture(
-        width, height, config.seed, config.moisture, dist_to_water
-    )
+    moisture = make_moisture(width, height, config.seed, config.moisture, dist_to_water)
 
     # Stage F: Terrain classification
     logger.info("Stage F: Classifying terrain...")

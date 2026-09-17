@@ -8,7 +8,9 @@ class NoiseConfig(BaseModel):
 
     base_wavelength: int = Field(default=900, description="Base wavelength in tiles")
     octaves: int = Field(default=6, description="Number of octaves for fBm")
-    lacunarity: float = Field(default=2.0, description="Frequency multiplier per octave")
+    lacunarity: float = Field(
+        default=2.0, description="Frequency multiplier per octave"
+    )
     gain: float = Field(default=0.5, description="Amplitude multiplier per octave")
 
 
@@ -52,9 +54,7 @@ class IslandConfig(BaseModel):
     falloff_end: float = Field(
         default=0.98, description="Normalized radius where falloff reaches max"
     )
-    coast_drop: float = Field(
-        default=2.2, description="Elevation drop at falloff end"
-    )
+    coast_drop: float = Field(default=2.2, description="Elevation drop at falloff end")
 
 
 class HydrologyConfig(BaseModel):
@@ -105,7 +105,9 @@ class ClassificationConfig(BaseModel):
 class ForestConfig(BaseModel):
     """Forest/vegetation parameters."""
 
-    base_wavelength: int = Field(default=600, description="Forest density noise wavelength")
+    base_wavelength: int = Field(
+        default=600, description="Forest density noise wavelength"
+    )
     octaves: int = Field(default=4, description="Forest density noise octaves")
     smoothstep_low: float = Field(default=0.2, description="Smoothstep lower bound")
     smoothstep_high: float = Field(default=0.75, description="Smoothstep upper bound")

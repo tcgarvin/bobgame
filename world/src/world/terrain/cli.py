@@ -34,9 +34,7 @@ def main() -> None:
         default=None,
         help="Directory to save debug images (optional)",
     )
-    parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Verbose logging"
-    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
     args = parser.parse_args()
 

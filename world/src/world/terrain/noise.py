@@ -43,7 +43,7 @@ def _gaussian_noise_2d(
     # Normalize to roughly [-1, 1]
     std = np.std(smoothed)
     if std > 0:
-        smoothed /= (2.5 * std)
+        smoothed /= 2.5 * std
 
     return smoothed
 
@@ -245,7 +245,9 @@ def domain_warp(
     return result.astype(np.float32)
 
 
-def smoothstep(edge0: float, edge1: float, x: NDArray[np.float32]) -> NDArray[np.float32]:
+def smoothstep(
+    edge0: float, edge1: float, x: NDArray[np.float32]
+) -> NDArray[np.float32]:
     """Smooth Hermite interpolation between 0 and 1.
 
     Args:

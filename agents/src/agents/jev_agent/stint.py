@@ -8,6 +8,7 @@ whole run into a `StintReport` the planner can read.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -39,6 +40,9 @@ DANGER_HEALTH_FLOOR = 6
 REPEATED_FAILURE_LIMIT = 3
 
 END_SUCCESS_OR_JUDGEMENT = "eject"
+# The world's intent deadline is 1200 ms after tick start; leave room for the
+# gRPC round trip and the state build.
+JEV_TICK_BUDGET_SECONDS = 0.9
 END_TICKS = "ticks_exhausted"
 END_DEATH = "death"
 END_REPEATED_FAILURE = "repeated_failure"
@@ -228,7 +232,17 @@ class Stint:
         criteria = options_to_criteria(options)
 
         try:
-            decision = await self.jev.decide(state, criteria)
+            decision = await asyncio.wait_for(
+                self.jev.decide(state, criteria), timeout=JEV_TICK_BUDGET_SECONDS
+            )
+        except asyncio.TimeoutError:
+            # Better to repeat a sensible action than to miss the deadline.
+            logger.warning("jev_call_timed_out", budget_s=JEV_TICK_BUDGET_SECONDS)
+            fallback = self._repeat_or_wait(options)
+            self._commit(
+                fallback, JevDecision(action=fallback.key), len(options), "jev_timeout"
+            )
+            return fallback.intent
         except (
             Exception
         ) as error:  # noqa: BLE001 - the tick must still produce an intent
@@ -348,6 +362,14 @@ class Stint:
         if self.model.self_info.health >= DANGER_HEALTH_FLOOR:
             return None
         return retreat_option(self.model, options)
+
+    def _repeat_or_wait(self, options: Sequence[Option]) -> Option:
+        """The last option if it is still legal, otherwise wait."""
+        if self._last_option is not None:
+            again = _find_option(options, self._last_option.key)
+            if again is not None:
+                return again
+        return _find_option(options, "wait") or options[0]
 
     def _should_repeat_last(self, options: Sequence[Option]) -> bool:
         if self.brief.check_every <= 1 or self._last_option is None:

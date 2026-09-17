@@ -35,6 +35,10 @@ SPAWN_MAX_DISTANCE = 40
 CHASE_RADIUS = 8
 DESPAWN_DISTANCE = 50
 WANDER_CHANCE = 0.5
+# When wandering, a wolf that can smell a player (beyond CHASE_RADIUS) drifts
+# toward them this often; otherwise wolves spawn 20+ tiles out and never
+# meet anyone.
+PROWL_CHANCE = 0.6
 SPAWN_ATTEMPTS = 400
 
 # (dx, dy) -> Direction, derived from the canonical direction table.
@@ -199,7 +203,12 @@ class WolfSimulator:
                     world, wolf.position, nearest[0].position
                 )
             elif self.rng.random() < WANDER_CHANCE:
-                direction = self._wander_direction(world, wolf.position)
+                if nearest is not None and self.rng.random() < PROWL_CHANCE:
+                    direction = self._chase_direction(
+                        world, wolf.position, nearest[0].position
+                    )
+                else:
+                    direction = self._wander_direction(world, wolf.position)
             else:
                 direction = None
 

@@ -125,7 +125,7 @@ Behaviour each tick (deterministic, seeded RNG on the world):
 - If a living player is within 8 tiles: move one step toward the nearest one
   (greedy with a fallback to any walkable neighbour). If adjacent, attack
   instead of moving.
-- Otherwise wander randomly, moving on 50% of ticks.
+- Otherwise wander, moving on 50% of ticks; 60% of those steps drift toward the nearest living player (prowling), the rest are random.
 - If more than 50 tiles from every living player: despawn.
 
 Wolves have hunger fixed at max and never starve.

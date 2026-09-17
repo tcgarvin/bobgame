@@ -26,14 +26,18 @@ class FloorType(str, Enum):
 
 
 # Define sets for O(1) lookup
-_WALKABLE_TYPES = frozenset({
-    FloorType.SHALLOW_WATER,
-    FloorType.SAND,
-    FloorType.GRASS,
-    FloorType.DIRT,
-    FloorType.STONE,
-})
+_WALKABLE_TYPES = frozenset(
+    {
+        FloorType.SHALLOW_WATER,
+        FloorType.SAND,
+        FloorType.GRASS,
+        FloorType.DIRT,
+        FloorType.STONE,
+    }
+)
 
-_OPAQUE_TYPES = frozenset({
-    FloorType.MOUNTAIN,
-})
+_OPAQUE_TYPES = frozenset(
+    {
+        FloorType.MOUNTAIN,
+    }
+)

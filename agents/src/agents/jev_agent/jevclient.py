@@ -24,7 +24,7 @@ from typesafe_sdk import (
 logger = structlog.get_logger(__name__)
 
 DEFAULT_MODEL = "jev-latest"
-DEFAULT_TIMEOUT_SECONDS = 8.0
+DEFAULT_TIMEOUT_SECONDS = 2.5
 
 ACTION_QUESTION = (
     "You are controlling a settler in a survival world. Given the state, which "

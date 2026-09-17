@@ -155,6 +155,18 @@ class WorldClient:
 
         while True:
             item = await queue.get()
+            # If the loop fell behind (a slow API call), skip straight to the
+            # newest observation: intents for old ticks are rejected anyway.
+            skipped = 0
+            while isinstance(item, pb.Observation) and not queue.empty():
+                newer = queue.get_nowait()
+                if newer is None or isinstance(newer, BaseException):
+                    queue.put_nowait(newer)
+                    break
+                item = newer
+                skipped += 1
+            if skipped:
+                logger.warning("stale_observations_skipped", count=skipped)
             if item is None:
                 return
             if isinstance(item, BaseException):

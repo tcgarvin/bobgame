@@ -496,6 +496,8 @@ class Planner:
         self.history: list[ModelMessage] = []
         self.reports: list[StintReport] = []
         self.last_thought = ""
+        self._tool_calls_this_turn = 0
+        self._turns_without_tools = 0
 
     def note_report(self, report: StintReport) -> None:
         """Remember a finished stint so the next turn's prompt can mention it."""
@@ -510,7 +512,9 @@ class Planner:
         parts.append("Your notes:\n" + read_memory(self.memory_path))
         parts.append(
             "Decide what to do next. Use start_stint for anything that takes "
-            "more than one tick. Finish with one short paragraph of reflection."
+            "more than one tick. Actions only happen through tool calls; text "
+            "that merely describes a call does nothing. Finish with one short "
+            "paragraph of reflection."
         )
         return "\n\n".join(parts)
 
@@ -529,6 +533,7 @@ class Planner:
         """Log every tool call and result so a live run can be followed."""
         async for event in events:
             if isinstance(event, FunctionToolCallEvent):
+                self._tool_calls_this_turn += 1
                 logger.info(
                     "planner_tool_call",
                     entity_id=self.entity_id,
@@ -548,6 +553,7 @@ class Planner:
     async def take_turn(self) -> str:
         """Run one planner turn and publish its reflection."""
         logger.info("planner_turn_started", entity_id=self.entity_id)
+        self._tool_calls_this_turn = 0
         try:
             result = await self.agent.run(
                 self.build_prompt(),
@@ -568,4 +574,28 @@ class Planner:
         if self.last_thought:
             self.bridge.set_thought(self.last_thought)
         logger.info("planner_thought", entity_id=self.entity_id, text=self.last_thought)
+        await self._recover_from_text_only_turn()
         return self.last_thought
+
+    async def _recover_from_text_only_turn(self) -> None:
+        """Break the loop where the model narrates tool calls instead of making them.
+
+        A turn with no tool calls does nothing in the world. Small models
+        sometimes drift into writing `start_stint(...)` as prose; once that is
+        in the history they repeat it forever. After two such turns the
+        history is dropped so the next turn starts clean.
+        """
+        if self._tool_calls_this_turn > 0:
+            self._turns_without_tools = 0
+            return
+        self._turns_without_tools += 1
+        logger.warning(
+            "planner_turn_without_tools",
+            entity_id=self.entity_id,
+            streak=self._turns_without_tools,
+        )
+        if self._turns_without_tools >= 2:
+            logger.warning("planner_history_reset", entity_id=self.entity_id)
+            self.history = []
+            self._turns_without_tools = 0
+        await asyncio.sleep(TURN_RETRY_SECONDS)

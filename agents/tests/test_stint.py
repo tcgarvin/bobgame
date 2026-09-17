@@ -383,3 +383,25 @@ async def test_status_json_reports_the_last_decision(log_path: Path) -> None:
     assert payload["eject"] == 0.4
     assert payload["danger"] == 0.2
     assert payload["ticks_used"] == 1
+
+
+async def test_a_slow_jev_answer_falls_back_to_repeating_the_last_action(
+    log_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from agents.jev_agent import stint as stint_module
+
+    class SlowJev(FakeJevClient):
+        async def decide(self, state, options):  # type: ignore[no-untyped-def]
+            if len(self.calls) >= 1:
+                await asyncio.sleep(0.2)
+            return await super().decide(state, options)
+
+    monkeypatch.setattr(stint_module, "JEV_TICK_BUDGET_SECONDS", 0.05)
+    jev = SlowJev(default_action="move_E")
+    harness = StintHarness(jev, make_brief(max_ticks=10), log_path)
+    await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
+    intent = await harness.tick(make_observation(2, make_entity("ada", (11, 10))))
+    assert intent.HasField("move"), "the last action is repeated on timeout"
+    assert harness.stint.records[-1].note == "jev_timeout"

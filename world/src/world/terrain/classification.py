@@ -168,9 +168,7 @@ def _apply_mountain_cap(
 
         # This is a simplified approach - we just take random subset
         # A better approach would sort by elevation and take top N
-        indices = np.random.choice(
-            len(candidate_ys), size=max_mountains, replace=False
-        )
+        indices = np.random.choice(len(candidate_ys), size=max_mountains, replace=False)
         for i in indices:
             floor[candidate_ys[i], candidate_xs[i]] = _floor_value(FloorType.MOUNTAIN)
 

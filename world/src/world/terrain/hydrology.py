@@ -247,7 +247,9 @@ def select_river_sources(
     # Find candidate cells: inland, land, high elevation
     min_dist = config.source_min_distance_from_coast
     land_elevations = elevation[land_mask]
-    elev_threshold = np.quantile(land_elevations, 0.80) if len(land_elevations) > 0 else 0
+    elev_threshold = (
+        np.quantile(land_elevations, 0.80) if len(land_elevations) > 0 else 0
+    )
 
     candidates = []
     for y in range(height):
@@ -378,7 +380,9 @@ def widen_river_path(
 
     for y, x in path:
         acc = flow_acc[y, x]
-        river_width = config.river_width_max if acc > wide_threshold else config.river_width_min
+        river_width = (
+            config.river_width_max if acc > wide_threshold else config.river_width_min
+        )
 
         # Add cells within radius
         radius = river_width // 2
@@ -527,6 +531,8 @@ def carve_rivers(
                             if dy * dy + dx * dx <= radius * radius:
                                 ford_mask[ny, nx] = True
 
-        rivers.append(River(path=path, width=config.river_width_min, fords=ford_indices))
+        rivers.append(
+            River(path=path, width=config.river_width_min, fords=ford_indices)
+        )
 
     return river_mask, ford_mask, rivers
