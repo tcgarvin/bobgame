@@ -209,7 +209,20 @@ class WorldModel:
         for obj in self.objects.values():
             if obj.position == position and obj.object_type in BLOCKING_OBJECT_TYPES:
                 return False
+        # Other entities seen this very tick block the tile for now; the world
+        # refuses moves onto an occupied tile unless the occupant moves away.
+        for entity in self.entities.values():
+            if (
+                entity.position == position
+                and entity.last_seen == self.tick
+                and entity.alive
+            ):
+                return False
         return True
+
+    def note_own_outcome(self, text: str) -> None:
+        """Record an outcome the world did not report as an event (e.g. a blocked move)."""
+        self.history.append(HistoryEntry(self.tick, f"t{self.tick} {text}"))
 
     # -- updating -----------------------------------------------------------
 

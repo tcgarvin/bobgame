@@ -20,9 +20,12 @@ def _world_with_entity(**entity_kwargs: object) -> World:
 
 
 class TestHunger:
-    def test_hunger_drops_each_tick(self) -> None:
+    def test_hunger_drops_every_fourth_tick(self) -> None:
         world = _world_with_entity(hunger=80)
         world.tick = 1
+        process_hunger_phase(world, TickEvents())
+        assert world.get_entity("bob").hunger == 80
+        world.tick = 4
         process_hunger_phase(world, TickEvents())
         assert world.get_entity("bob").hunger == 79
 
@@ -44,11 +47,11 @@ class TestHunger:
         assert wolf.hunger == 100
         assert wolf.health == 10
 
-    def test_starvation_damages_every_second_tick(self) -> None:
+    def test_starvation_damages_every_fourth_tick(self) -> None:
         world = _world_with_entity(hunger=0)
         events = TickEvents()
 
-        world.tick = 3  # odd tick: no starvation damage
+        world.tick = 3  # off interval: no starvation damage
         process_hunger_phase(world, events)
         assert world.get_entity("bob").health == 20
 
@@ -60,7 +63,7 @@ class TestHunger:
     def test_starvation_can_kill(self) -> None:
         world = _world_with_entity(hunger=0, health=1)
         events = TickEvents()
-        world.tick = 2
+        world.tick = 4
 
         process_hunger_phase(world, events)
 

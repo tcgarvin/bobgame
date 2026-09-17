@@ -11,8 +11,11 @@ from .types import Position
 
 logger = structlog.get_logger()
 
+# Hunger drops one point every HUNGER_INTERVAL_TICKS ticks. At a 2 s tick a
+# full stomach (100) lasts ~13 minutes before starvation damage begins.
 HUNGER_PER_TICK = 1
-STARVATION_INTERVAL_TICKS = 2
+HUNGER_INTERVAL_TICKS = 4
+STARVATION_INTERVAL_TICKS = 4
 STARVATION_DAMAGE = 1
 REGEN_INTERVAL_TICKS = 5
 REGEN_AMOUNT = 1
@@ -34,10 +37,11 @@ def process_hunger_phase(world: World, events: TickEvents) -> None:
 
     Wolves never starve; their hunger stays at max.
     """
-    for entity in sorted(world.living_entities(), key=lambda e: e.entity_id):
-        if entity.entity_type == WOLF_TYPE:
-            continue
-        world.set_entity(entity.with_hunger(entity.hunger - HUNGER_PER_TICK))
+    if world.tick % HUNGER_INTERVAL_TICKS == 0:
+        for entity in sorted(world.living_entities(), key=lambda e: e.entity_id):
+            if entity.entity_type == WOLF_TYPE:
+                continue
+            world.set_entity(entity.with_hunger(entity.hunger - HUNGER_PER_TICK))
 
     if world.tick % STARVATION_INTERVAL_TICKS != 0:
         return

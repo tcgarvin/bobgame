@@ -9,7 +9,7 @@ track needs to deviate, note it in the "Deviations" section at the bottom.
 
 ## Terminology
 
-- **Planner**: a pydantic-ai agent (OpenRouter, `z-ai/glm-5.3-flash`) that
+- **Planner**: a pydantic-ai agent (OpenRouter, default `qwen/qwen3.7-flash`; GLM 5.3 flash works with reasoning effort low but is ~3x slower) that
   thinks slowly, remembers, and decides what to do next.
 - **Brief**: the natural-language instruction plus typed limits the planner
   hands to Jev.
@@ -35,7 +35,7 @@ track needs to deviate, note it in the "Deviations" section at the bottom.
 | `max_hunger` | 100 | n/a (hunger stays at max) |
 | base attack damage | 2 | 3 |
 
-- Hunger drops by 1 every tick. At hunger 0 the entity loses 1 health every 2 ticks.
+- Hunger drops by 1 every 4 ticks. At hunger 0 the entity loses 1 health every 4 ticks.
 - Health regenerates 1 per 5 ticks while hunger > 50 and health < max.
 - Eating one berry restores 20 hunger (capped at max). Eating anything else fails.
 - New players spawn with health 20, hunger 80.

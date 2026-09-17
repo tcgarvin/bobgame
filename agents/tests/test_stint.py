@@ -182,10 +182,10 @@ async def test_a_success_resets_the_failure_streak(log_path: Path) -> None:
         make_observation(3, make_entity("ada", (10, 10)), events=[failure])
     )
     await harness.tick(
-        make_observation(4, make_entity("ada", (10, 10)), events=[success])
+        make_observation(4, make_entity("ada", (10, 9)), events=[success])
     )
     await harness.tick(
-        make_observation(5, make_entity("ada", (10, 10)), events=[failure])
+        make_observation(5, make_entity("ada", (10, 9)), events=[failure])
     )
     assert not harness.stint.finished
 
@@ -240,10 +240,24 @@ async def test_check_every_repeats_the_last_action_between_calls(
     jev = FakeJevClient(default_action="move_E")
     harness = StintHarness(jev, make_brief(max_ticks=6, check_every=2), log_path)
     for tick in range(1, 5):
-        await harness.tick(make_observation(tick, make_entity("ada", (10, 10))))
+        # The actor really moves east each tick, so no move counts as blocked.
+        await harness.tick(make_observation(tick, make_entity("ada", (9 + tick, 10))))
     assert len(jev.calls) == 2, "Jev is asked every other tick"
     assert [record.action for record in harness.stint.records] == ["move_E"] * 4
     assert harness.stint.records[1].note == "repeat"
+
+
+async def test_accepted_move_that_goes_nowhere_counts_as_blocked(
+    log_path: Path,
+) -> None:
+    jev = FakeJevClient(default_action="move_E")
+    harness = StintHarness(jev, make_brief(max_ticks=20), log_path)
+    for tick in range(1, 5):
+        await harness.tick(make_observation(tick, make_entity("ada", (10, 10))))
+    results = [record.intent_result for record in harness.stint.records]
+    assert results[:3] == ["blocked", "blocked", "blocked"]
+    assert harness.stint.finished, "three blocked moves in a row end the stint"
+    assert any("blocked" in line for line in harness.model.recent_history())
 
 
 async def test_travel_choice_sets_and_clears_the_travel(log_path: Path) -> None:

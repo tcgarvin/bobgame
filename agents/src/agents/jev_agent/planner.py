@@ -12,11 +12,17 @@ import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import AsyncIterable, Protocol, Sequence
 
 import structlog
 from pydantic_ai import Agent, ModelRetry, RunContext
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import (
+    AgentStreamEvent,
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
+    ModelMessage,
+)
+from pydantic_ai.models.openrouter import OpenRouterModelSettings
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 
@@ -28,11 +34,31 @@ from .worldmodel import WorldModel
 
 logger = structlog.get_logger(__name__)
 
-DEFAULT_PLANNER_MODEL = "z-ai/glm-5.3-flash"
+DEFAULT_PLANNER_MODEL = "qwen/qwen3.7-flash"
 MAX_TOOL_CALLS_PER_TURN = 12
 HISTORY_MESSAGE_LIMIT = 20
 STINT_REPORTS_KEPT = 10
 TURN_RETRY_SECONDS = 5.0
+
+
+def planner_model_settings(model_name: str) -> OpenRouterModelSettings:
+    """Per-model settings: reasoning off where allowed, low effort otherwise.
+
+    Reasoning traces multiply planner latency; the planner gets its thinking
+    from tool calls and the reflection paragraph instead. Some endpoints
+    (GLM 5.x, MiniMax) refuse to disable reasoning, so they get low effort.
+    """
+    mandatory_reasoning = ("glm-5", "minimax")
+    if any(marker in model_name for marker in mandatory_reasoning):
+        reasoning: dict[str, object] = {"effort": "low"}
+    else:
+        reasoning = {"enabled": False}
+    return OpenRouterModelSettings(
+        openrouter_reasoning=reasoning,  # type: ignore[typeddict-item]
+        temperature=0.7,
+        timeout=90.0,
+    )
+
 
 SETTLEMENT_NARRATIVE = """\
 You are one of twelve settlers who woke up together on a large island. Your
@@ -190,6 +216,7 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
         output_type=str,
         system_prompt=SETTLEMENT_NARRATIVE,
         retries=2,
+        model_settings=planner_model_settings(model_name),
     )
 
     @agent.tool
@@ -498,14 +525,36 @@ class Planner:
                 logger.warning("planner_turn_failed", error=str(error))
                 await asyncio.sleep(TURN_RETRY_SECONDS)
 
+    async def _log_events(self, events: AsyncIterable[AgentStreamEvent]) -> None:
+        """Log every tool call and result so a live run can be followed."""
+        async for event in events:
+            if isinstance(event, FunctionToolCallEvent):
+                logger.info(
+                    "planner_tool_call",
+                    entity_id=self.entity_id,
+                    tool=event.part.tool_name,
+                    args=event.part.args_as_json_str()[:300],
+                )
+            elif isinstance(event, FunctionToolResultEvent):
+                logger.info(
+                    "planner_tool_result",
+                    entity_id=self.entity_id,
+                    tool=(
+                        event.part.tool_name if hasattr(event.part, "tool_name") else ""
+                    ),
+                    result=str(event.part.content)[:200],
+                )
+
     async def take_turn(self) -> str:
         """Run one planner turn and publish its reflection."""
+        logger.info("planner_turn_started", entity_id=self.entity_id)
         try:
             result = await self.agent.run(
                 self.build_prompt(),
                 deps=self.deps,
                 message_history=self.history,
                 usage_limits=UsageLimits(tool_calls_limit=MAX_TOOL_CALLS_PER_TURN),
+                event_stream_handler=lambda _ctx, events: self._log_events(events),
             )
         except UsageLimitExceeded:
             # Hitting the per-turn tool budget is normal, not an error: the turn

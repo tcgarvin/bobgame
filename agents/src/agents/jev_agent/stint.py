@@ -200,6 +200,8 @@ class Stint:
             self._start_inventory = dict(self.model.self_info.inventory)
 
         self._absorb(digest)
+        if not any(not acted.success for acted in digest.own_actions):
+            self._detect_blocked_move()
 
         reason = self._termination_reason()
         if reason:
@@ -295,6 +297,32 @@ class Stint:
                 f"discovered {len(digest.discovered_object_ids)} new objects"
             )
 
+    def _detect_blocked_move(self) -> None:
+        """A move the world accepted but did not perform leaves us on the same tile.
+
+        The world reports successful moves as events but says nothing about a
+        move that lost to an occupied tile, so compare positions ourselves and
+        treat it as a failure for the repeat rule and for Jev's recent history.
+        """
+        if not self.records:
+            return
+        last = self.records[-1]
+        is_move = last.action.startswith(("move_", "follow_travel", "travel_to:"))
+        if not is_move or last.intent_result != "accepted":
+            return
+        if last.tick != self.model.tick - 1 or self.model.position != last.position:
+            return
+        self.records[-1] = replace(last, intent_result="blocked")
+        self.model.note_own_outcome(
+            f"{last.action} blocked (tile occupied or impassable)"
+        )
+        key = "move:silently_blocked"
+        if key == self._failure_action:
+            self._failure_count += 1
+        else:
+            self._failure_action = key
+            self._failure_count = 1
+
     def _termination_reason(self) -> str:
         if not self.model.self_info.alive:
             return END_DEATH
@@ -371,6 +399,17 @@ class Stint:
             ticks=self.ticks_used,
             brief=self.brief.instruction,
         )
+        self._append_log_line(
+            {
+                "entity_id": self.model.entity_id,
+                "event": "stint_end",
+                "tick": self.model.tick,
+                "end_reason": reason,
+                "ticks_used": self.ticks_used,
+                "max_ticks": self.brief.max_ticks,
+                "brief": self.brief.instruction,
+            }
+        )
 
     def build_report(self) -> StintReport:
         """Compress the stint for the planner."""
@@ -423,10 +462,13 @@ class Stint:
         return json.dumps(payload)
 
     def _append_log(self, record: TickRecord) -> None:
+        self._append_log_line(json.loads(record.as_json(self.model.entity_id)))
+
+    def _append_log_line(self, payload: dict[str, Any]) -> None:
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a", encoding="utf-8") as handle:
-                handle.write(record.as_json(self.model.entity_id) + "\n")
+                handle.write(json.dumps(payload) + "\n")
         except OSError as error:
             logger.warning(
                 "stint_log_write_failed", path=str(self.log_path), error=str(error)

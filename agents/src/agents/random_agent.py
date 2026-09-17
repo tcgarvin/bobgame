@@ -265,9 +265,7 @@ class SimpleAgent:
         berry_count = self._get_berry_count(observation)
 
         # Check if we're at a bush with berries
-        bush_here = self._find_bush_at_position(
-            observation, self_pos.x, self_pos.y
-        )
+        bush_here = self._find_bush_at_position(observation, self_pos.x, self_pos.y)
 
         if bush_here:
             # At a bush with berries -> COLLECT
@@ -370,9 +368,7 @@ class SimpleAgent:
             return
 
         lease_stub = world_pb2_grpc.LeaseServiceStub(self._channel)
-        response = lease_stub.RenewLease(
-            pb.RenewLeaseRequest(lease_id=self._lease_id)
-        )
+        response = lease_stub.RenewLease(pb.RenewLeaseRequest(lease_id=self._lease_id))
 
         if not response.success:
             logger.warning("lease_renewal_failed", reason=response.reason)
@@ -385,9 +381,7 @@ class SimpleAgent:
         """Release lease and close connection."""
         if self._lease_id and self._channel:
             lease_stub = world_pb2_grpc.LeaseServiceStub(self._channel)
-            lease_stub.ReleaseLease(
-                pb.ReleaseLeaseRequest(lease_id=self._lease_id)
-            )
+            lease_stub.ReleaseLease(pb.ReleaseLeaseRequest(lease_id=self._lease_id))
             logger.info("lease_released", lease_id=self._lease_id)
             self._lease_id = None
 
@@ -401,9 +395,7 @@ def discover_entities(server_address: str) -> list[pb.ControllableEntity]:
     channel = grpc.insecure_channel(server_address)
     stub = world_pb2_grpc.EntityDiscoveryServiceStub(channel)
 
-    response = stub.ListControllableEntities(
-        pb.ListControllableEntitiesRequest()
-    )
+    response = stub.ListControllableEntities(pb.ListControllableEntitiesRequest())
 
     entities = list(response.entities)
     channel.close()
