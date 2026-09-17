@@ -14,6 +14,7 @@ from typing import Mapping, Sequence
 
 from .. import world_pb2 as pb
 from .geometry import (
+    direction_between,
     ORDERED_DIRECTIONS,
     Coord,
     chebyshev,
@@ -21,7 +22,7 @@ from .geometry import (
     offset,
     same_or_adjacent,
 )
-from .pathfinding import NO_PATH, legal_directions, next_step, path_length
+from .pathfinding import find_path, legal_directions
 from .worldmodel import EXTRACTABLE_TYPES, ObjectInfo, WorldModel
 
 MAX_OPTIONS = 40
@@ -171,15 +172,13 @@ def _travel_control_options(
 ) -> list[Option]:
     if travel is None:
         return []
-    direction = next_step(
+    path = find_path(
         model, model.position, travel.target, stop_adjacent=travel.stop_adjacent
     )
     options: list[Option] = []
-    if direction:
-        steps = path_length(
-            model, model.position, travel.target, stop_adjacent=travel.stop_adjacent
-        )
-        steps_text = "?" if steps == NO_PATH else str(steps)
+    if path:
+        direction = direction_between(model.position, path[0])
+        steps_text = str(len(path))
         options.append(
             Option(
                 key="follow_travel",
@@ -374,11 +373,12 @@ def _travel_to_options(
     options: list[Option] = []
     for obj in candidates:
         state = travel_state_for(obj)
-        direction = next_step(
+        path = find_path(
             model, position, state.target, stop_adjacent=state.stop_adjacent
         )
-        if not direction:
+        if not path:
             continue
+        direction = direction_between(position, path[0])
         distance = chebyshev(obj.position, position)
         options.append(
             Option(

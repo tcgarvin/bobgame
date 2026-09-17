@@ -145,8 +145,8 @@ services/
 # For 'self' field in Observation:
 observation.self.CopyFrom(entity_proto)
 
-# For 'from' field in EntityMoved (constructor uses from_):
-pb.EntityMoved(entity_id=id, from_=from_pos, to=to_pos)
+# For 'from' field in EntityMoved: the constructor does NOT accept from_;
+# build the message, then getattr(msg, "from").CopyFrom(from_pos)
 ```
 
 ### Observation Generation (Basic)
@@ -205,8 +205,9 @@ Proto fields named after Python keywords need special handling:
 observation = pb.Observation(tick_id=..., ...)
 observation.self.CopyFrom(entity_proto)
 
-# 'from' field - use trailing underscore in constructor
-pb.EntityMoved(entity_id=id, from_=from_pos, to=to_pos)
+# 'from' field - set after construction
+moved = pb.EntityMoved(entity_id=id, to=to_pos)
+getattr(moved, "from").CopyFrom(from_pos)
 ```
 
 ### Agent Module Imports
@@ -220,6 +221,12 @@ def __getattr__(name: str):
         return RandomAgent
     raise AttributeError(...)
 ```
+
+### gRPC thread pool
+
+Every `StreamObservations` call holds a worker thread for its whole lifetime.
+The pool is sized at 64 in `server.py`; with the old default of 10, twelve
+agents starved every unary RPC (renewals failed, leases expired, agents exited).
 
 ### Test Port Allocation
 

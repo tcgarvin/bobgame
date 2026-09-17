@@ -14,4 +14,4 @@ backoff_multiplier = 2.0
 
 [agents.default]
 module = "agents.jev_agent"
-args = []
+args = ["--log-root", "../logs"]

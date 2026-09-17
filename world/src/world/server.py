@@ -135,7 +135,9 @@ class WorldServer:
     async def start(self) -> None:
         """Start the gRPC server and tick loop."""
         # Create gRPC server with thread pool for handling requests
-        self._server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        # Every observation stream holds a worker thread for its lifetime, so
+        # the pool must exceed the number of agents or unary RPCs starve.
+        self._server = grpc.server(futures.ThreadPoolExecutor(max_workers=64))
 
         # Register all services
         world_pb2_grpc.add_TickServiceServicer_to_server(

@@ -194,6 +194,10 @@ class WorldModel:
         self.history: deque[HistoryEntry] = deque(maxlen=HISTORY_LIMIT)
         self.heard: deque[HeardUtterance] = deque(maxlen=UTTERANCE_LIMIT)
         self.last_digest = TickDigest()
+        # Position indexes rebuilt once per update() so that pathfinding's
+        # walkability checks are O(1) instead of scanning every known object.
+        self._blocked_positions: set[Coord] = set()
+        self._occupied_positions: set[Coord] = set()
 
     # -- terrain view (satisfies pathfinding.TerrainView) -------------------
 
@@ -206,19 +210,23 @@ class WorldModel:
         tile = self.tiles.get(position)
         if tile is not None and not tile.walkable:
             return False
-        for obj in self.objects.values():
-            if obj.position == position and obj.object_type in BLOCKING_OBJECT_TYPES:
-                return False
+        if position in self._blocked_positions:
+            return False
         # Other entities seen this very tick block the tile for now; the world
         # refuses moves onto an occupied tile unless the occupant moves away.
-        for entity in self.entities.values():
-            if (
-                entity.position == position
-                and entity.last_seen == self.tick
-                and entity.alive
-            ):
-                return False
-        return True
+        return position not in self._occupied_positions
+
+    def _rebuild_position_indexes(self) -> None:
+        self._blocked_positions = {
+            obj.position
+            for obj in self.objects.values()
+            if obj.object_type in BLOCKING_OBJECT_TYPES
+        }
+        self._occupied_positions = {
+            entity.position
+            for entity in self.entities.values()
+            if entity.last_seen == self.tick and entity.alive
+        }
 
     def note_own_outcome(self, text: str) -> None:
         """Record an outcome the world did not report as an event (e.g. a blocked move)."""
@@ -249,6 +257,7 @@ class WorldModel:
         self._refresh_objects(observation, digest)
         self._refresh_entities(observation)
         self._apply_events(observation, digest)
+        self._rebuild_position_indexes()
 
         self.last_digest = digest
         return digest

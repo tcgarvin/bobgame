@@ -31,7 +31,9 @@ DIAGONAL_SURCHARGE = 0.001  # breaks ties in favour of straight lines
 # `path_length` returns this when the target cannot be reached.
 NO_PATH = -1
 
-DEFAULT_MAX_NODES = 20_000
+# Kept small: pathfinding runs synchronously inside the tick loop, several
+# times per tick, and must never stall lease renewal or the intent deadline.
+DEFAULT_MAX_NODES = 2_500
 
 
 class TerrainView(Protocol):
