@@ -970,3 +970,293 @@ def test_sleep_section_unavailable_before_docs_10(run_dir: Path) -> None:
     assert world["stations_placed"] == {}
     assert world["metal_tools_crafted"] == {}
     assert world["vein_yields"] == {}
+
+
+# --------------------------------------------------------------------------
+# cost accounting (docs/11_cost_accounting.md)
+# --------------------------------------------------------------------------
+
+COST_RUN_ID = "20260918-090000-settlement"
+
+
+@pytest.fixture
+def cost_run_dir(tmp_path: Path) -> Path:
+    """A run whose traces carry the docs/11 cost fields.
+
+    `mira` is the fully-instrumented case (planner cost, converser cost, Jev
+    `cost_usd`, its own `pricing.json`); `theo` is the awkward case: a turn
+    whose endpoint reported no price, and Jev rows with tokens only.
+    """
+    root = tmp_path / "runs" / COST_RUN_ID
+    root.mkdir(parents=True)
+    (root / "meta.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "run_id": COST_RUN_ID,
+                "config_name": "settlement",
+                "started_at": "2026-09-18T09:00:00-04:00",
+                "finished_at": "2026-09-18T10:00:00-04:00",
+                "last_tick": 200,
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_gz_jsonl(root / "world" / "ticks.jsonl.gz", [tick_record(1)])
+
+    agents = root / "agents"
+    (agents / "agent-mira").mkdir(parents=True)
+    (agents / "agent-mira" / "pricing.json").write_text(
+        json.dumps(
+            {
+                "jev_usd_per_million_input_tokens": 0.05,
+                "planner_model": "openrouter:qwen/qwen3.7-flash",
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_gz_jsonl(
+        agents / "agent-mira" / "stints.jsonl.gz",
+        [
+            {
+                "event": "stint_start",
+                "entity_id": "mira",
+                "tick": 1,
+                "stint_id": "mira-1",
+                "brief": {},
+            },
+            {
+                "entity_id": "mira",
+                "tick": 2,
+                "stint_id": "mira-1",
+                "action": "wait",
+                "top": [["wait", 0.9]],
+                "latency_ms": 200,
+                "input_tokens": 20_000,
+                "cost_usd": 0.001,
+                "intent_result": "accepted",
+            },
+            {
+                "entity_id": "mira",
+                "tick": 3,
+                "stint_id": "mira-1",
+                "action": "wait",
+                "top": [["wait", 0.9]],
+                "latency_ms": 200,
+                "input_tokens": 40_000,
+                "cost_usd": 0.002,
+                "intent_result": "accepted",
+            },
+        ],
+    )
+    write_gz_jsonl(
+        agents / "agent-mira" / "planner.jsonl.gz",
+        [
+            {"event": "turn_start", "entity_id": "mira", "tick": 10, "turn": 1},
+            {
+                "event": "turn_end",
+                "entity_id": "mira",
+                "tick": 10,
+                "turn": 1,
+                "thought": "gathering",
+                "usage": {
+                    "input_tokens": 100_000,
+                    "output_tokens": 500,
+                    "cached_tokens": 50_000,
+                    "requests": 10,
+                    "cost_usd": 0.01,
+                },
+            },
+            {"event": "turn_start", "entity_id": "mira", "tick": 20, "turn": 2},
+            {
+                "event": "tool_budget_reached",
+                "entity_id": "mira",
+                "tick": 20,
+                "turn": 2,
+                "usage": {
+                    "input_tokens": 300_000,
+                    "output_tokens": 1_500,
+                    "cached_tokens": 150_000,
+                    "requests": 30,
+                    "cost_usd": 0.03,
+                },
+            },
+        ],
+    )
+    write_gz_jsonl(
+        agents / "agent-mira" / "conversations.jsonl.gz",
+        [
+            {
+                "event": "turn",
+                "entity_id": "mira",
+                "tick": 12,
+                "conversation_id": "conv_1",
+                "usage": {"input_tokens": 4_000, "requests": 1, "cost_usd": 0.0005},
+            },
+            # A cancelled turn made no call, so it carries no usage at all.
+            {
+                "event": "turn",
+                "entity_id": "mira",
+                "tick": 13,
+                "conversation_id": "conv_1",
+            },
+            {
+                "event": "conversation_end",
+                "entity_id": "mira",
+                "tick": 14,
+                "conversation_id": "conv_1",
+                "end_reason": "closed",
+                "note": "theo wants stone",
+                "usage": {"input_tokens": 2_000, "requests": 1, "cost_usd": 0.0002},
+            },
+        ],
+    )
+
+    write_gz_jsonl(
+        agents / "agent-theo" / "stints.jsonl.gz",
+        [
+            {
+                "entity_id": "theo",
+                "tick": 4,
+                "stint_id": "theo-4",
+                "action": "wait",
+                "top": [["wait", 0.9]],
+                "latency_ms": 200,
+                "input_tokens": 2_000_000,
+                "intent_result": "accepted",
+            },
+        ],
+    )
+    write_gz_jsonl(
+        agents / "agent-theo" / "planner.jsonl.gz",
+        [
+            {"event": "turn_start", "entity_id": "theo", "tick": 30, "turn": 1},
+            {
+                "event": "turn_end",
+                "entity_id": "theo",
+                "tick": 30,
+                "turn": 1,
+                "thought": "no price reported",
+                "cost_missing": True,
+                "usage": {
+                    "input_tokens": 1_000,
+                    "output_tokens": 10,
+                    "cached_tokens": 0,
+                    "requests": 1,
+                },
+            },
+        ],
+    )
+    return root
+
+
+def test_per_agent_cost_rollup(cost_run_dir: Path) -> None:
+    agents = {a["agent"]: a["cost"] for a in analyse(cost_run_dir)["agents"]}
+    mira = agents["mira"]
+    assert mira["planner_usd"] == pytest.approx(0.04)
+    assert mira["converser_usd"] == pytest.approx(0.0007)
+    # Jev rows carry cost_usd, so pricing.json is not consulted.
+    assert mira["jev_usd"] == pytest.approx(0.003)
+    assert mira["total_usd"] == pytest.approx(0.0437)
+    assert mira["planner_cost_available"] is True
+    assert mira["cost_missing"] is False
+    assert mira["turns_with_usage"] == 2
+    assert mira["usd_per_turn_mean"] == pytest.approx(0.02)
+    assert mira["usd_per_turn_max"] == pytest.approx(0.03)
+    assert mira["requests_per_turn_mean"] == pytest.approx(20.0)
+    assert mira["cached_token_share"] == pytest.approx(0.5)
+    assert mira["most_expensive_turn"] == {"tick": 20, "usd": pytest.approx(0.03)}
+
+
+def test_jev_cost_from_tokens_uses_run_price(cost_run_dir: Path) -> None:
+    agents = {a["agent"]: a["cost"] for a in analyse(cost_run_dir)["agents"]}
+    # theo has no pricing.json, so the module constant prices its tokens.
+    assert agents["theo"]["jev_usd"] == pytest.approx(
+        2.0 * analyze_run.JEV_USD_PER_MILLION_INPUT_TOKENS
+    )
+    assert agents["theo"]["planner_usd"] == 0.0
+    assert agents["theo"]["planner_cost_available"] is False
+    assert agents["theo"]["cost_missing"] is True
+    assert agents["theo"]["most_expensive_turn"] == {"tick": -1, "usd": 0.0}
+
+
+def test_run_level_cost_totals_and_rates(cost_run_dir: Path) -> None:
+    cost = analyse(cost_run_dir)["totals"]["cost"]
+    jev = 0.003 + 2.0 * analyze_run.JEV_USD_PER_MILLION_INPUT_TOKENS
+    total = 0.04 + 0.0007 + jev
+    assert cost["planner_usd"] == pytest.approx(0.04)
+    assert cost["converser_usd"] == pytest.approx(0.0007)
+    assert cost["jev_usd"] == pytest.approx(jev)
+    assert cost["total_usd"] == pytest.approx(total)
+    assert cost["planner_cost_available"] is True
+    assert cost["planner_cost_is_lower_bound"] is True
+    assert cost["planner_turns"] == 3
+    assert cost["usd_per_100_ticks"] == pytest.approx(total * 100 / 200)
+    assert cost["usd_per_hour"] == pytest.approx(total)
+
+
+def test_cost_rates_skipped_when_meta_incomplete() -> None:
+    complete = {
+        "started_at": "2026-09-18T09:00:00-04:00",
+        "finished_at": "2026-09-18T10:00:00-04:00",
+        "last_tick": 50,
+    }
+    rates = analyze_run.run_cost_rates(1.0, complete)
+    assert rates["usd_per_hour"] == pytest.approx(1.0)
+    assert rates["usd_per_100_ticks"] == pytest.approx(2.0)
+
+    unfinished = analyze_run.run_cost_rates(
+        1.0, {"started_at": complete["started_at"], "finished_at": None}
+    )
+    assert unfinished == {}
+    assert analyze_run.run_cost_rates(1.0, {}) == {}
+
+
+def test_most_expensive_turn_is_a_notable_moment(cost_run_dir: Path) -> None:
+    payload = analyse(cost_run_dir)
+    expensive = [m for m in payload["moments"] if m["kind"] == "expensive_turn"]
+    assert len(expensive) == 1
+    assert expensive[0]["tick"] == 20
+    assert expensive[0]["entity_id"] == "mira"
+    assert "$0.0300" in expensive[0]["text"]
+    assert (
+        expensive[0]["link"]
+        == f"http://localhost:5173/?run={COST_RUN_ID}&tick=20&entity=mira"
+    )
+
+
+def test_old_run_reports_planner_cost_unavailable(run_dir: Path) -> None:
+    """`run_dir` predates docs/11: tokens on Jev rows, no usage on turns."""
+    payload = analyse(run_dir)
+    ada = payload["agents"][0]["cost"]
+    assert ada["planner_cost_available"] is False
+    assert ada["planner_usd"] == 0.0
+    assert ada["cost_missing"] is False
+    assert ada["jev_usd"] == pytest.approx(
+        4_100 * analyze_run.JEV_USD_PER_MILLION_INPUT_TOKENS / 1e6
+    )
+    cost = payload["totals"]["cost"]
+    assert cost["planner_cost_available"] is False
+    assert cost["planner_cost_is_lower_bound"] is False
+    assert cost["total_usd"] == pytest.approx(ada["jev_usd"])
+    # meta.json has no finished_at and no last_tick, so neither rate is given.
+    assert "usd_per_hour" not in cost
+    assert "usd_per_100_ticks" not in cost
+
+
+def test_cost_section_prints_na_for_old_runs(
+    run_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = analyze_run.main([str(run_dir)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "== cost" in out
+    assert "planner: n/a" in out
+    assert "rates: unavailable" in out
+
+
+def test_dollar_formatting_switches_at_one_dollar() -> None:
+    assert analyze_run.format_usd(0.12345) == "$0.1235"
+    assert analyze_run.format_usd(0.0) == "$0.0000"
+    assert analyze_run.format_usd(1.0) == "$1.00"
+    assert analyze_run.format_usd(12.345) == "$12.35"

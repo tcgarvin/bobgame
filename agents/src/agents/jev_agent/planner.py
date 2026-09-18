@@ -63,6 +63,7 @@ from .options import (
     WOLF_ALERT_RADIUS,
     TravelState,
 )
+from .pricing import usage_from_messages
 from .stint import Brief, StintDriver, StintReport
 from .tracelog import AgentTrace
 from .worldmodel import HeardUtterance, WorldModel
@@ -1425,17 +1426,12 @@ class Planner:
         if self.last_thought:
             self.bridge.set_thought(self.last_thought)
         logger.info("planner_thought", entity_id=self.entity_id, text=self.last_thought)
-        # `usage` is a property on pydantic-ai 2.4x, not a method.
-        usage = result.usage
         self._trace(
             "turn_end",
             thought=self.last_thought,
             tool_calls=self._tool_calls_this_turn,
             duration_ms=int((time.monotonic() - started) * 1000),
-            usage={
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-            },
+            usage=usage_from_messages(result.new_messages()),
         )
         await self._recover_from_text_only_turn()
         return self.last_thought
@@ -1448,7 +1444,15 @@ class Planner:
         on the next run.
         """
         logger.info("planner_tool_budget_reached", entity_id=self.entity_id)
-        self._trace("tool_budget_reached", tool_calls=self._tool_calls_this_turn)
+        # The turn is ending before `self.history` is replaced, so its current
+        # length is still what went into the run: everything past it is what
+        # this turn added, and what this turn's requests cost.
+        added = run_messages[len(self.history) :]
+        self._trace(
+            "tool_budget_reached",
+            tool_calls=self._tool_calls_this_turn,
+            usage=usage_from_messages(added),
+        )
         self.history = trim_history(run_messages)
         self.last_thought = "Ran out of tool calls this turn; continuing."
         self.bridge.set_thought(self.last_thought)

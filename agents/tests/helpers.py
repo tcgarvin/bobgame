@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
 from agents import world_pb2 as pb
-from agents.jev_agent.conversation import ConverserMove
+from agents.jev_agent.conversation import ConverserMove, MoveCall, NoteCall
 from agents.jev_agent.jevclient import JevDecision
 
 GRASS = "grass"
@@ -262,15 +262,16 @@ class FakeConverser:
     note_text: str = ""
     prompts: list[str] = field(default_factory=list)
     note_prompts: list[str] = field(default_factory=list)
+    usage: dict[str, object] = field(default_factory=dict)
 
-    async def move(self, prompt: str) -> ConverserMove:
+    async def move(self, prompt: str) -> MoveCall:
         """Pop the next scripted move, falling back to `default_action`."""
         self.prompts.append(prompt)
         if self.script:
-            return self.script.pop(0)
-        return ConverserMove(action=self.default_action)
+            return MoveCall(self.script.pop(0), self.usage)
+        return MoveCall(ConverserMove(action=self.default_action), self.usage)
 
-    async def note(self, prompt: str) -> str:
+    async def note(self, prompt: str) -> NoteCall:
         """Return the fixed note text."""
         self.note_prompts.append(prompt)
-        return self.note_text
+        return NoteCall(self.note_text, self.usage)

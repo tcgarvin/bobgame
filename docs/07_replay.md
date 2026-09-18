@@ -189,10 +189,19 @@ raw per line); nothing else should go in it.
   (full text; `tick` is the tick the result came back, so a `start_stint`
   result's tick is the stint's end)
 - `{"event": "turn_end", "entity_id", "tick", "turn", "thought": "…",
-  "tool_calls": 3, "duration_ms": 8100, "usage": {"input_tokens", "output_tokens"}}`
+  "tool_calls": 3, "duration_ms": 8100, "usage": {…}}`
 - `{"event": "turn_failed", "entity_id", "tick", "turn", "error": "…"}`
-- `{"event": "tool_budget_reached", "entity_id", "tick", "turn"}`
+- `{"event": "tool_budget_reached", "entity_id", "tick", "turn", "usage": {…}}`
 - `{"event": "history_reset", "entity_id", "tick", "turn"}`
+
+The `usage` block on `turn_end` and `tool_budget_reached` covers the model
+requests that turn made: `{"input_tokens", "output_tokens", "cached_tokens",
+"requests", "cost_usd"}`, plus `"cost_missing": true` when a response carried no
+cost from the provider, so a roll-up knows its total is a lower bound. Jev tick
+rows in `stints.jsonl.gz` carry `cost_usd` beside `input_tokens`, conversation
+`turn` and `conversation_end` records carry the same `usage` block for their
+converser calls, and `pricing.json` next to them records the prices the run was
+billed at. Contract: [docs/11_cost_accounting.md](11_cost_accounting.md).
 
 ## Replay server
 

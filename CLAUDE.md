@@ -82,6 +82,10 @@ reports conversations, giving and reflex firings (docs/09 section 6). Pass a run
 directory to pick another run, `--json` for a machine-readable dump,
 `--max-moments` to change the cap, and `--viewer-url` to change the link base.
 It still reads the legacy layout: `python tools/analyze_run.py logs`.
+It also prints a cost section: OpenRouter's exact per-request cost for the
+planner and converser, Jev priced locally at $42 per billion input tokens,
+split per settler and per turn with $/100 ticks and $/hour. Contract:
+[docs/11_cost_accounting.md](docs/11_cost_accounting.md).
 
 Or manually:
 ```bash

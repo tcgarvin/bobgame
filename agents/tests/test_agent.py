@@ -20,6 +20,7 @@ from agents.jev_agent.agent import (
 )
 from agents.jev_agent.client import IntentResult
 from agents.jev_agent.options import Option
+from agents.jev_agent.pricing import JEV_USD_PER_MILLION_INPUT_TOKENS
 from agents.jev_agent.reflex import ReflexBrief
 from agents.jev_agent.stint import Brief, DriverChoice
 
@@ -88,6 +89,19 @@ def build_agent(world: FakeWorldClient, jev: FakeJevClient, tmp_path: Path) -> J
         log_root=tmp_path,
         planner_model="test",
     )
+
+
+def test_starting_an_agent_records_the_prices_it_is_billed_at(
+    fake_jev: FakeJevClient, tmp_path: Path
+) -> None:
+    agent = build_agent(FakeWorldClient([]), fake_jev, tmp_path)
+
+    payload = json.loads(agent.trace.pricing_path.read_text(encoding="utf-8"))
+
+    assert payload == {
+        "jev_usd_per_million_input_tokens": JEV_USD_PER_MILLION_INPUT_TOKENS,
+        "planner_model": "test",
+    }
 
 
 async def test_planning_mode_waits_when_the_planner_asks_for_nothing(

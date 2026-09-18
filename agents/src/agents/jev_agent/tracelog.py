@@ -32,6 +32,7 @@ PLANNER_FILE = "planner.jsonl.gz"
 CONVERSATIONS_FILE = "conversations.jsonl.gz"
 MEMORY_FILE = "memory.md"
 REFLEX_FILE = "reflex.json"
+PRICING_FILE = "pricing.json"
 
 
 class TraceWriter(Protocol):
@@ -117,6 +118,7 @@ class AgentTrace:
 
     def __init__(self, entity_id: str, log_root: Path, *, enabled: bool = True) -> None:
         self.entity_id = entity_id
+        self.enabled = enabled
         self.directory = agent_directory(entity_id, log_root)
         make: Callable[[Path], TraceWriter]
         if enabled:
@@ -134,6 +136,11 @@ class AgentTrace:
     ) -> "AgentTrace":
         """A trace that writes nothing, for tests that do not care about files."""
         return cls(entity_id, log_root, enabled=False)
+
+    @property
+    def pricing_path(self) -> Path:
+        """Where the prices this run is billed at are recorded."""
+        return self.directory / PRICING_FILE
 
     @property
     def reflex_path(self) -> Path:

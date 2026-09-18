@@ -41,6 +41,9 @@ def planner_model_settings(model_name: str) -> OpenRouterModelSettings:
         reasoning = {"enabled": False}
     return OpenRouterModelSettings(
         openrouter_reasoning=reasoning,  # type: ignore[typeddict-item]
+        # Usage accounting: OpenRouter then reports the dollar cost and the
+        # cached-token count of every response (docs/11_cost_accounting.md).
+        openrouter_usage={"include": True},
         temperature=0.7,
         timeout=90.0,
     )

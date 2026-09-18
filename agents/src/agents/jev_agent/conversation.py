@@ -24,6 +24,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 import structlog
@@ -44,6 +45,7 @@ from .llm import planner_model_settings, resolve_model_name
 from .stint import DriverChoice
 from .options import Option
 from .pathfinding import find_path
+from .pricing import usage_from_messages
 from .tracelog import AgentTrace
 from .worldmodel import ConversationInfo, TickDigest, TranscriptLine, WorldModel
 
@@ -148,13 +150,33 @@ class ConverserMove(BaseModel):
     amount: int = Field(default=1, description="how many to give")
 
 
+@dataclass(frozen=True)
+class MoveCall:
+    """One converser move call: its answer and what the call cost.
+
+    `usage` is the block described in docs/11_cost_accounting.md, or empty for
+    a converser that makes no model call (a test double, say).
+    """
+
+    move: ConverserMove
+    usage: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class NoteCall:
+    """The closing note and what the call that wrote it cost."""
+
+    text: str
+    usage: Mapping[str, Any] = field(default_factory=dict)
+
+
 class Converser(Protocol):
     """The language-model half of conversation mode."""
 
-    async def move(self, prompt: str) -> ConverserMove:
+    async def move(self, prompt: str) -> MoveCall:
         """Choose this turn's move."""
 
-    async def note(self, prompt: str) -> str:
+    async def note(self, prompt: str) -> NoteCall:
         """What, if anything, to keep from the conversation."""
 
 
@@ -179,6 +201,7 @@ class CallResult:
     move: ConverserMove
     latency_ms: int
     error: str = ""
+    usage: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -206,14 +229,16 @@ async def run_converser(
     """
     started = time.monotonic()
     try:
-        move = await asyncio.wait_for(converser.move(prompt), timeout)
+        call = await asyncio.wait_for(converser.move(prompt), timeout)
     except asyncio.CancelledError:
         raise
     except Exception as error:  # noqa: BLE001 - a failed converser is not fatal
         elapsed = int((time.monotonic() - started) * 1000)
         logger.warning("converser_call_failed", error=str(error))
         return CallResult(ConverserMove(action=ACTION_PASS), elapsed, str(error))
-    return CallResult(move, int((time.monotonic() - started) * 1000))
+    return CallResult(
+        call.move, int((time.monotonic() - started) * 1000), usage=call.usage
+    )
 
 
 class ModelConverser:
@@ -242,15 +267,17 @@ class ModelConverser:
             retries=1,
         )
 
-    async def move(self, prompt: str) -> ConverserMove:
+    async def move(self, prompt: str) -> MoveCall:
         """Ask the model for one move."""
         result = await self.move_agent.run(prompt)
-        return result.output
+        return MoveCall(result.output, usage_from_messages(result.new_messages()))
 
-    async def note(self, prompt: str) -> str:
+    async def note(self, prompt: str) -> NoteCall:
         """Ask the model what to keep from the conversation."""
         result = await self.note_agent.run(prompt)
-        return result.output.strip()
+        return NoteCall(
+            result.output.strip(), usage_from_messages(result.new_messages())
+        )
 
 
 @dataclass
@@ -549,7 +576,9 @@ class ConversationSession:
             return None
         self._call = None
         result = call.task.result()
-        self._trace_turn(result.move, result.latency_ms, result.error)
+        self._trace_turn(
+            result.move, result.latency_ms, result.error, usage=result.usage
+        )
         return result.move
 
     def _settle_outdated_call(self, conversation: ConversationInfo | None) -> None:
@@ -571,7 +600,9 @@ class ConversationSession:
         self._call = None
         if call.task.done():
             result = call.task.result()
-            self._trace_turn(result.move, result.latency_ms, NOTE_STALE)
+            self._trace_turn(
+                result.move, result.latency_ms, NOTE_STALE, usage=result.usage
+            )
             return
         call.task.cancel()
         self._trace_turn(
@@ -803,7 +834,8 @@ class ConversationSession:
         """
         conversation = self.model.conversation_by_id(self.conversation_id)
         transcript = transcript_for(self.model, conversation, self.conversation_id)
-        note = await self._ask_for_note(transcript)
+        note_call = await self._ask_for_note(transcript)
+        note = note_call.text
         if note:
             append_conversation_note(
                 self.memory_path,
@@ -834,21 +866,22 @@ class ConversationSession:
                 "given": list(self._given),
                 "received": self._received(),
                 "note": note,
+                **({"usage": dict(note_call.usage)} if note_call.usage else {}),
             }
         )
         return report
 
-    async def _ask_for_note(self, transcript: Sequence[TranscriptLine]) -> str:
+    async def _ask_for_note(self, transcript: Sequence[TranscriptLine]) -> NoteCall:
         try:
-            note = await self.converser.note(self.note_prompt(transcript))
+            call = await self.converser.note(self.note_prompt(transcript))
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - a failed note is not fatal
             # The conversation is already over; losing the note must not lose
             # the report the planner is waiting for.
             logger.warning("conversation_note_failed", error=str(error))
-            return ""
-        return note.strip()[:MAX_NOTE_CHARACTERS]
+            return NoteCall("")
+        return NoteCall(call.text.strip()[:MAX_NOTE_CHARACTERS], call.usage)
 
     def _received(self) -> dict[str, int]:
         """What other settlers handed this actor during the conversation."""
@@ -861,6 +894,7 @@ class ConversationSession:
         note: str,
         *,
         cancelled: bool = False,
+        usage: Mapping[str, Any] = MappingProxyType({}),
     ) -> None:
         payload: dict[str, Any] = {
             "event": "turn",
@@ -871,6 +905,8 @@ class ConversationSession:
             "move": move.model_dump(),
             "latency_ms": latency_ms,
         }
+        if usage:
+            payload["usage"] = dict(usage)
         if note:
             payload["note"] = note
         if cancelled:

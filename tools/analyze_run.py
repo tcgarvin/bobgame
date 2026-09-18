@@ -5,7 +5,8 @@ Reads a run directory produced by ``dev.sh`` (``runs/<run_id>/``, see
 ``docs/07_replay.md``) and prints a per-agent and aggregate summary: stint
 counts and end reasons, Jev latency and token sizes, action mix, eject and
 danger distributions, intent failure rates, planner turn counts and tool usage,
-deaths, and the final planner thoughts. It then prints a "notable moments"
+deaths, the final planner thoughts, and what the run's model calls cost
+(docs/11_cost_accounting.md). It then prints a "notable moments"
 section: deaths, wolf kills, crafts, placed objects, notes written and planner
 trouble, each with a viewer deep link.
 
@@ -29,6 +30,7 @@ import sys
 import zlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
@@ -41,11 +43,20 @@ REJECTED_RE = re.compile(r"intent_rejected .*?reason=(\S+)")
 DEFAULT_VIEWER_URL = "http://localhost:5173"
 DEFAULT_MAX_MOMENTS = 60
 
+# Jev is billed on input tokens only (docs/11_cost_accounting.md). Each run
+# writes the price it was billed at to agents/agent-<id>/pricing.json; this is
+# the fallback for runs recorded before that file existed.
+JEV_USD_PER_MILLION_INPUT_TOKENS = 0.042
+
+# Planner turn records that carry a `usage` block (docs/11, "Trace records").
+PLANNER_USAGE_EVENTS = frozenset({"turn_end", "tool_budget_reached"})
+
 # Notable moment kinds, most interesting first. The cap keeps the rarest kinds.
 MOMENT_PRIORITY = (
     "death",
     "reflex_death",
     "wolf_killed",
+    "expensive_turn",
     "planner_failed",
     "history_reset",
     "first_wolf",
@@ -254,6 +265,202 @@ def agent_ids(layout: RunLayout) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# cost (docs/11_cost_accounting.md)
+# --------------------------------------------------------------------------
+
+# Stand-in for "no turn": a tick of -1 never matches a real world tick.
+NO_TURN: dict = {"tick": -1, "usd": 0.0}
+
+
+def format_usd(amount: float) -> str:
+    """Dollars with four decimals below $1 and two above (docs/11)."""
+    return f"${amount:.4f}" if amount < 1.0 else f"${amount:.2f}"
+
+
+def load_jev_price(agent_dir: Path) -> float:
+    """The Jev input-token price this run was billed at, in USD per million.
+
+    Runs recorded before ``pricing.json`` existed fall back to the current
+    constant, which is the best guess available for them.
+    """
+    path = agent_dir / "pricing.json"
+    if not path.exists():
+        return JEV_USD_PER_MILLION_INPUT_TOKENS
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return float(
+        data.get("jev_usd_per_million_input_tokens", JEV_USD_PER_MILLION_INPUT_TOKENS)
+    )
+
+
+def jev_cost_usd(tick_rows: list[dict], usd_per_million: float) -> float:
+    """Jev spend over stint tick rows.
+
+    Rows written since docs/11 carry ``cost_usd``; older rows carry only
+    ``input_tokens``, which is priced here at ``usd_per_million``.
+    """
+    total = 0.0
+    for row in tick_rows:
+        if "cost_usd" in row:
+            total += float(row["cost_usd"])
+        elif row.get("input_tokens"):
+            total += float(row["input_tokens"]) * usd_per_million / 1e6
+    return total
+
+
+def summarise_planner_cost(rows: list[dict]) -> dict:
+    """Planner spend and efficiency from the turn records of one agent.
+
+    Every turn that made model requests carries a ``usage`` block
+    (docs/11, "Trace records"). ``cost_usd`` is absent for endpoints that do
+    not report a price; such turns set ``cost_missing`` so the total can be
+    reported as a lower bound.
+    """
+    costs: list[float] = []
+    requests = 0
+    input_tokens = 0
+    cached_tokens = 0
+    turns = 0
+    cost_missing = False
+    most_expensive = dict(NO_TURN)
+
+    for row in rows:
+        if row.get("event") not in PLANNER_USAGE_EVENTS:
+            continue
+        usage = row.get("usage") or {}
+        if not usage:
+            continue
+        turns += 1
+        requests += int(usage.get("requests", 0))
+        input_tokens += int(usage.get("input_tokens", 0))
+        cached_tokens += int(usage.get("cached_tokens", 0))
+        if row.get("cost_missing"):
+            cost_missing = True
+        if "cost_usd" not in usage:
+            continue
+        cost = float(usage["cost_usd"])
+        costs.append(cost)
+        if cost > most_expensive["usd"]:
+            most_expensive = {"tick": int(row.get("tick", 0)), "usd": cost}
+
+    return {
+        "planner_usd": float(sum(costs)),
+        "planner_cost_available": bool(costs),
+        "cost_missing": cost_missing,
+        "turns_with_usage": turns,
+        "usd_per_turn_mean": statistics.mean(costs) if costs else 0.0,
+        "usd_per_turn_max": max(costs) if costs else 0.0,
+        "requests_per_turn_mean": requests / turns if turns else 0.0,
+        "cached_token_share": cached_tokens / input_tokens if input_tokens else 0.0,
+        "most_expensive_turn": most_expensive,
+    }
+
+
+def converser_cost_usd(path: Path | None) -> float:
+    """Converser spend: every ``usage`` block in conversations.jsonl.gz.
+
+    Both the per-turn moves and the closing note call are traced there
+    (docs/11), so summing over all records covers both.
+    """
+    if path is None:
+        return 0.0
+    total = 0.0
+    for row in iter_jsonl(path):
+        usage = row.get("usage") or {}
+        if "cost_usd" in usage:
+            total += float(usage["cost_usd"])
+    return total
+
+
+def summarise_cost(
+    agent_dir: Path, tick_rows: list[dict], planner_rows: list[dict]
+) -> dict:
+    """The per-agent ``cost`` object: planner / converser / jev and rates."""
+    planner = summarise_planner_cost(planner_rows)
+    converser = converser_cost_usd(
+        first_existing(
+            agent_dir / "conversations.jsonl.gz", agent_dir / "conversations.jsonl"
+        )
+    )
+    jev = jev_cost_usd(tick_rows, load_jev_price(agent_dir))
+    return {
+        "planner_usd": planner["planner_usd"],
+        "converser_usd": converser,
+        "jev_usd": jev,
+        "total_usd": planner["planner_usd"] + converser + jev,
+        "planner_cost_available": planner["planner_cost_available"],
+        "cost_missing": planner["cost_missing"],
+        "turns_with_usage": planner["turns_with_usage"],
+        "usd_per_turn_mean": planner["usd_per_turn_mean"],
+        "usd_per_turn_max": planner["usd_per_turn_max"],
+        "requests_per_turn_mean": planner["requests_per_turn_mean"],
+        "cached_token_share": planner["cached_token_share"],
+        "most_expensive_turn": planner["most_expensive_turn"],
+    }
+
+
+def run_cost_rates(total_usd: float, meta: dict) -> dict:
+    """Dollars per 100 world ticks and per wall-clock hour, where knowable.
+
+    A rate whose inputs the run never recorded is left out of the result
+    rather than reported as zero.
+    """
+    rates: dict[str, float] = {}
+    last_tick = meta.get("last_tick")
+    if isinstance(last_tick, int) and last_tick > 0:
+        rates["usd_per_100_ticks"] = total_usd * 100.0 / last_tick
+    started = meta.get("started_at")
+    finished = meta.get("finished_at")
+    if isinstance(started, str) and isinstance(finished, str):
+        hours = (
+            datetime.fromisoformat(finished) - datetime.fromisoformat(started)
+        ).total_seconds() / 3600.0
+        if hours > 0:
+            rates["usd_per_hour"] = total_usd / hours
+    return rates
+
+
+def aggregate_cost(summaries: list[dict], meta: dict) -> dict:
+    """The run-level ``cost`` object, summed over per-agent cost objects."""
+    costs = [s["cost"] for s in summaries]
+    planner = sum(c["planner_usd"] for c in costs)
+    converser = sum(c["converser_usd"] for c in costs)
+    jev = sum(c["jev_usd"] for c in costs)
+    total = planner + converser + jev
+    result = {
+        "planner_usd": planner,
+        "converser_usd": converser,
+        "jev_usd": jev,
+        "total_usd": total,
+        "planner_cost_available": any(c["planner_cost_available"] for c in costs),
+        "planner_cost_is_lower_bound": any(c["cost_missing"] for c in costs),
+        "planner_turns": sum(c["turns_with_usage"] for c in costs),
+    }
+    result.update(run_cost_rates(total, meta))
+    return result
+
+
+def cost_moments(summaries: list[dict]) -> list[Moment]:
+    """The run's single most expensive planner turn, as a notable moment."""
+    candidates = [
+        (s["cost"]["most_expensive_turn"], s["agent"])
+        for s in summaries
+        if s["cost"]["most_expensive_turn"]["tick"] >= 0
+    ]
+    if not candidates:
+        return []
+    turn, agent_id = max(candidates, key=lambda pair: pair[0]["usd"])
+    return [
+        Moment(
+            turn["tick"],
+            "expensive_turn",
+            agent_id,
+            f"most expensive planner turn: {agent_id} spent "
+            f"{format_usd(turn['usd'])}",
+        )
+    ]
+
+
+# --------------------------------------------------------------------------
 # per-agent summary
 # --------------------------------------------------------------------------
 
@@ -350,10 +557,12 @@ def summarise_agent(agent_id: str, layout: RunLayout) -> dict:
     end_reasons = Counter(r.get("end_reason", r.get("reason", "?")) for r in ends)
 
     log_text = read_text(log_path)
+    planner_rows = list(iter_jsonl(planner_path)) if planner_path else []
     if planner_path:
-        planner = summarise_planner_file(list(iter_jsonl(planner_path)))
+        planner = summarise_planner_file(planner_rows)
     else:
         planner = summarise_planner_log(log_text)
+    cost = summarise_cost(agent_dir, ticks, planner_rows)
 
     rejected: Counter[str] = Counter()
     for line in log_text.splitlines():
@@ -386,6 +595,7 @@ def summarise_agent(agent_id: str, layout: RunLayout) -> dict:
         "rejected": dict(rejected),
         "last_thought": thoughts[-1] if thoughts else "",
         "thoughts": len(thoughts),
+        "cost": cost,
     }
 
 
@@ -1114,7 +1324,7 @@ def select_moments(
 # --------------------------------------------------------------------------
 
 
-def aggregate(summaries: list[dict]) -> dict:
+def aggregate(summaries: list[dict], meta: dict) -> dict:
     total_actions: Counter[str] = Counter()
     total_tools: Counter[str] = Counter()
     total_ends: Counter[str] = Counter()
@@ -1136,7 +1346,53 @@ def aggregate(summaries: list[dict]) -> dict:
         "tools": dict(total_tools.most_common()),
         "actions": dict(total_actions.most_common()),
         "latency_p50_median": statistics.median(latencies) if latencies else 0,
+        "cost": aggregate_cost(summaries, meta),
     }
+
+
+def print_cost_section(run_cost: dict, summaries: list[dict]) -> None:
+    """The "cost" report section: run totals, rates and the per-agent table."""
+    print("== cost (docs/11_cost_accounting.md) ==")
+    planner_text = (
+        format_usd(run_cost["planner_usd"])
+        if run_cost["planner_cost_available"]
+        else "n/a (run recorded before cost accounting)"
+    )
+    print(
+        f"total: {format_usd(run_cost['total_usd'])}  "
+        f"planner: {planner_text}  "
+        f"converser: {format_usd(run_cost['converser_usd'])}  "
+        f"jev: {format_usd(run_cost['jev_usd'])}"
+    )
+    if run_cost["planner_cost_is_lower_bound"]:
+        print("planner total is a LOWER BOUND: some turns reported no cost")
+    rate_parts = []
+    if "usd_per_100_ticks" in run_cost:
+        rate_parts.append(f"{format_usd(run_cost['usd_per_100_ticks'])} / 100 ticks")
+    if "usd_per_hour" in run_cost:
+        rate_parts.append(f"{format_usd(run_cost['usd_per_hour'])} / wall-clock hour")
+    print(f"rates: {', '.join(rate_parts) if rate_parts else 'unavailable'}")
+
+    print(
+        f"{'agent':7s} {'planner':>9s} {'convers':>9s} {'jev':>9s} {'total':>9s} "
+        f"{'turns':>5s} {'$/turn':>9s} {'req/turn':>8s} {'cached':>7s}"
+    )
+    for s in summaries:
+        cost = s["cost"]
+        # An agent with no finished turn in an instrumented run has spent
+        # nothing on the planner; only a pre-accounting run is truly unknown.
+        available = cost["planner_cost_available"] or run_cost["planner_cost_available"]
+        planner_cell = format_usd(cost["planner_usd"]) if available else "n/a"
+        per_turn_cell = format_usd(cost["usd_per_turn_mean"]) if available else "n/a"
+        print(
+            f"{s['agent']:7s} {planner_cell:>9s} "
+            f"{format_usd(cost['converser_usd']):>9s} "
+            f"{format_usd(cost['jev_usd']):>9s} "
+            f"{format_usd(cost['total_usd']):>9s} "
+            f"{cost['turns_with_usage']:5d} {per_turn_cell:>9s} "
+            f"{cost['requests_per_turn_mean']:8.1f} "
+            f"{cost['cached_token_share'] * 100:6.1f}%"
+        )
 
 
 def print_report(
@@ -1194,6 +1450,9 @@ def print_report(
     for s in summaries:
         if s["last_thought"]:
             print(f"[{s['agent']}] {s['last_thought'][:400]}")
+
+    print()
+    print_cost_section(totals["cost"], summaries)
 
     if facts is not None:
         print()
@@ -1350,7 +1609,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     summaries = [summarise_agent(agent_id, layout) for agent_id in ids]
-    totals = aggregate(summaries)
+    totals = aggregate(summaries, layout.meta)
     viewer_url = args.viewer_url.rstrip("/")
 
     facts: WorldFacts | None = None
@@ -1368,6 +1627,7 @@ def main(argv: list[str] | None = None) -> int:
     giving_summary = summarise_giving(giving)
     reflex_summary, reflex_moments = summarise_reflexes(ids, layout)
     moments.extend(reflex_moments)
+    moments.extend(cost_moments(summaries))
 
     shown, omitted = select_moments(moments, max(0, args.max_moments))
 

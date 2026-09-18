@@ -222,6 +222,11 @@ complains once and then goes inert - tracing never stops the agent.
 once per process by `JevAgent`, closed in `run_agent`'s finally block) and
 `resolve_log_root`.
 
+Every model call's dollar cost is recorded too - `cost_usd` on Jev tick rows,
+a `usage` block on planner turns and conversation turns, and `pricing.json`
+written at startup with the prices the run is billed at (`pricing.py`). Contract:
+[docs/11_cost_accounting.md](../docs/11_cost_accounting.md).
+
 ### Module map
 
 | Module | Responsibility |
@@ -239,6 +244,7 @@ once per process by `JevAgent`, closed in `run_agent`'s finally block) and
 | `reflex.py` | The pre-registered reflex brief: persistence, trigger, cooldown, end rule |
 | `conversation.py` | Conversation mode: the converser, the per-turn session, the report and the note |
 | `llm.py` | Model id resolution and model settings shared by the planner and the converser |
+| `pricing.py` | What a call cost: the Jev price constant and the `usage` block built from a run's model responses |
 | `tracelog.py` | The gzip JSONL trace files, the `AgentTrace` that owns them, and the log-root rules |
 | `planner.py` | The pydantic-ai agent, its tools, and the turn loop |
 | `agent.py` | The tick loop and the planner handshake |

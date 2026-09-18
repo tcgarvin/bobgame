@@ -19,6 +19,7 @@ from .. import world_pb2 as pb
 from .geometry import Coord
 from .jevclient import JevClient, JevDecision
 from .jevstate import build_state
+from .pricing import jev_cost_usd
 from .options import (
     MAX_OPTIONS,
     Option,
@@ -171,6 +172,7 @@ class TickRecord:
         payload.update(
             {
                 "input_tokens": self.input_tokens,
+                "cost_usd": jev_cost_usd(self.input_tokens),
                 "probabilities": {
                     key: round(value, 3) for key, value in self.probabilities.items()
                 },

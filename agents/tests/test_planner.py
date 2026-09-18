@@ -585,7 +585,19 @@ async def test_a_turn_writes_its_prompt_tools_and_result_to_the_trace(
     assert end["thought"] == "Noted."
     assert end["tool_calls"] == 1
     assert isinstance(end["duration_ms"], int)
-    assert set(end["usage"]) == {"input_tokens", "output_tokens"}  # type: ignore[arg-type]
+    usage = end["usage"]
+    assert isinstance(usage, dict)
+    assert set(usage) == {
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "requests",
+        "cost_usd",
+        # TestModel responses carry no provider cost, so the turn is flagged.
+        "cost_missing",
+    }
+    assert usage["requests"] >= 1
+    assert usage["cost_missing"] is True
 
 
 async def test_a_history_reset_is_traced(
@@ -797,8 +809,15 @@ async def test_the_hard_limit_ends_the_turn_and_still_keeps_its_history(
     assert "tool calls" in thought
     assert len(bridge.actions) == 1
     assert planner.history, "what the turn did is not forgotten"
-    events = [line["event"] for line in planner_lines(trace)]
+    lines = planner_lines(trace)
+    events = [line["event"] for line in lines]
     assert events[-1] == "tool_budget_reached"
+    # The turn made requests before the backstop fired, so it records what they
+    # cost (docs/11_cost_accounting.md).
+    usage = lines[-1]["usage"]
+    assert isinstance(usage, dict)
+    assert usage["requests"] > 0
+    assert usage["cost_missing"] is True
 
     # The kept history must be usable: the next turn runs without an error.
     with planner.agent.override(model=TestModel(call_tools=[])):

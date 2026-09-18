@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Coroutine, TypeVar
@@ -60,6 +61,7 @@ from .stint import (
     StintDriver,
     StintReport,
 )
+from .pricing import pricing_payload
 from .tracelog import AgentTrace, resolve_log_root
 from .worldmodel import TickDigest, WorldModel
 
@@ -184,6 +186,26 @@ class _HeldStint:
     report: StintReport
 
 
+def _write_pricing(trace: AgentTrace, planner_model: str) -> None:
+    """Record the prices this run is billed at, next to the other traces.
+
+    Written once at startup so a later analysis of the run uses the price in
+    force then rather than today's constant (docs/11_cost_accounting.md). A
+    disabled trace writes no files at all, and a file that cannot be written
+    complains rather than taking the actor down.
+    """
+    if not trace.enabled:
+        return
+    path = trace.pricing_path
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(pricing_payload(planner_model), indent=2), encoding="utf-8"
+        )
+    except OSError as error:
+        logger.warning("pricing_write_failed", path=str(path), error=str(error))
+
+
 class JevAgent:
     """A planner and a Jev executor sharing one entity and one tick loop."""
 
@@ -211,6 +233,8 @@ class JevAgent:
         self.converser: Converser = (
             ModelConverser(planner_model) if converser is None else converser
         )
+
+        _write_pricing(self.trace, self.planner.model_name)
 
         self.reflex_store = ReflexStore(self.trace.reflex_path)
         self._reflex_watch = ReflexWatch(self.reflex_store.load())

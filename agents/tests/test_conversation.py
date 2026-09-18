@@ -24,7 +24,10 @@ from agents.jev_agent.conversation import (
     OUTCOME_NO_TARGET,
     ApproachDriver,
     ConversationSession,
+    Converser,
     ConverserMove,
+    MoveCall,
+    NoteCall,
     free_seat_tiles,
     joined_conversation_id,
     merge_transcript,
@@ -68,7 +71,7 @@ def observe(
 
 
 def session_for(
-    model: WorldModel, converser: FakeConverser, tmp_path: Path
+    model: WorldModel, converser: Converser, tmp_path: Path
 ) -> ConversationSession:
     """A session on `conv_1` writing its trace and notes under `tmp_path`."""
     session = ConversationSession(
@@ -91,6 +94,18 @@ def trace_turns(session: ConversationSession, tmp_path: Path) -> list[dict]:
     return [row for row in rows if row["event"] == "turn"]
 
 
+class FailingConverser:
+    """A converser whose model call always raises, so no usage is recorded."""
+
+    async def move(self, prompt: str) -> MoveCall:
+        """Fail the call."""
+        raise RuntimeError("no model")
+
+    async def note(self, prompt: str) -> NoteCall:
+        """Fail the call."""
+        raise RuntimeError("no model")
+
+
 class SlowConverser:
     """A converser whose call takes `delay` seconds, or waits for `release`."""
 
@@ -100,18 +115,18 @@ class SlowConverser:
         self.release = asyncio.Event()
         self.prompts: list[str] = []
 
-    async def move(self, prompt: str) -> ConverserMove:
+    async def move(self, prompt: str) -> MoveCall:
         """Answer after the delay, or when the test releases the call."""
         self.prompts.append(prompt)
         if self.delay:
             await asyncio.sleep(self.delay)
         else:
             await self.release.wait()
-        return self.move_to_return
+        return MoveCall(self.move_to_return)
 
-    async def note(self, prompt: str) -> str:
+    async def note(self, prompt: str) -> NoteCall:
         """No note: this converser only exists for its move timing."""
-        return ""
+        return NoteCall("")
 
 
 # -- world model -------------------------------------------------------------
@@ -775,6 +790,55 @@ async def test_an_empty_note_writes_nothing(tmp_path: Path) -> None:
     await session.write_report()
 
     assert not (tmp_path / "memory.md").exists()
+
+
+async def test_a_turn_and_the_closing_note_carry_what_their_calls_cost(
+    tmp_path: Path,
+) -> None:
+    usage = {
+        "input_tokens": 900,
+        "output_tokens": 12,
+        "cached_tokens": 800,
+        "requests": 1,
+        "cost_usd": 0.0004,
+    }
+    model = WorldModel("ada")
+    converser = FakeConverser(
+        script=[ConverserMove(action=ACTION_SPEAK, text="hi")],
+        note_text="mira wants planks",
+        usage=dict(usage),
+    )
+    conversation = converse_object("conv_1", ANCHOR, ["ada", "mira"], speaker="ada")
+    digest = observe(model, 1, objects=[conversation])
+    session = session_for(model, converser, tmp_path)
+    session.decide(digest)  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    session.decide(observe(model, 2, objects=[conversation]))  # type: ignore[arg-type]
+    session.finish(END_CLOSED)
+    await session.write_report()
+    session.trace.close()
+
+    path = tmp_path / "agent-ada" / "conversations.jsonl.gz"
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+    turn = next(row for row in rows if row["event"] == "turn")
+    end = next(row for row in rows if row["event"] == "conversation_end")
+    assert turn["usage"] == usage
+    assert end["usage"] == usage
+
+
+async def test_a_failed_converser_call_records_no_usage(tmp_path: Path) -> None:
+    model = WorldModel("ada")
+    conversation = converse_object("conv_1", ANCHOR, ["ada", "mira"], speaker="ada")
+    digest = observe(model, 1, objects=[conversation])
+    session = session_for(model, FailingConverser(), tmp_path)
+    session.decide(digest)  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    session.decide(observe(model, 2, objects=[conversation]))  # type: ignore[arg-type]
+
+    turn = trace_turns(session, tmp_path)[0]
+    assert "usage" not in turn
+    assert turn["move"]["action"] == ACTION_PASS
 
 
 async def test_the_conversation_trace_records_start_turn_and_end(

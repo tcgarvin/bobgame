@@ -12,6 +12,7 @@ import pytest
 from agents.jev_agent.build import BUILD_OUT_OF_ITEMS, BuildExecutor, make_plan
 from agents.jev_agent.jevclient import JevDecision
 from agents.jev_agent.options import TravelState
+from agents.jev_agent.pricing import jev_cost_usd
 from agents.jev_agent.stint import (
     END_DEATH,
     END_REPEATED_FAILURE,
@@ -330,6 +331,7 @@ async def test_every_tick_is_written_to_the_stint_trace(trace: AgentTrace) -> No
     assert first["tick"] == 1
     assert first["action"] == "move_E"
     assert first["input_tokens"] == 420
+    assert first["cost_usd"] == jev_cost_usd(420)
     assert first["latency_ms"] == 250
     assert first["intent_result"] == "accepted"
     assert first["options"] > 5
@@ -540,6 +542,8 @@ async def test_a_driver_tick_is_traced_without_jevs_numbers(trace: AgentTrace) -
     assert records[0]["driver"] == "build"
     assert records[0]["action"].startswith("build_place:")
     assert "latency_ms" not in records[0]
+    # A driver tick made no Jev call, so it must not claim to have cost money.
+    assert "cost_usd" not in records[0]
     assert "eject" not in records[0]
     assert records[0]["top"] == []
     # No Jev call means no jev_states line for this tick.
