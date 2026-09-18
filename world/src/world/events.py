@@ -50,6 +50,8 @@ class UtteranceEvent:
     position: Position
     # Set for `conversation` lines and for a conversation's opening line.
     conversation_id: str = ""
+    # True when the line was an invitation to talk (docs/09, section 8.2).
+    open_to_talk: bool = False
 
 
 @dataclass(frozen=True)

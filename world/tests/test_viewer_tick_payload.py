@@ -120,6 +120,7 @@ class TestTickCompleted:
                 "asleep": False,
                 "sleeping_on": "",
                 "collapsed": False,
+                "open_to_talk": False,
                 "inventory": {"wood": 3},
             }
         ]

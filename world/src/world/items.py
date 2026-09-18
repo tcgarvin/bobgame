@@ -126,6 +126,8 @@ CONVERSATION_MAX_UTTERANCES = 40
 CONVERSATION_TEXT_LIMIT = 300
 # Transcript lines kept in object state.
 CONVERSATION_TRANSCRIPT_KEPT = 12
+# How long a spoken invitation ("open to talk", docs/09, section 8) stays open.
+INVITATION_TICKS = 40
 
 # --- Combat ---------------------------------------------------------------
 

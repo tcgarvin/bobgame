@@ -155,10 +155,10 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
 
         centre = entity.position
 
-        self_proto = _entity_proto(entity)
+        self_proto = _entity_proto(entity, context.tick_id)
 
         visible_entities = [
-            _entity_proto(other)
+            _entity_proto(other, context.tick_id)
             for other in self.world.all_entities().values()
             if other.entity_id != entity_id
             and _within(other.position, centre, VIEW_RADIUS)
@@ -240,6 +240,7 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
                             x=utterance.position.x, y=utterance.position.y
                         ),
                         conversation_id=utterance.conversation_id,
+                        open_to_talk=utterance.open_to_talk,
                     )
                 )
             )
@@ -377,13 +378,13 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
         return tiles
 
 
-def _entity_proto(entity: Entity) -> pb.Entity:
+def _entity_proto(entity: Entity, tick: int) -> pb.Entity:
     """Convert an entity, making sure the stat fields are populated.
 
     `conversion.entity_to_proto` is owned by the mechanics track; until it maps
     the new stat fields this fills them in so observations always carry them.
     """
-    proto = entity_to_proto(entity)
+    proto = entity_to_proto(entity, tick)
     proto.health = entity.health
     proto.max_health = entity.max_health
     proto.hunger = entity.hunger

@@ -33,8 +33,9 @@ from .worldmodel import TickDigest, WorldModel
 
 logger = structlog.get_logger(__name__)
 
-# Code rules layered on top of Jev's answers.
-EJECT_THRESHOLD = 0.7
+# Code rules layered on top of Jev's answers. The stint ends when Jev's `done`
+# or its `stuck` probability reaches the threshold on two consecutive ticks.
+DONE_OR_STUCK_THRESHOLD = 0.6
 EJECT_STREAK_TO_END = 2
 DANGER_THRESHOLD = 0.8
 DANGER_HEALTH_FLOOR = 6
@@ -102,6 +103,9 @@ class Brief:
     travel: TravelState | None = None
     # The only phrases Jev may shout during this stint; empty means it cannot.
     shouts: tuple[str, ...] = ()
+    # The only phrases Jev may say as an invitation to talk; empty means it
+    # cannot invite anyone (docs/09 section 8.3).
+    invitations: tuple[str, ...] = ()
 
     def summary(self) -> str:
         """One-line form for status reports and the viewer."""
@@ -117,6 +121,7 @@ class Brief:
             "notes": self.notes,
             "check_every": self.check_every,
             "shouts": list(self.shouts),
+            "invitations": list(self.invitations),
             "travel": (
                 None
                 if travel is None
@@ -137,7 +142,8 @@ class TickRecord:
     option_count: int
     action: str
     top: Sequence[tuple[str, float]]
-    eject: float
+    done: float
+    stuck: float
     danger: float
     latency_ms: int
     confidence: float = 0.0
@@ -177,7 +183,9 @@ class TickRecord:
                     key: round(value, 3) for key, value in self.probabilities.items()
                 },
                 "confidence": round(self.confidence, 3),
-                "eject": round(self.eject, 3),
+                "done": round(self.done, 3),
+                "stuck": round(self.stuck, 3),
+                "eject": round(max(self.done, self.stuck), 3),
                 "danger": round(self.danger, 3),
                 "latency_ms": self.latency_ms,
             }
@@ -191,7 +199,8 @@ class TickRecord:
             return f"t{self.tick} {self.action} -> {self.intent_result}{note}"
         return (
             f"t{self.tick} {self.action} -> {self.intent_result} "
-            f"(eject {self.eject:.2f}, danger {self.danger:.2f})"
+            f"(done {self.done:.2f}, stuck {self.stuck:.2f}, "
+            f"danger {self.danger:.2f})"
         )
 
 
@@ -333,6 +342,7 @@ class Stint:
             self.model,
             self.travel,
             shouts=self.brief.shouts,
+            invitations=self.brief.invitations,
             max_options=MAX_OPTIONS,
         )
         ticks_left = self.brief.max_ticks - self.ticks_used
@@ -501,7 +511,7 @@ class Stint:
         return ""
 
     def _update_eject_streak(self, decision: JevDecision) -> None:
-        if decision.eject >= EJECT_THRESHOLD:
+        if max(decision.done, decision.stuck) >= DONE_OR_STUCK_THRESHOLD:
             self._eject_streak += 1
         else:
             self._eject_streak = 0
@@ -554,7 +564,8 @@ class Stint:
             option_count=option_count,
             action=option.key,
             top=decision.top(),
-            eject=decision.eject,
+            done=decision.done,
+            stuck=decision.stuck,
             danger=decision.danger,
             latency_ms=decision.latency_ms,
             confidence=decision.confidence,
@@ -639,6 +650,8 @@ class Stint:
             "action": decision.action,
             "probabilities": {key: round(value, 3) for key, value in decision.top(5)},
             "confidence": round(decision.confidence, 3),
+            "done": round(decision.done, 3),
+            "stuck": round(decision.stuck, 3),
             "eject": round(decision.eject, 3),
             "danger": round(decision.danger, 3),
             "latency_ms": decision.latency_ms,

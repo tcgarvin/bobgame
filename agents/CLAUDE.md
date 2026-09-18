@@ -211,7 +211,7 @@ make no call and write no line; a timed-out call still wrote its state).
 `planner.jsonl.gz` holds the planner's turns: `turn_start` with the full prompt,
 `tool_call` and `tool_result` with untruncated args and results, `turn_end` with
 the reflection, tool count, duration and token usage, plus `turn_failed`,
-`tool_budget_spent` (the soft 30-call budget ran out and the turn ended
+`tool_budget_spent` (the soft 20-call budget ran out and the turn ended
 normally), `tool_budget_reached` (the hard backstop fired) and `history_reset`. `conversations.jsonl.gz` holds one
 conversation per `conversation_start`/`turn`/`conversation_end` triple.
 `memory.md`, the planner's persistent notes, and `reflex.json`, the registered
@@ -256,8 +256,9 @@ written at startup with the prices the run is billed at (`pricing.py`). Contract
 on the status channel.
 
 - **Stint**: Jev picks one action per tick from the code-enumerated options.
-  The stint ends on two consecutive `eject >= 0.7`, an exhausted tick budget,
-  death, or the same failed action three times running.
+  The stint ends on two consecutive ticks with `done` or `stuck` at or above
+  `DONE_OR_STUCK_THRESHOLD` (0.6), an exhausted tick budget, death, or the same
+  failed action three times running.
 - **Planning**: the tick loop submits `Wait` (or one `Say` on the `thought`
   channel when the planner produces a new reflection) while the planner task
   thinks. Planner tools reach the tick loop through asyncio Futures, so
@@ -332,6 +333,42 @@ code-owned walk like the heard-shout option. A join during a stint ends it with
 reason `joined_conversation` and `start_stint` returns after the conversation
 with the report appended.
 
+### Invitations to talk (docs/09 section 8)
+
+`say(text, open_to_talk=True)` keeps the speaker open to talk for
+`items.INVITATION_TICKS` (40) ticks; the flag rides on the `Utterance` and on
+`Entity`, so `WorldModel.open_invitations()` lists every settler that is either
+in view with the flag or was heard with one inside the window (id, best-known
+position, the line), and `my_invitation_live()` covers the actor's own.
+`options.py` offers `talk_to:<entity_id>` - the `accept` intent next to the
+inviter, otherwise a code-owned walk there - and `invite:<n>` per phrase in
+`Brief.invitations`, only while the actor holds no seat, and `invite` only with
+a settler inside `SAY_RADIUS` and no invitation of its own live. `jevstate.py`
+adds the `invitations` lines. The planner has `talk_to(entity_id, max_ticks)`,
+which refuses an unknown invitation, walks with the same `ApproachDriver` as
+`join_conversation` and then accepts, and `look` marks who is open to talk.
+
+Accepting seats both settlers at once, so a conversation can start while the
+planner is mid-turn: `_detect_join` runs before the in-flight single-tick action
+resolves, and a seat the actor did not ask for answers that action and every
+queued one with `interrupted: conversation conv_N started`
+(`INTERRUPTED_BY_CONVERSATION`); a queued `start_stint`, `travel_to` or `build`
+simply waits, because `_choose_intent` prefers the session. That conversation's
+report has no tool waiting for it, so it goes to the planner as a note:
+`drain_reflex_notes` is now `drain_notes` and carries reflex lines and
+conversation reports alike. `conversation_start` records `via`: `open`, `join`,
+`accept`, or `accepted` for the inviter.
+
+### The eject question, split (docs/05)
+
+Jev is asked `done` ("is the success condition met right now") and `stuck`
+("has the brief become impossible, or does this need a judgement the brief does
+not cover") as two Nouls every tick, and the stint ends when either reaches 0.6
+on two consecutive ticks. `JevDecision.eject` is a derived property,
+`max(done, stuck)`, so the traces, the report line (which now prints
+`(done X, stuck Y, danger Z)`), the viewer panel and
+`tools/analyze_run.py`'s eject column keep working unchanged.
+
 ### Stations, metal and sleep (docs/10_metal_and_sleep.md)
 
 `items.py` also mirrors the deeper tree: `Recipe` carries `station`
@@ -394,6 +431,12 @@ What Jev may choose (`options.py`):
 - **dismantle is deliberately not offered.** It is `ExtractIntent` on a placed
   building, and Jev reads "extract" as "gather", so it would cheerfully eat the
   town wall. Dismantling is a planner tool only.
+
+**No planner walking or fighting tools.** The planner has no `move`, `attack`,
+`extract` or `collect`; walking, fighting, mining and picking berries go through
+Jev, `travel_to` or `build`. A single-tick planner call costs about 3 ticks (2
+for the action, ~1 of model thinking) where Jev does the same in 1. `dismantle`
+still submits an `ExtractIntent`, and `build` still uses the direction helper.
 
 The planner's `build` tool is the deterministic one, in the spirit of
 `travel_to`: `build(kind, shape, x1, y1, x2, y2, max_ticks, skip, tiles)` where

@@ -1,8 +1,15 @@
 """The TypeSafe System One call that drives a stint, and its interface.
 
-One request per tick asks three questions about one state: which action to take
-(`Choice` over the code-enumerated legal options), whether to hand control back
-to the planner (`Noul`), and whether the actor is about to die (`Noul`).
+One request per tick asks four questions about one state: which action to take
+(`Choice` over the code-enumerated legal options), whether the brief's success
+condition is met (`Noul`), whether the brief has become impossible or needs a
+judgement it does not cover (`Noul`), and whether the actor is about to die
+(`Noul`).
+
+`done` and `stuck` used to be one bundled question, and bundling cost the stint
+its ending: asked about success *or* impossibility *or* judgement at once, Jev
+answered 0.5-0.6 on a plainly finished job, under the threshold, and thirteen
+stints in one run burned their whole tick budget after the job was done.
 """
 
 from __future__ import annotations
@@ -31,10 +38,12 @@ ACTION_QUESTION = (
     "single action should the settler take this tick to make progress on the "
     "brief while staying alive?"
 )
-EJECT_QUESTION = (
-    "Should control return to the slow planner now, because the brief's success "
-    "condition is met, the brief has become impossible, or the situation needs "
-    "judgement the brief does not cover?"
+DONE_QUESTION = (
+    "Is the brief's success condition met right now, as far as the state shows?"
+)
+STUCK_QUESTION = (
+    "Has the brief become impossible, or does the situation need a judgement the "
+    "brief does not cover?"
 )
 DANGER_QUESTION = (
     "Is this settler in immediate danger of dying within the next few ticks?"
@@ -48,10 +57,20 @@ class JevDecision:
     action: str
     probabilities: Mapping[str, float] = field(default_factory=dict)
     confidence: float = 0.0
-    eject: float = 0.0
+    done: float = 0.0
+    stuck: float = 0.0
     danger: float = 0.0
     input_tokens: int = 0
     latency_ms: int = 0
+
+    @property
+    def eject(self) -> float:
+        """How strongly Jev wants the planner back: the higher of the two.
+
+        Derived, so traces, reports and the viewer keep the single number they
+        have always shown.
+        """
+        return max(self.done, self.stuck)
 
     def top(self, count: int = 3) -> list[tuple[str, float]]:
         """The `count` most likely options, most likely first."""
@@ -87,7 +106,7 @@ class TypeSafeJevClient:
     async def decide(
         self, state: Mapping[str, Any], options: Mapping[str, str]
     ) -> JevDecision:
-        """Ask Jev for an action, an eject probability, and a danger probability."""
+        """Ask Jev for an action, `done`, `stuck`, and a danger probability."""
         if not options:
             raise ValueError("Jev needs at least one option to choose from")
         started = time.monotonic()
@@ -95,7 +114,8 @@ class TypeSafeJevClient:
             dict(state),
             {
                 "action": Choice(instructions=ACTION_QUESTION, criteria=dict(options)),
-                "eject": Noul(instructions=EJECT_QUESTION),
+                "done": Noul(instructions=DONE_QUESTION),
+                "stuck": Noul(instructions=STUCK_QUESTION),
                 "danger": Noul(instructions=DANGER_QUESTION),
             },
         )
@@ -108,7 +128,8 @@ class TypeSafeJevClient:
             action=action.choice,
             probabilities=dict(action.probabilities),
             confidence=action.confidence,
-            eject=_noul(response.answers.get("eject")),
+            done=_noul(response.answers.get("done")),
+            stuck=_noul(response.answers.get("stuck")),
             danger=_noul(response.answers.get("danger")),
             input_tokens=response.usage.input_tokens or 0,
             latency_ms=latency_ms,

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
+from agents.jev_agent.geometry import NAME_TO_DIRECTION
 from agents.jev_agent.options import (
     CRAFT_OPTION_LIMIT,
     MAX_OPTIONS,
@@ -19,6 +22,7 @@ from agents.jev_agent.options import (
 from agents.jev_agent.worldmodel import WorldModel
 
 from helpers import (
+    converse_object,
     make_entity,
     make_object,
     make_observation,
@@ -38,6 +42,11 @@ def build_model(**observation_kwargs: object) -> WorldModel:
 def keys(model: WorldModel, travel: TravelState | None = None) -> list[str]:
     """Option keys for a model, in enumeration order."""
     return [option.key for option in enumerate_options(model, travel)]
+
+
+def keys_with(model: WorldModel, **kwargs: object) -> list[str]:
+    """Option keys with extra `enumerate_options` arguments, such as phrases."""
+    return [option.key for option in enumerate_options(model, **kwargs)]  # type: ignore[arg-type]
 
 
 def test_wait_is_always_offered() -> None:
@@ -605,3 +614,105 @@ def test_only_waking_is_offered_to_a_sleeper() -> None:
     assert "wake" in offered
     assert "sleep:ground" not in offered
     assert "sleep:bed_1" not in offered
+
+
+# -- invitations to talk (docs/09 section 8.3) -------------------------------
+
+
+def invited_model(
+    inviter_position: tuple[int, int] = (11, 10),
+    *,
+    text: str = "Come and plan the wall.",
+) -> WorldModel:
+    """A model for ada who heard, and can see, an open invitation from mira."""
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("mira", inviter_position, open_to_talk=True)],
+            events=[utterance_event("mira", text, inviter_position, open_to_talk=True)],
+        )
+    )
+    return model
+
+
+def option_for(model: WorldModel, key: str, **kwargs: object) -> Option:
+    """The one option with this key; fails the test when it is not offered."""
+    options = enumerate_options(model, **kwargs)  # type: ignore[arg-type]
+    matches = [option for option in options if option.key == key]
+    assert matches, f"{key} not offered: {[option.key for option in options]}"
+    return matches[0]
+
+
+def test_an_adjacent_invitation_is_the_accept_intent() -> None:
+    option = option_for(invited_model((11, 10)), "talk_to:mira")
+
+    assert option.intent.converse.action == "accept"
+    assert option.intent.converse.target_entity_id == "mira"
+    assert "accept mira's invitation to talk" in option.description
+
+
+def test_a_distant_invitation_is_a_walk_that_stops_next_to_the_inviter() -> None:
+    option = option_for(invited_model((14, 10)), "talk_to:mira")
+
+    assert option.intent.HasField("move")
+    assert option.travel_target is not None
+    assert option.travel_target.target == (14, 10)
+    assert option.travel_target.stop_adjacent
+    assert (
+        'who said "Come and plan the wall." and is open to talk' in option.description
+    )
+
+
+def test_nobody_open_to_talk_means_no_talk_to_option() -> None:
+    model = build_model(entities=[make_entity("mira", (11, 10))])
+
+    assert not [key for key in keys(model) if key.startswith("talk_to:")]
+
+
+def test_an_invitation_phrase_is_offered_while_a_settler_is_in_earshot() -> None:
+    model = build_model(entities=[make_entity("mira", (14, 10))])
+
+    option = option_for(model, "invite:0", invitations=["Anyone want to plan?"])
+    assert option.intent.say.channel == "local"
+    assert option.intent.say.open_to_talk
+    assert option.intent.say.text == "Anyone want to plan?"
+    assert "stay open to talk for 40 ticks" in option.description
+
+
+def test_an_invitation_is_not_offered_with_nobody_in_earshot() -> None:
+    model = build_model(entities=[make_entity("mira", (40, 10))])
+
+    assert "invite:0" not in keys_with(model, invitations=["Anyone want to plan?"])
+
+
+def test_an_invitation_is_not_offered_while_the_actors_own_one_stands() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("mira", (12, 10))],
+            events=[utterance_event("ada", "Anyone?", (10, 10), open_to_talk=True)],
+        )
+    )
+
+    assert "invite:0" not in keys_with(model, invitations=["Anyone want to plan?"])
+
+
+def test_neither_invitation_option_is_offered_from_a_seat() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            objects=[converse_object("conv_1", (11, 11), ["mira", "ada"])],
+            entities=[make_entity("mira", (11, 10), open_to_talk=True)],
+            events=[utterance_event("mira", "Talk?", (11, 10), open_to_talk=True)],
+        )
+    )
+
+    offered = keys_with(model, invitations=["Anyone want to plan?"])
+    assert "talk_to:mira" not in offered
+    assert "invite:0" not in offered

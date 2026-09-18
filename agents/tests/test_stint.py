@@ -34,13 +34,20 @@ from helpers import (
 )
 
 
-def decision(action: str, *, eject: float = 0.0, danger: float = 0.0) -> JevDecision:
+def decision(
+    action: str,
+    *,
+    done: float = 0.0,
+    stuck: float = 0.0,
+    danger: float = 0.0,
+) -> JevDecision:
     """A scripted Jev answer."""
     return JevDecision(
         action=action,
         probabilities={action: 0.8, "wait": 0.2},
         confidence=0.7,
-        eject=eject,
+        done=done,
+        stuck=stuck,
         danger=danger,
         input_tokens=420,
         latency_ms=250,
@@ -124,11 +131,11 @@ async def test_an_option_jev_never_saw_falls_back_to_wait(trace: AgentTrace) -> 
     assert "unknown option" in harness.stint.records[0].note
 
 
-async def test_two_high_eject_ticks_in_a_row_end_the_stint(trace: AgentTrace) -> None:
+async def test_two_high_done_ticks_in_a_row_end_the_stint(trace: AgentTrace) -> None:
     jev = FakeJevClient(
         script=[
-            decision("wait", eject=0.9),
-            decision("wait", eject=0.85),
+            decision("wait", done=0.9),
+            decision("wait", done=0.85),
             decision("wait"),
         ]
     )
@@ -142,9 +149,45 @@ async def test_two_high_eject_ticks_in_a_row_end_the_stint(trace: AgentTrace) ->
     assert harness.stint.end_reason == END_SUCCESS_OR_JUDGEMENT
 
 
-async def test_a_single_high_eject_does_not_end_the_stint(trace: AgentTrace) -> None:
+async def test_two_high_stuck_ticks_in_a_row_end_the_stint(trace: AgentTrace) -> None:
     jev = FakeJevClient(
-        script=[decision("wait", eject=0.9), decision("wait", eject=0.1)] * 2
+        script=[
+            decision("wait", stuck=0.6),
+            decision("wait", stuck=0.95),
+            decision("wait"),
+        ]
+    )
+    harness = StintHarness(jev, make_brief(max_ticks=10), trace)
+    for tick in range(1, 4):
+        await harness.tick(make_observation(tick, make_entity("ada", (10, 10))))
+    assert harness.stint.finished
+    assert harness.stint.end_reason == END_SUCCESS_OR_JUDGEMENT
+
+
+async def test_answers_below_the_threshold_never_end_the_stint(
+    trace: AgentTrace,
+) -> None:
+    jev = FakeJevClient(
+        script=[decision("wait", done=0.55, stuck=0.55) for _ in range(4)]
+    )
+    harness = StintHarness(jev, make_brief(max_ticks=10), trace)
+    for tick in range(1, 5):
+        await harness.tick(make_observation(tick, make_entity("ada", (10, 10))))
+    assert not harness.stint.finished
+
+
+async def test_the_report_tail_shows_done_and_stuck(trace: AgentTrace) -> None:
+    jev = FakeJevClient(script=[decision("wait", done=0.42, stuck=0.13, danger=0.03)])
+    harness = StintHarness(jev, make_brief(max_ticks=10), trace)
+    await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
+    harness.stint.record_intent_result("accepted")
+    tail = harness.stint.build_report().tail
+    assert tail == ["t1 wait -> accepted (done 0.42, stuck 0.13, danger 0.03)"]
+
+
+async def test_a_single_high_done_does_not_end_the_stint(trace: AgentTrace) -> None:
+    jev = FakeJevClient(
+        script=[decision("wait", done=0.9), decision("wait", done=0.1)] * 2
     )
     harness = StintHarness(jev, make_brief(), trace)
     for tick in range(1, 5):
@@ -324,6 +367,7 @@ async def test_every_tick_is_written_to_the_stint_trace(trace: AgentTrace) -> No
         "notes": "",
         "check_every": 1,
         "shouts": [],
+        "invitations": [],
         "travel": None,
     }
     assert first["entity_id"] == "ada"
@@ -476,11 +520,13 @@ async def test_the_report_mentions_damage_and_speech(trace: AgentTrace) -> None:
 
 
 async def test_status_json_reports_the_last_decision(trace: AgentTrace) -> None:
-    jev = FakeJevClient(script=[decision("move_E", eject=0.4, danger=0.2)])
+    jev = FakeJevClient(script=[decision("move_E", done=0.4, danger=0.2)])
     harness = StintHarness(jev, make_brief(), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     payload = json.loads(harness.stint.status_json())
     assert payload["action"] == "move_E"
+    assert payload["done"] == 0.4
+    assert payload["stuck"] == 0.0
     assert payload["eject"] == 0.4
     assert payload["danger"] == 0.2
     assert payload["ticks_used"] == 1
@@ -557,3 +603,28 @@ async def test_a_driver_ends_the_stint_with_its_own_reason(trace: AgentTrace) ->
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     assert harness.stint.finished
     assert harness.stint.end_reason == BUILD_OUT_OF_ITEMS
+
+
+async def test_the_briefs_invitation_phrases_become_jev_options(
+    trace: AgentTrace,
+) -> None:
+    jev = FakeJevClient(default_action="wait")
+    brief = make_brief(invitations=("Anyone want to plan the wall?",))
+    harness = StintHarness(jev, brief, trace)
+
+    await harness.tick(
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("mira", (13, 10))],
+        )
+    )
+
+    assert "invite:0" in jev.last_options
+    assert "Anyone want to plan the wall?" in jev.last_options["invite:0"]
+
+
+def test_the_brief_payload_carries_the_invitation_phrases() -> None:
+    brief = make_brief(invitations=("Anyone want to plan the wall?",))
+
+    assert brief.as_payload()["invitations"] == ["Anyone want to plan the wall?"]

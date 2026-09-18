@@ -32,6 +32,7 @@ from pydantic_ai.toolsets import FunctionToolset, ToolsetTool, WrapperToolset
 from .. import world_pb2 as pb
 from . import items
 from .conversation import (
+    ACTION_ACCEPT,
     ACTION_JOIN,
     ACTION_OPEN,
     ApproachDriver,
@@ -66,7 +67,7 @@ from .options import (
 from .pricing import CostLedger, usage_from_messages
 from .stint import Brief, StintDriver, StintReport
 from .tracelog import AgentTrace
-from .worldmodel import HeardUtterance, WorldModel
+from .worldmodel import HeardUtterance, OpenInvitation, WorldModel
 
 logger = structlog.get_logger(__name__)
 
@@ -74,8 +75,11 @@ logger = structlog.get_logger(__name__)
 # calls are left, and a call past the budget is refused with a message instead
 # of being run. The turn then ends normally, with its reflection and history
 # intact. (The old hard limit of 12 ended 70% of turns by exception, and every
-# one of those turns was forgotten.)
-MAX_TOOL_CALLS_PER_TURN = 30
+# one of those turns was forgotten.) Measured on a 30-call budget, 29 of 50
+# turns spent it and the sink was micro-movement: `move` alone was 312 of 1260
+# calls. With walking now only reachable through Jev, `travel_to` and `build`,
+# 20 calls is enough for a turn's worth of decisions.
+MAX_TOOL_CALLS_PER_TURN = 20
 # Warn the model to wrap up when this few calls are left.
 TOOL_BUDGET_WARNING_AT = 5
 # pydantic-ai's hard stop, a backstop for a model that ignores the refusals.
@@ -98,7 +102,9 @@ GROUND = "the ground"
 SETTLEMENT_NARRATIVE = f"""\
 You are one of twelve people who woke up together on a large, wild island with
 nothing but your hands. The others are real agents like you; they hear what you
-say and read what you write. Together, build a civilization.
+say and read what you write. Together, build a civilization. Each of you also
+has to find your place in it: what you do, whom you work with, and what you are
+known for.
 
 What follows is how this world works and how you act in it. What to do with it
 is up to you and the others.
@@ -162,6 +168,22 @@ Conversations:
 - `give` hands items to a settler standing next to you or seated in the same
   conversation. It is a single-tick tool and it can be used inside or outside a
   conversation.
+- `say` with `open_to_talk` set is an invitation: you stay open to talk for
+  {items.INVITATION_TICKS} ticks, everyone who hears the line and everyone who can see you knows
+  it, and any settler standing next to you can accept it. Saying another
+  invitation renews the {items.INVITATION_TICKS} ticks; taking a seat in any conversation ends it.
+  `look` marks the settlers who are open to talk, with the line they said.
+- Accepting an invitation makes a conversation on a free tile next to the two
+  of you, holding the inviter and the accepter, with the invitation line as its
+  first line and the inviter speaking first. It needs the accepter standing
+  next to the inviter and neither of them in a conversation. `talk_to` does the
+  walk and the accept in one call and returns when the conversation is over.
+- So a conversation can begin while you are mid-turn, when someone accepts your
+  invitation. Conversation mode starts on that tick and your turn carries on,
+  but the single-tick tool in flight and any you call while the conversation
+  runs come back as "interrupted: conversation conv_N started", while a queued
+  `start_stint`, `travel_to` or `build` waits until it has ended. The
+  conversation report reaches you in your next tool result.
 
 Reflex:
 - `set_reflex` registers one brief that code runs for you, without asking you,
@@ -230,17 +252,20 @@ Placed objects:
 
 How you act:
 - You are the slow, thinking half of one settler. The world ticks every two
-  seconds whether or not you have answered. Each model reply and each
-  single-tick tool call costs you one to several ticks, during which your body
-  just stands there. Every tool result tells you the current tick and how many
-  ticks this turn has cost, and flags a wolf that is near or biting with "!!".
+  seconds whether or not you have answered. A single-tick tool call costs about
+  3 ticks all told: 2 for the action itself and about 1 more while you think of
+  the next call, and your body stands still for all of them. Jev acts every
+  tick. Every tool result tells you the current tick and how many ticks this
+  turn has cost, and flags a wolf that is near or biting with "!!".
 - Jev is the fast half: a cheap reflex layer that moves your own body every
   tick while you are not thinking. It is not a settler and not your name; your
   name is on the first line of every turn. Jev is extremely literal. It picks
   one action per tick from a closed list that code builds for it: move, walk
   to something it can see or to where a shout came from, attack, extract,
   collect, eat, craft, equip, place, rest, use a chest, say a canned phrase,
-  shout a phrase you gave it, wait. It does not plan, it does not remember,
+  shout a phrase you gave it, say an invitation line you gave it, accept
+  someone else's invitation, take a seat in a conversation, wait. It does not
+  plan, it does not remember,
   and it does exactly what your brief says even when that is silly.
 - Anything that has to happen at world speed, a fight included, only happens
   if Jev is doing it. `start_stint` hands your body to Jev and blocks until
@@ -249,22 +274,29 @@ How you act:
   exact phrases Jev may shout (it cannot invent its own). Two briefs of very
   different shape, to show the form only; the content is yours:
     instruction: "Mine the rocks north-east of you and pick up the stone. Each
-      time you are carrying 6 stone, shout the stone phrase once."
+      time you are carrying 6 stone, shout the stone phrase once. When another
+      settler is within ten tiles, say the invitation line once."
     success_condition: "you are carrying 10 stone"
     max_ticks: 120
     notes: "eat a berry when hunger is below 40"
     shouts: ["Stone to spare at the rocks, come and take some."]
+    invitations: ["I am at the rocks if anyone wants to sort out who mines what."]
   and
     instruction: "Withdraw every plank from the chest next to you, then craft
       wood_wall until you have no planks left."
     success_condition: "you carry no planks and at least 1 wood_wall"
     max_ticks: 25
     shouts: []
+    invitations: []
   A success condition names one thing Jev can see in its own state. A stint
   that runs out of ticks hands your body back with the job half done.
 - `travel_to` walks you to a map position and `build` places a whole line or
-  rectangle of pieces; each is one call however many ticks it runs. The
-  single-tick tools are for one-off precision actions.
+  rectangle of pieces; each is one call however many ticks it runs. Walking,
+  fighting, chopping, mining and picking berries happen only through Jev,
+  `travel_to` or `build`: you have no tool of your own for them. The
+  single-tick tools cover one-off precision actions on what is already within
+  reach - eating, pack and chest moves, crafting, equipping, placing, resting,
+  dismantling, sleeping, speaking and writing.
 - You get {MAX_TOOL_CALLS_PER_TURN} tool calls per turn, and every tool result ends with how many
   are left. A call made after the budget is spent is refused, not run; write
   your reflection then, and the next turn starts with a full budget.
@@ -309,8 +341,8 @@ class AgentBridge(Protocol):
     def clear_reflex(self) -> None:
         """Forget the reflex brief."""
 
-    def drain_reflex_notes(self, *, for_prompt: bool = False) -> list[str]:
-        """Reflex report lines not yet shown, emptied as they are taken."""
+    def drain_notes(self, *, for_prompt: bool = False) -> list[str]:
+        """Reflex lines and conversation reports not yet shown, emptied as taken."""
 
     def set_thought(self, thought: str) -> None:
         """Publish the planner's latest reflection to the viewer."""
@@ -445,9 +477,10 @@ class BudgetedToolset(WrapperToolset[PlannerDeps]):
         result = await self.wrapped.call_tool(name, tool_args, ctx, tool)
         model = ctx.deps.bridge.model
         lines = [str(result)]
-        # A reflex may have run inside the tool call (or while the model was
-        # writing it); the planner is told as soon as it asks anything.
-        lines.extend(ctx.deps.bridge.drain_reflex_notes())
+        # A reflex may have run inside the tool call, or a conversation may
+        # have started and ended (or while the model was writing it); the
+        # planner is told as soon as it asks anything.
+        lines.extend(ctx.deps.bridge.drain_notes())
         lines.append(turn_clock_line(model, budget.turn_start_tick))
         since_tick = alert_window_start(model.tick, budget.turn_start_tick)
         alert = threat_alert(model, since_tick)
@@ -466,6 +499,22 @@ def _validated_shouts(shouts: Sequence[str]) -> tuple[str, ...]:
     if too_long:
         raise ModelRetry(
             f"a shout phrase is at most {MAX_SHOUT_LENGTH} characters: {too_long[0]!r}"
+        )
+    return phrases
+
+
+def _validated_invitations(invitations: Sequence[str]) -> tuple[str, ...]:
+    """The brief's invitation phrases, trimmed; too many or too long is a retry."""
+    phrases = tuple(phrase.strip() for phrase in invitations if phrase.strip())
+    if len(phrases) > MAX_BRIEF_SHOUTS:
+        raise ModelRetry(f"at most {MAX_BRIEF_SHOUTS} invitation phrases per stint")
+    too_long = [
+        phrase for phrase in phrases if len(phrase) > items.CONVERSATION_TEXT_LIMIT
+    ]
+    if too_long:
+        raise ModelRetry(
+            f"an invitation phrase is at most {items.CONVERSATION_TEXT_LIMIT} "
+            f"characters: {too_long[0]!r}"
         )
     return phrases
 
@@ -520,8 +569,18 @@ def _build_site_lines(model: WorldModel) -> list[str]:
     return ["building landmarks:"] + lines
 
 
+def _invitation_marks(model: WorldModel) -> dict[str, str]:
+    """`entity id -> the open-to-talk marker` for every settler open to talk."""
+    marks: dict[str, str] = {}
+    for invitation in model.open_invitations():
+        text = f': "{invitation.text}"' if invitation.text else ""
+        marks[invitation.entity_id] = f", open to talk{text}"
+    return marks
+
+
 def _roster_lines(model: WorldModel) -> list[str]:
     """Every settler the actor has met, with where and when it last saw them."""
+    marks = _invitation_marks(model)
     met = sorted(
         (
             entity
@@ -540,6 +599,7 @@ def _roster_lines(model: WorldModel) -> list[str]:
         lines.append(
             f"  {entity.entity_id} at {entity.position} "
             f"(d{chebyshev(entity.position, model.position)}, {when}{state})"
+            f"{marks.get(entity.entity_id, '')}"
         )
     return lines
 
@@ -647,12 +707,14 @@ def describe_world(model: WorldModel) -> str:
 
     visible = model.entities_near(8)
     if visible:
+        marks = _invitation_marks(model)
         lines.append("entities in view:")
         for entity in visible:
             wielding = f", wielding {entity.wielded}" if entity.wielded else ""
             lines.append(
                 f"  {entity.entity_id} ({entity.entity_type}) at {entity.position}, "
                 f"hp {entity.health}/{entity.max_health}{wielding}"
+                f"{marks.get(entity.entity_id, '')}"
             )
     else:
         lines.append("entities in view: none")
@@ -700,6 +762,7 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
         notes: str = "",
         check_every: int = 1,
         shouts: Sequence[str] = (),
+        invitations: Sequence[str] = (),
     ) -> str:
         """Hand control to Jev until the brief is done, then read the report.
 
@@ -713,6 +776,11 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
                 example ["Stone to spare at the rocks.", "Come to the workshop."].
                 Say in the instruction when to use each. Jev cannot shout anything else;
                 leave it empty and Jev stays quiet.
+            invitations: the exact phrases Jev may say with the open-to-talk
+                flag, which keeps you open for 40 ticks so anyone who hears it
+                can walk up and start a conversation with you. Say in the
+                instruction when to say each. Jev cannot invent its own; leave
+                it empty and it invites nobody.
         """
         brief = Brief(
             instruction=instruction,
@@ -721,6 +789,7 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
             notes=notes,
             check_every=max(1, check_every),
             shouts=_validated_shouts(shouts),
+            invitations=_validated_invitations(invitations),
         )
         report = await ctx.deps.bridge.run_stint(brief)
         return report.to_text()
@@ -886,6 +955,47 @@ def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         return f"{walked}\n{seated}" if walked else seated
 
     @tools.tool
+    async def talk_to(
+        ctx: RunContext[PlannerDeps], entity_id: str, max_ticks: int = 40
+    ) -> str:
+        """Accept a settler's invitation to talk and stay until it is over.
+
+        Only works on a settler who is open to talk; `look` marks them. Code
+        walks you to a free tile next to them and accepts, which puts a new
+        conversation on a free tile beside you both with the two of you in it
+        and their invitation line as its first line. The call returns when the
+        conversation has ended.
+
+        Args:
+            entity_id: the settler whose invitation you are taking up.
+            max_ticks: tick budget for the walk there.
+        """
+        bridge = ctx.deps.bridge
+        invitation = _open_invitation(bridge.model, entity_id)
+        if invitation is None:
+            open_now = [
+                other.entity_id for other in bridge.model.open_invitations()
+            ] or ["nobody"]
+            return (
+                f"no invitation from {entity_id}; settlers open to talk right "
+                f"now: {', '.join(open_now)}"
+            )
+        walked = ""
+        if chebyshev(bridge.model.position, invitation.position) != 1:
+            walked = await _walk_next_to(ctx, invitation.position, entity_id, max_ticks)
+            invitation = _open_invitation(bridge.model, entity_id)
+            if invitation is None:
+                return f"{walked}\n{entity_id} is no longer open to talk"
+            if chebyshev(bridge.model.position, invitation.position) != 1:
+                return f"{walked}\nyou are not next to {entity_id} yet"
+        outcome = await bridge.direct_action(
+            converse_intent(ACTION_ACCEPT, target_entity_id=entity_id),
+            f"accept {entity_id}'s invitation to talk",
+        )
+        seated = await _sit_through(ctx, outcome)
+        return f"{walked}\n{seated}" if walked else seated
+
+    @tools.tool
     async def give(
         ctx: RunContext[PlannerDeps], entity_id: str, kind: str, amount: int = 1
     ) -> str:
@@ -902,6 +1012,14 @@ def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         )
 
 
+def _open_invitation(model: WorldModel, entity_id: str) -> OpenInvitation | None:
+    """The named settler's open invitation to talk, or None when it has none."""
+    for invitation in model.open_invitations():
+        if invitation.entity_id == entity_id:
+            return invitation
+    return None
+
+
 async def _walk_to_anchor(
     ctx: RunContext[PlannerDeps], conversation_id: str, max_ticks: int
 ) -> str:
@@ -910,13 +1028,25 @@ async def _walk_to_anchor(
     conversation = bridge.model.conversation_by_id(conversation_id)
     if conversation is None:
         return f"{conversation_id} is gone"
-    tiles = free_seat_tiles(bridge.model, conversation.anchor)
+    return await _walk_next_to(ctx, conversation.anchor, conversation_id, max_ticks)
+
+
+async def _walk_next_to(
+    ctx: RunContext[PlannerDeps], target: Coord, label: str, max_ticks: int
+) -> str:
+    """Run the code-owned walk onto a free tile next to `target`.
+
+    Shared by `join_conversation`, whose target is the anchor, and `talk_to`,
+    whose target is the settler who is open to talk.
+    """
+    bridge = ctx.deps.bridge
+    tiles = free_seat_tiles(bridge.model, target)
     if not tiles:
-        return f"every tile next to {conversation_id} is taken or blocked"
-    driver = ApproachDriver(tiles, f"a free tile next to {conversation_id}")
+        return f"every tile next to {label} is taken or blocked"
+    driver = ApproachDriver(tiles, f"a free tile next to {label}")
     brief = Brief(
-        instruction=f"Walk to a free tile next to {conversation_id}.",
-        success_condition=f"you are standing next to {conversation.anchor}",
+        instruction=f"Walk to a free tile next to {label}.",
+        success_condition=f"you are standing next to {target}",
         max_ticks=max(1, max_ticks),
     )
     report = await bridge.run_stint(brief, driver)
@@ -969,42 +1099,6 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
 
 
 def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
-    @tools.tool
-    async def move(ctx: RunContext[PlannerDeps], direction: str) -> str:
-        """Step one tile. Direction is N, NE, E, SE, S, SW, W, or NW."""
-        value = _direction_value(direction)
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(move=pb.MoveIntent(direction=value)), f"move {direction}"
-        )
-
-    @tools.tool
-    async def attack(ctx: RunContext[PlannerDeps], entity_id: str) -> str:
-        """Attack an adjacent entity."""
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(attack=pb.AttackIntent(target_entity_id=entity_id)),
-            f"attack {entity_id}",
-        )
-
-    @tools.tool
-    async def extract(ctx: RunContext[PlannerDeps], object_id: str) -> str:
-        """Chop a tree or mine a rock on your tile or next to it."""
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(extract=pb.ExtractIntent(object_id=object_id)),
-            f"extract {object_id}",
-        )
-
-    @tools.tool
-    async def collect(ctx: RunContext[PlannerDeps], object_id: str) -> str:
-        """Pick the berry off a bush you are standing on."""
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(
-                collect=pb.CollectIntent(
-                    object_id=object_id, item_type="berry", amount=1
-                )
-            ),
-            f"collect {object_id}",
-        )
-
     @tools.tool
     async def eat(ctx: RunContext[PlannerDeps], kind: str = "berry") -> str:
         """Eat something from your pack to restore hunger."""
@@ -1173,11 +1267,29 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         return await ctx.deps.bridge.wait_ticks(max(1, ticks))
 
     @tools.tool
-    async def say(ctx: RunContext[PlannerDeps], text: str) -> str:
-        """Speak out loud; every settler within ten tiles hears you."""
+    async def say(
+        ctx: RunContext[PlannerDeps], text: str, open_to_talk: bool = False
+    ) -> str:
+        """Speak out loud; every settler within ten tiles hears you.
+
+        Args:
+            text: what you say.
+            open_to_talk: with this set, the line is an invitation: you stay
+                open to talk for 40 ticks, everyone who hears it and everyone
+                who can see you knows it, and any settler standing next to you
+                can accept, which starts a conversation with the two of you on
+                a free tile beside you both. Saying it again renews the 40
+                ticks; taking any seat in a conversation ends it.
+        """
         return await ctx.deps.bridge.direct_action(
-            pb.Intent(say=pb.SayIntent(text=text[:200], channel="local")),
-            f"say {text[:60]!r}",
+            pb.Intent(
+                say=pb.SayIntent(
+                    text=text[:200],
+                    channel=items.LOCAL_CHANNEL,
+                    open_to_talk=open_to_talk,
+                )
+            ),
+            f"say {text[:60]!r}{' (open to talk)' if open_to_talk else ''}",
         )
 
     @tools.tool
@@ -1340,7 +1452,7 @@ class Planner:
         parts.append(describe_world(model))
         if self.reports:
             parts.append("Most recent stint:\n" + self.reports[-1].to_text())
-        parts.extend(self.bridge.drain_reflex_notes(for_prompt=True))
+        parts.extend(self.bridge.drain_notes(for_prompt=True))
         parts.append(self.bridge.reflex.prompt_line())
         parts.append("Your notes:\n" + read_memory(self.memory_path))
         parts.append(

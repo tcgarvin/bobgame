@@ -42,6 +42,7 @@ message Entity {
   int32 fatigue = 13;       // 0 = fresh, max_fatigue = exhausted (docs/10)
   int32 max_fatigue = 14;
   bool asleep = 15;
+  bool open_to_talk = 16;   // has a live invitation (docs/09 section 8)
 }
 
 // The world's day clock (docs/10_metal_and_sleep.md, "The day").
@@ -251,6 +252,7 @@ message Utterance {
   string text = 3;
   Position position = 4;
   string conversation_id = 5;  // set for channel "conversation" and for the opening line
+  bool open_to_talk = 6;       // the speaker is open to talk (docs/09 section 8)
 }
 
 message ObjectChanged {
@@ -395,6 +397,7 @@ message UseIntent {
 message SayIntent {
   string text = 1;
   string channel = 2;  // default "local"
+  bool open_to_talk = 3;  // invitation: anyone adjacent may start a conversation (docs/09 section 8)
 }
 
 message WaitIntent {}
@@ -411,10 +414,11 @@ message WaitIntent {}
 //   action "pass":  give up the turn without speaking.
 //   action "leave": stop being a participant.
 message ConverseIntent {
-  string action = 1;
+  string action = 1;           // open | join | speak | pass | leave | accept
   Direction direction = 2;
   string conversation_id = 3;
   string text = 4;
+  string target_entity_id = 5; // accept: the inviter (docs/09 section 8)
 }
 
 // Hand items to another entity that is adjacent or in the same conversation.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from agents import world_pb2 as pb
+from agents.jev_agent.items import INVITATION_TICKS
 from agents.jev_agent.worldmodel import WorldModel
 
 from helpers import (
@@ -11,6 +12,7 @@ from helpers import (
     make_object,
     make_observation,
     make_tiles,
+    utterance_event,
 )
 
 
@@ -315,3 +317,137 @@ def test_a_workshop_table_is_found_only_when_it_is_within_reach() -> None:
         )
     )
     assert far.workshop_table_near() is None
+
+
+# -- invitations to talk (docs/09 section 8.3) -------------------------------
+
+
+def test_a_flagged_say_is_remembered_as_an_invitation() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            events=[
+                utterance_event(
+                    "mira", "Come and plan the wall.", (14, 10), open_to_talk=True
+                )
+            ],
+        )
+    )
+
+    heard = model.recent_utterances(1)[0]
+    assert heard.open_to_talk
+    invitation = model.open_invitations()[0]
+    assert invitation.entity_id == "mira"
+    assert invitation.position == (14, 10)
+    assert invitation.text == "Come and plan the wall."
+
+
+def test_an_entity_in_view_carries_its_own_open_to_talk_flag() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("mira", (12, 10), open_to_talk=True)],
+        )
+    )
+
+    assert model.entities["mira"].open_to_talk
+    invitation = model.open_invitations()[0]
+    # Seen but not heard: the position is the live one and there is no line.
+    assert (invitation.position, invitation.text) == ((12, 10), "")
+
+
+def test_a_visible_inviter_is_placed_where_it_now_stands() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            events=[utterance_event("mira", "Talk?", (14, 10), open_to_talk=True)],
+        )
+    )
+    model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("mira", (12, 11), open_to_talk=True)],
+        )
+    )
+
+    invitation = model.open_invitations()[0]
+    assert invitation.position == (12, 11)
+    assert invitation.text == "Talk?"
+
+
+def test_a_settler_in_view_without_the_flag_has_no_invitation() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            events=[utterance_event("mira", "Talk?", (12, 10), open_to_talk=True)],
+        )
+    )
+    model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("mira", (12, 10))],
+        )
+    )
+
+    assert model.open_invitations() == []
+
+
+def test_an_invitation_expires_after_the_invitation_window() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            events=[utterance_event("mira", "Talk?", (14, 10), open_to_talk=True)],
+        )
+    )
+    model.update(
+        make_observation(5 + INVITATION_TICKS - 1, make_entity("ada", (10, 10)))
+    )
+    assert [i.entity_id for i in model.open_invitations()] == ["mira"]
+
+    model.update(make_observation(5 + INVITATION_TICKS, make_entity("ada", (10, 10))))
+    assert model.open_invitations() == []
+
+
+def test_an_unflagged_say_is_not_an_invitation() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            events=[utterance_event("mira", "Nice weather.", (14, 10))],
+        )
+    )
+    assert model.open_invitations() == []
+
+
+def test_the_actors_own_invitation_stands_for_the_invitation_window() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            events=[
+                utterance_event("ada", "Anyone free?", (10, 10), open_to_talk=True)
+            ],
+        )
+    )
+    assert model.my_invitation_live()
+    assert model.my_invitation_ticks_left() == INVITATION_TICKS
+    # The actor never counts as an invitation it could accept.
+    assert model.open_invitations() == []
+
+    model.update(make_observation(5 + INVITATION_TICKS, make_entity("ada", (10, 10))))
+    assert not model.my_invitation_live()
+    assert model.my_invitation_ticks_left() == 0

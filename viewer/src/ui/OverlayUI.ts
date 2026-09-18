@@ -412,6 +412,9 @@ export class OverlayUI {
       if (entity.asleep) {
         rows.push(this.kvRow('Asleep', state === 'exhausted' ? 'collapsed' : 'yes'));
       }
+      if (entity.openToTalk) {
+        rows.push(this.kvRow('Open to talk', 'yes'));
+      }
     }
     rows.push(this.kvRow('Wielded', entity.wielded || 'nothing'));
     rows.push(this.kvRow('Alive', entity.alive ? 'yes' : 'no'));

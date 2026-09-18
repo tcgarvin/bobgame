@@ -512,6 +512,84 @@ def test_conversation_and_give_world_facts(tmp_path: Path) -> None:
     assert "conv_1" in give_moment.text
 
 
+def _local_utterance(speaker: str, text: str, open_to_talk: bool = False) -> dict:
+    return {
+        "speaker_id": speaker,
+        "channel": "local",
+        "text": text,
+        "position": {"x": 0, "y": 0},
+        "open_to_talk": open_to_talk,
+    }
+
+
+def test_invitation_said_and_accepted(tmp_path: Path) -> None:
+    """docs/09 section 8: a flagged `say` and an `accept` of it.
+
+    The inviter's own action for an accept is "join conv_N" (same text as an
+    ordinary join, section 8.2); this must not also produce a
+    `conversation_joined` moment for it.
+    """
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(
+                1,
+                utterances=[
+                    _local_utterance("mira", "anyone want to talk?", open_to_talk=True)
+                ],
+            ),
+            tick_record(
+                2,
+                actions=[
+                    _action("theo", "converse", "accept conv_5 mira"),
+                    _action("mira", "converse", "join conv_5"),
+                ],
+            ),
+            tick_record(3, objects_removed=["conv_5"]),
+        ],
+    )
+
+    facts, moments, conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.invitations_said == 1
+
+    assert set(conversations) == {"conv_5"}
+    conv = conversations["conv_5"]
+    assert conv.opened_by == "mira"
+    assert conv.via_invitation is True
+    assert conv.participants == {"mira", "theo"}
+    # The inviter's own "join conv_5" action must not be counted as a joiner.
+    assert conv.joins == []
+
+    kinds = {m.kind for m in moments}
+    assert "invitation_accepted" in kinds
+    assert "conversation_joined" not in kinds
+    accepted_moment = next(m for m in moments if m.kind == "invitation_accepted")
+    assert accepted_moment.tick == 2
+    assert accepted_moment.entity_id == "theo"
+    assert "mira" in accepted_moment.text
+    assert "conv_5" in accepted_moment.text
+
+    layout = analyze_run.RunLayout(
+        run_id="r",
+        root=tmp_path,
+        agents_dir=tmp_path / "agents",
+        ticks_path=ticks,
+        meta={},
+    )
+    summary = analyze_run.summarise_conversations(
+        conversations,
+        ["mira", "theo"],
+        layout,
+        "http://localhost:5173",
+        "r",
+        invitations_said=facts.invitations_said,
+    )
+    assert summary["invitations_said"] == 1
+    assert summary["opened_by_invitation"] == 1
+
+
 def test_summarise_conversations_and_giving(tmp_path: Path) -> None:
     ticks = tmp_path / "ticks.jsonl.gz"
     write_gz_jsonl(
@@ -755,6 +833,8 @@ def test_pre_conversation_run_reports_cleanly(run_dir: Path) -> None:
 
     assert payload["conversations"] == {
         "opened": 0,
+        "opened_by_invitation": 0,
+        "invitations_said": 0,
         "joined": 0,
         "distinct_participants": 0,
         "utterances": 0,

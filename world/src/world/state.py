@@ -158,6 +158,14 @@ class Entity(BaseModel, frozen=True):
     sleeping_on: str = ""
     # True while the sleep was forced by exhaustion rather than chosen.
     collapsed: bool = False
+    # Invitation to talk (docs/09_conversation_and_reflex.md, section 8.2).
+    # `open_until_tick` is the first tick on which the invitation is gone, so
+    # it is live while `tick < open_until_tick`; -1 means no invitation. The
+    # text and the tick of the line that opened it are kept so an `accept` can
+    # make it the new conversation's first transcript entry.
+    open_until_tick: int = -1
+    invitation_text: str = ""
+    invitation_tick: int = -1
 
     def with_position(self, new_position: Position) -> "Entity":
         """Return copy with updated position."""
@@ -202,6 +210,30 @@ class Entity(BaseModel, frozen=True):
             update={"asleep": False, "sleeping_on": "", "collapsed": False}
         )
 
+    def is_open_to_talk(self, tick: int) -> bool:
+        """True while this entity's invitation to talk is still open at `tick`."""
+        return tick < self.open_until_tick
+
+    def with_invitation(self, text: str, tick: int, open_until_tick: int) -> "Entity":
+        """Return copy carrying an invitation to talk said at `tick`."""
+        return self.model_copy(
+            update={
+                "open_until_tick": open_until_tick,
+                "invitation_text": text,
+                "invitation_tick": tick,
+            }
+        )
+
+    def without_invitation(self) -> "Entity":
+        """Return copy with no invitation to talk."""
+        return self.model_copy(
+            update={
+                "open_until_tick": -1,
+                "invitation_text": "",
+                "invitation_tick": -1,
+            }
+        )
+
     def as_dead(self) -> "Entity":
         """Return copy marked dead: no health, no inventory, nothing wielded."""
         return self.model_copy(
@@ -214,6 +246,9 @@ class Entity(BaseModel, frozen=True):
                 "asleep": False,
                 "sleeping_on": "",
                 "collapsed": False,
+                "open_until_tick": -1,
+                "invitation_text": "",
+                "invitation_tick": -1,
             }
         )
 
@@ -234,6 +269,9 @@ class Entity(BaseModel, frozen=True):
                 "inventory": Inventory(),
                 "wielded": "",
                 "status_bits": self.status_bits & ~STATUS_BIT_DEAD,
+                "open_until_tick": -1,
+                "invitation_text": "",
+                "invitation_tick": -1,
             }
         )
 

@@ -510,12 +510,12 @@ class TestPayloads:
             asleep=True,
             sleeping_on="bed_1",
         )
-        state = entity_state(entity)
+        state = entity_state(entity, tick=0)
         assert state["fatigue"] == 42
         assert state["max_fatigue"] == 100
         assert state["asleep"] is True
         assert state["sleeping_on"] == "bed_1"
-        assert entity_from_state(state) == entity
+        assert entity_from_state(state, tick=0) == entity
 
     def test_clock_payload_shape(self) -> None:
         world = _world()

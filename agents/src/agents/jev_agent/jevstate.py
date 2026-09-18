@@ -14,7 +14,7 @@ from . import items
 from .geometry import Coord, direction_name
 from .options import TravelState
 from .pathfinding import NO_PATH, next_step, path_length
-from .worldmodel import HeardUtterance, ObjectInfo, WorldModel
+from .worldmodel import EntityInfo, HeardUtterance, ObjectInfo, WorldModel
 
 VIEW_RADIUS = 8
 MAP_SIZE = VIEW_RADIUS * 2 + 1
@@ -123,6 +123,21 @@ def _object_entry(obj: ObjectInfo, origin: Coord) -> dict[str, Any]:
     return entry
 
 
+def _entity_entry(entity: EntityInfo, origin: Coord) -> dict[str, Any]:
+    """One line of the `entities` list. `asleep` only appears when it is true."""
+    entry: dict[str, Any] = {
+        "id": entity.entity_id,
+        "type": entity.entity_type,
+        "dx": entity.position[0] - origin[0],
+        "dy": entity.position[1] - origin[1],
+        "health": f"{entity.health}/{entity.max_health}",
+        "wielded": entity.wielded,
+    }
+    if entity.asleep:
+        entry["asleep"] = True
+    return entry
+
+
 def build_state(
     model: WorldModel,
     *,
@@ -169,14 +184,7 @@ def build_state(
             for obj in model.objects_near(VIEW_RADIUS)[:NEARBY_LIMIT]
         ],
         "entities": [
-            {
-                "id": entity.entity_id,
-                "type": entity.entity_type,
-                "dx": entity.position[0] - origin[0],
-                "dy": entity.position[1] - origin[1],
-                "health": f"{entity.health}/{entity.max_health}",
-                "wielded": entity.wielded,
-            }
+            _entity_entry(entity, origin)
             for entity in model.entities_near(VIEW_RADIUS)[:ENTITY_LIMIT]
             if entity.alive
         ],
@@ -184,6 +192,9 @@ def build_state(
         "map_legend": MAP_LEGEND,
         "recent": model.recent_history(HISTORY_LINES),
     }
+    invitations = _invitation_lines(model)
+    if invitations:
+        state["invitations"] = invitations
     threat = _threat_entry(model)
     if threat:
         state["threat"] = threat
@@ -231,6 +242,26 @@ def _clock_entry(model: WorldModel) -> dict[str, Any]:
         "night": clock.night,
         "facts": DAY_FACTS,
     }
+
+
+def _invitation_lines(model: WorldModel) -> list[str]:
+    """Who is open to talk, and whether this actor is (docs/09 section 8.3).
+
+    One line per other settler with an open invitation, plus a line for the
+    actor's own while it stands.
+    """
+    origin = model.position
+    lines = [
+        f"{invitation.entity_id} at dx {invitation.position[0] - origin[0]} "
+        f"dy {invitation.position[1] - origin[1]} is open to talk: "
+        f'"{invitation.text}"'
+        for invitation in model.open_invitations()
+    ]
+    if model.my_invitation_live():
+        lines.append(
+            f"you are open to talk ({model.my_invitation_ticks_left()} ticks left)"
+        )
+    return lines
 
 
 def _threat_entry(model: WorldModel) -> dict[str, Any]:

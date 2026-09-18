@@ -41,6 +41,7 @@ from .foraging import (
     process_extract_phase,
     process_regeneration,
 )
+from .items import INVITATION_TICKS
 from .movement import MoveResult, process_movement_phase
 from .sleep import process_fatigue_phase, process_sleep_phase
 from .stats import (
@@ -62,6 +63,7 @@ from .types import (
     EquipIntent,
     ExtractIntent,
     GiveIntent,
+    INVITATION_CHANNELS,
     PickupIntent,
     PlaceIntent,
     RestIntent,
@@ -188,21 +190,36 @@ def _record_eat_results(results: list[EatResult], events: TickEvents) -> None:
 def _process_say_phase(
     world: World, intents: Mapping[str, SayIntent], events: TickEvents
 ) -> None:
-    """Emit one utterance per speaker; channel filtering happens downstream."""
+    """Emit one utterance per speaker; channel filtering happens downstream.
+
+    A line said with `open_to_talk` on an audible channel also opens the
+    speaker's invitation to talk (docs/09, section 8.2); on the thought channel
+    the flag is ignored.
+    """
     for entity_id in sorted(intents):
         intent = intents[entity_id]
         if intent.channel not in SAY_CHANNELS:
             events.acted(entity_id, "say", False, f"unknown channel {intent.channel}")
             continue
         entity = world.get_entity(entity_id)
+        inviting = intent.open_to_talk and intent.channel in INVITATION_CHANNELS
         events.utterances.append(
             UtteranceEvent(
                 speaker_id=entity_id,
                 channel=intent.channel,
                 text=intent.text,
                 position=entity.position,
+                open_to_talk=inviting,
             )
         )
+        if inviting:
+            world.set_entity(
+                entity.with_invitation(
+                    text=intent.text,
+                    tick=world.tick,
+                    open_until_tick=world.tick + INVITATION_TICKS,
+                )
+            )
         events.acted(entity_id, "say", True, intent.channel)
 
 

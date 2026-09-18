@@ -37,7 +37,7 @@ class Position(_message.Message):
     def __init__(self, x: _Optional[int] = ..., y: _Optional[int] = ...) -> None: ...
 
 class Entity(_message.Message):
-    __slots__ = ("entity_id", "position", "entity_type", "tags", "status_bits", "inventory", "health", "max_health", "hunger", "max_hunger", "wielded", "alive", "fatigue", "max_fatigue", "asleep")
+    __slots__ = ("entity_id", "position", "entity_type", "tags", "status_bits", "inventory", "health", "max_health", "hunger", "max_hunger", "wielded", "alive", "fatigue", "max_fatigue", "asleep", "open_to_talk")
     ENTITY_ID_FIELD_NUMBER: _ClassVar[int]
     POSITION_FIELD_NUMBER: _ClassVar[int]
     ENTITY_TYPE_FIELD_NUMBER: _ClassVar[int]
@@ -53,6 +53,7 @@ class Entity(_message.Message):
     FATIGUE_FIELD_NUMBER: _ClassVar[int]
     MAX_FATIGUE_FIELD_NUMBER: _ClassVar[int]
     ASLEEP_FIELD_NUMBER: _ClassVar[int]
+    OPEN_TO_TALK_FIELD_NUMBER: _ClassVar[int]
     entity_id: str
     position: Position
     entity_type: str
@@ -68,7 +69,8 @@ class Entity(_message.Message):
     fatigue: int
     max_fatigue: int
     asleep: bool
-    def __init__(self, entity_id: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ..., entity_type: _Optional[str] = ..., tags: _Optional[_Iterable[str]] = ..., status_bits: _Optional[int] = ..., inventory: _Optional[_Union[Inventory, _Mapping]] = ..., health: _Optional[int] = ..., max_health: _Optional[int] = ..., hunger: _Optional[int] = ..., max_hunger: _Optional[int] = ..., wielded: _Optional[str] = ..., alive: bool = ..., fatigue: _Optional[int] = ..., max_fatigue: _Optional[int] = ..., asleep: bool = ...) -> None: ...
+    open_to_talk: bool
+    def __init__(self, entity_id: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ..., entity_type: _Optional[str] = ..., tags: _Optional[_Iterable[str]] = ..., status_bits: _Optional[int] = ..., inventory: _Optional[_Union[Inventory, _Mapping]] = ..., health: _Optional[int] = ..., max_health: _Optional[int] = ..., hunger: _Optional[int] = ..., max_hunger: _Optional[int] = ..., wielded: _Optional[str] = ..., alive: bool = ..., fatigue: _Optional[int] = ..., max_fatigue: _Optional[int] = ..., asleep: bool = ..., open_to_talk: bool = ...) -> None: ...
 
 class WorldClock(_message.Message):
     __slots__ = ("day", "tick_of_day", "day_length", "night")
@@ -341,18 +343,20 @@ class EntityActed(_message.Message):
     def __init__(self, entity_id: _Optional[str] = ..., action_type: _Optional[str] = ..., success: bool = ..., details: _Optional[str] = ...) -> None: ...
 
 class Utterance(_message.Message):
-    __slots__ = ("speaker_id", "channel", "text", "position", "conversation_id")
+    __slots__ = ("speaker_id", "channel", "text", "position", "conversation_id", "open_to_talk")
     SPEAKER_ID_FIELD_NUMBER: _ClassVar[int]
     CHANNEL_FIELD_NUMBER: _ClassVar[int]
     TEXT_FIELD_NUMBER: _ClassVar[int]
     POSITION_FIELD_NUMBER: _ClassVar[int]
     CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
+    OPEN_TO_TALK_FIELD_NUMBER: _ClassVar[int]
     speaker_id: str
     channel: str
     text: str
     position: Position
     conversation_id: str
-    def __init__(self, speaker_id: _Optional[str] = ..., channel: _Optional[str] = ..., text: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ..., conversation_id: _Optional[str] = ...) -> None: ...
+    open_to_talk: bool
+    def __init__(self, speaker_id: _Optional[str] = ..., channel: _Optional[str] = ..., text: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ..., conversation_id: _Optional[str] = ..., open_to_talk: bool = ...) -> None: ...
 
 class ObjectChanged(_message.Message):
     __slots__ = ("object_id", "field", "old_value", "new_value")
@@ -535,28 +539,32 @@ class UseIntent(_message.Message):
     def __init__(self, kind: _Optional[str] = ..., amount: _Optional[int] = ...) -> None: ...
 
 class SayIntent(_message.Message):
-    __slots__ = ("text", "channel")
+    __slots__ = ("text", "channel", "open_to_talk")
     TEXT_FIELD_NUMBER: _ClassVar[int]
     CHANNEL_FIELD_NUMBER: _ClassVar[int]
+    OPEN_TO_TALK_FIELD_NUMBER: _ClassVar[int]
     text: str
     channel: str
-    def __init__(self, text: _Optional[str] = ..., channel: _Optional[str] = ...) -> None: ...
+    open_to_talk: bool
+    def __init__(self, text: _Optional[str] = ..., channel: _Optional[str] = ..., open_to_talk: bool = ...) -> None: ...
 
 class WaitIntent(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
 class ConverseIntent(_message.Message):
-    __slots__ = ("action", "direction", "conversation_id", "text")
+    __slots__ = ("action", "direction", "conversation_id", "text", "target_entity_id")
     ACTION_FIELD_NUMBER: _ClassVar[int]
     DIRECTION_FIELD_NUMBER: _ClassVar[int]
     CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
     TEXT_FIELD_NUMBER: _ClassVar[int]
+    TARGET_ENTITY_ID_FIELD_NUMBER: _ClassVar[int]
     action: str
     direction: Direction
     conversation_id: str
     text: str
-    def __init__(self, action: _Optional[str] = ..., direction: _Optional[_Union[Direction, str]] = ..., conversation_id: _Optional[str] = ..., text: _Optional[str] = ...) -> None: ...
+    target_entity_id: str
+    def __init__(self, action: _Optional[str] = ..., direction: _Optional[_Union[Direction, str]] = ..., conversation_id: _Optional[str] = ..., text: _Optional[str] = ..., target_entity_id: _Optional[str] = ...) -> None: ...
 
 class GiveIntent(_message.Message):
     __slots__ = ("target_entity_id", "kind", "amount")

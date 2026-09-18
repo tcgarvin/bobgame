@@ -29,6 +29,7 @@ from agents.jev_agent.conversation import (
     MoveCall,
     NoteCall,
     free_seat_tiles,
+    joined_conversation,
     joined_conversation_id,
     merge_transcript,
     transcript_for,
@@ -218,6 +219,33 @@ def test_a_join_is_recognised_from_the_worlds_own_action_event() -> None:
         model, 3, events=[acted_event("ada", "converse", False, "conversation is full")]
     )
     assert joined_conversation_id(digest) == ""  # type: ignore[arg-type]
+
+
+def test_an_accepted_invitation_is_recognised_as_taking_a_seat() -> None:
+    model = WorldModel("ada")
+    digest = observe(
+        model, 2, events=[acted_event("ada", "converse", True, "accept conv_7 mira")]
+    )
+
+    assert joined_conversation(digest) == ("conv_7", "accept")  # type: ignore[arg-type]
+
+
+def test_the_inviters_side_of_an_accept_reads_as_an_ordinary_join() -> None:
+    model = WorldModel("ada")
+    digest = observe(
+        model, 2, events=[acted_event("ada", "converse", True, "join conv_7")]
+    )
+
+    assert joined_conversation(digest) == ("conv_7", "join")  # type: ignore[arg-type]
+
+
+def test_a_failed_accept_takes_no_seat() -> None:
+    model = WorldModel("ada")
+    digest = observe(
+        model, 2, events=[acted_event("ada", "converse", False, "not next to mira")]
+    )
+
+    assert joined_conversation(digest) == ("", "")  # type: ignore[arg-type]
 
 
 # -- the session -------------------------------------------------------------

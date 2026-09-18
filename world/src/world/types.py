@@ -199,38 +199,57 @@ AUDIBLE_CHANNELS: frozenset[str] = frozenset(
 SAY_CHANNELS: frozenset[str] = frozenset(
     {LOCAL_CHANNEL, SHOUT_CHANNEL, THOUGHT_CHANNEL}
 )
+# Channels on which `open_to_talk` is honoured (docs/09, section 8.2). A
+# thought nobody hears cannot invite anyone, so the flag is ignored there.
+INVITATION_CHANNELS: frozenset[str] = frozenset({LOCAL_CHANNEL, SHOUT_CHANNEL})
 
 
 class SayIntent(EntityIntent, frozen=True):
-    """Intent to speak on a channel ("local", "shout" or "thought")."""
+    """Intent to speak on a channel ("local", "shout" or "thought").
+
+    `open_to_talk` marks the line as an invitation: on `local` and `shout` it
+    opens the speaker to being walked up to for `INVITATION_TICKS` ticks.
+    """
 
     text: str
     channel: str = "local"
+    open_to_talk: bool = False
 
 
-# ConverseIntent actions (docs/09_conversation_and_reflex.md, section 2.3).
+# ConverseIntent actions (docs/09_conversation_and_reflex.md, sections 2.3
+# and 8.2).
 CONVERSE_OPEN = "open"
 CONVERSE_JOIN = "join"
 CONVERSE_SPEAK = "speak"
 CONVERSE_PASS = "pass"
 CONVERSE_LEAVE = "leave"
+CONVERSE_ACCEPT = "accept"
 CONVERSE_ACTIONS: frozenset[str] = frozenset(
-    {CONVERSE_OPEN, CONVERSE_JOIN, CONVERSE_SPEAK, CONVERSE_PASS, CONVERSE_LEAVE}
+    {
+        CONVERSE_OPEN,
+        CONVERSE_JOIN,
+        CONVERSE_SPEAK,
+        CONVERSE_PASS,
+        CONVERSE_LEAVE,
+        CONVERSE_ACCEPT,
+    }
 )
 
 
 class ConverseIntent(EntityIntent, frozen=True):
-    """Intent to open, join, speak in, pass in or leave a conversation.
+    """Intent to open, join, speak in, pass in, leave or accept a conversation.
 
     `direction` names the anchor tile for `open`; `conversation_id` names the
-    conversation for `join`. `speak` and `pass` act on the conversation the
-    entity already sits in.
+    conversation for `join`; `target_entity_id` names the settler whose
+    invitation `accept` takes up. `speak` and `pass` act on the conversation
+    the entity already sits in.
     """
 
     action: str
     direction: Direction | None = None
     conversation_id: str = ""
     text: str = ""
+    target_entity_id: str = ""
 
 
 class GiveIntent(EntityIntent, frozen=True):

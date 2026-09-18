@@ -63,6 +63,7 @@ MOMENT_PRIORITY = (
     "reflex_during_conversation",
     "conversation_give",
     "conversation_joined",
+    "invitation_accepted",
     "milestone",
     "write_note",
     "place",
@@ -139,6 +140,9 @@ WAKE_RE = re.compile(r"^woke up: (.+)$")
 # and 3: "open conv_12", "join conv_12", "gave 3 stone to mira".
 CONVERSE_OPEN_RE = re.compile(r"^open (conv_\S+)$")
 CONVERSE_JOIN_RE = re.compile(r"^join (conv_\S+)$")
+# Invitations, docs/09_conversation_and_reflex.md section 8.2: the accepter's
+# own success details are "accept conv_12 mira" (the inviter's id last).
+CONVERSE_ACCEPT_RE = re.compile(r"^accept (conv_\S+) (\S+)$")
 GAVE_RE = re.compile(r"^gave (\d+) (\S+) to (\S+)$")
 
 # The stint report's stats line, e.g. "stats: hp 12/20, hunger 5/10 -> hp
@@ -648,6 +652,9 @@ class ConversationRecord:
     participants: set[str] = field(default_factory=set)
     utterance_ticks: list[int] = field(default_factory=list)
     end_tick: int = -1
+    # Whether this conversation began with an `accept` of an invitation
+    # rather than an `open` (docs/09_conversation_and_reflex.md section 8.2).
+    via_invitation: bool = False
 
     @property
     def utterance_count(self) -> int:
@@ -701,6 +708,9 @@ class WorldFacts:
     notes_written: int = 0
     utterances: int = 0
     shouts: int = 0
+    # Invitations, docs/09_conversation_and_reflex.md section 8: `say` calls
+    # with `open_to_talk` set.
+    invitations_said: int = 0
 
     # Metal tier and sleep (docs/10_metal_and_sleep.md, section 7).
     vein_yields: Counter[str] = field(default_factory=Counter)
@@ -754,6 +764,7 @@ class WorldFacts:
             "notes_written": self.notes_written,
             "utterances": self.utterances,
             "shouts": self.shouts,
+            "invitations_said": self.invitations_said,
             "smelts": self.smelts,
             "stations_placed": self.stations_placed,
             "metal_tools_crafted": self.metal_tools_crafted,
@@ -821,6 +832,8 @@ def scan_world_ticks(
             1 for u in record.get("utterances", ()) if u.get("channel") == "shout"
         )
         for utterance in record.get("utterances", ()):
+            if utterance.get("open_to_talk"):
+                facts.invitations_said += 1
             if utterance.get("channel") != "conversation":
                 continue
             conv_id = utterance.get("conversation_id", "")
@@ -983,6 +996,7 @@ def scan_world_ticks(
             elif action_type in CONVERSE_ACTIONS:
                 open_match = CONVERSE_OPEN_RE.match(details)
                 join_match = CONVERSE_JOIN_RE.match(details)
+                accept_match = CONVERSE_ACCEPT_RE.match(details)
                 if open_match:
                     conv_id = open_match.group(1)
                     record_conv = conversations.setdefault(
@@ -991,6 +1005,30 @@ def scan_world_ticks(
                     record_conv.opened_tick = tick
                     record_conv.opened_by = entity
                     record_conv.participants.add(entity)
+                elif accept_match:
+                    # The accepter's own success details ("accept conv_N
+                    # <inviter>"); the inviter's matching action is "join
+                    # conv_N" like an ordinary join (section 8.2), handled
+                    # below and filtered out of `joins` afterwards.
+                    conv_id = accept_match.group(1)
+                    inviter = accept_match.group(2)
+                    record_conv = conversations.setdefault(
+                        conv_id, ConversationRecord(conv_id)
+                    )
+                    if record_conv.opened_tick < 0:
+                        record_conv.opened_tick = tick
+                    record_conv.opened_by = inviter
+                    record_conv.via_invitation = True
+                    record_conv.participants.add(inviter)
+                    record_conv.participants.add(entity)
+                    moments.append(
+                        Moment(
+                            tick,
+                            "invitation_accepted",
+                            entity,
+                            f"{entity} accepted {inviter}'s invitation, " f"{conv_id}",
+                        )
+                    )
                 elif join_match:
                     conv_id = join_match.group(1)
                     record_conv = conversations.setdefault(
@@ -1022,6 +1060,15 @@ def scan_world_ticks(
         )
 
     for conv in conversations.values():
+        if conv.via_invitation:
+            # The inviter's own action for an `accept` is "join conv_N"
+            # (section 8.2), same text as an ordinary join; drop it here so
+            # it is not double-reported as a `conversation_joined` moment.
+            conv.joins = [
+                (tick, joiner)
+                for tick, joiner in conv.joins
+                if joiner != conv.opened_by
+            ]
         if conv.joins:
             joiners = ", ".join(entity for _, entity in conv.joins)
             moments.append(
@@ -1108,6 +1155,7 @@ def summarise_conversations(
     layout: RunLayout,
     viewer_url: str,
     run_id: str,
+    invitations_said: int = 0,
 ) -> dict:
     """The Conversations report section: world facts plus agent-side endings.
 
@@ -1126,6 +1174,7 @@ def summarise_conversations(
 
     records = list(conversations.values())
     opened = sum(1 for record in records if record.opened_tick >= 0)
+    opened_by_invitation = sum(1 for record in records if record.via_invitation)
     joined = sum(len(record.joins) for record in records)
     distinct_participants = len(
         {participant for record in records for participant in record.participants}
@@ -1140,6 +1189,8 @@ def summarise_conversations(
 
     return {
         "opened": opened,
+        "opened_by_invitation": opened_by_invitation,
+        "invitations_said": invitations_said,
         "joined": joined,
         "distinct_participants": distinct_participants,
         "utterances": utterances,
@@ -1511,12 +1562,20 @@ def print_report(
 
     print()
     print("== conversations ==")
-    if conversation_summary["opened"] or conversation_summary["end_reasons"]:
+    if (
+        conversation_summary["opened"]
+        or conversation_summary["end_reasons"]
+        or conversation_summary["invitations_said"]
+    ):
         print(
             f"opened: {conversation_summary['opened']}  "
             f"joined: {conversation_summary['joined']}  "
             f"distinct participants: {conversation_summary['distinct_participants']}  "
             f"utterances: {conversation_summary['utterances']}"
+        )
+        print(
+            f"invitations said: {conversation_summary['invitations_said']}  "
+            f"opened by invitation: {conversation_summary['opened_by_invitation']}"
         )
         print(f"ended by: {conversation_summary['end_reasons']}")
         print(
@@ -1622,7 +1681,12 @@ def main(argv: list[str] | None = None) -> int:
         moments.extend(planner_moments(agent_id, layout))
 
     conversation_summary = summarise_conversations(
-        conversations, ids, layout, viewer_url, layout.run_id
+        conversations,
+        ids,
+        layout,
+        viewer_url,
+        layout.run_id,
+        invitations_said=facts.invitations_said if facts else 0,
     )
     giving_summary = summarise_giving(giving)
     reflex_summary, reflex_moments = summarise_reflexes(ids, layout)

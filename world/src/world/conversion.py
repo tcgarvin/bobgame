@@ -47,8 +47,12 @@ def inventory_from_proto(proto_inventory: pb.Inventory) -> Inventory:
     return Inventory(items=items)
 
 
-def entity_to_proto(entity: Entity) -> pb.Entity:
-    """Convert internal Entity to proto Entity."""
+def entity_to_proto(entity: Entity, tick: int) -> pb.Entity:
+    """Convert internal Entity to proto Entity.
+
+    `tick` is the tick the observation is built for: the invitation flag
+    (`open_to_talk`) is derived from it (docs/09, section 8.2).
+    """
     return pb.Entity(
         entity_id=entity.entity_id,
         position=position_to_proto(entity.position),
@@ -65,11 +69,16 @@ def entity_to_proto(entity: Entity) -> pb.Entity:
         fatigue=entity.fatigue,
         max_fatigue=entity.max_fatigue,
         asleep=entity.asleep,
+        open_to_talk=entity.is_open_to_talk(tick),
     )
 
 
-def entity_from_proto(proto_entity: pb.Entity) -> Entity:
-    """Convert proto Entity to internal Entity."""
+def entity_from_proto(proto_entity: pb.Entity, tick: int) -> Entity:
+    """Convert proto Entity to internal Entity.
+
+    The proto carries only the invitation flag, so an open invitation is
+    rebuilt as one that lasts until just after `tick`, with no text.
+    """
     return Entity(
         entity_id=proto_entity.entity_id,
         position=position_from_proto(proto_entity.position),
@@ -86,6 +95,7 @@ def entity_from_proto(proto_entity: pb.Entity) -> Entity:
         fatigue=proto_entity.fatigue,
         max_fatigue=proto_entity.max_fatigue,
         asleep=proto_entity.asleep,
+        open_until_tick=tick + 1 if proto_entity.open_to_talk else -1,
     )
 
 

@@ -476,7 +476,7 @@ order, opener first), `speaker`, `turn_started`, `opened_tick`, `opened_by`,
 `items.py` (`CONVERSATION*`).
 
 `process_conversation_phase` runs **once per tick after movement and combat**:
-it applies `open`, `join`, `speak`, `pass` and `leave` in that order (each group
+it applies `open`, `accept`, `join`, `speak`, `pass` and `leave` in that order (each group
 sorted by entity id, so conflicts resolve lexicographically like every other
 conflict), then runs the lifecycle for every conversation — drop participants
 who died or walked out of adjacency, move the turn on when the speaker goes,
@@ -493,6 +493,21 @@ Utterances now carry a `conversation_id`: the opening line goes out on `local`,
 `speak` lines on the `conversation` channel (earshot = the `local` radius, so
 bystanders overhear). `conversation` is in `AUDIBLE_CHANNELS` but deliberately
 **not** in `SAY_CHANNELS`, so only a `ConverseIntent` can put a line on it.
+
+### Invitations ("open to talk", docs/09 section 8)
+
+A `SayIntent` with `open_to_talk` on `local` or `shout` (`INVITATION_CHANNELS`;
+the flag is ignored on `thought`) opens the speaker's invitation for
+`INVITATION_TICKS` ticks. The state is three `Entity` fields —
+`open_until_tick`, `invitation_text`, `invitation_tick` — read through
+`Entity.is_open_to_talk(tick)`; the proto, the viewer payload and the recorded
+tick carry only the derived boolean `open_to_talk`, so `entity_state`,
+`entity_to_proto` and their inverses all take the tick they describe.
+`converse` action `accept` (with `target_entity_id`) opens a conversation on a
+free tile adjacent to both, in ascending `(x, y)` order, with the inviter as
+opener and its invitation line as transcript entry 0, and emits two
+`EntityActed`s (`accept conv_N <target>` for the accepter, `join conv_N` for the
+inviter) and no utterance. Taking any seat, and dying, clears the invitation.
 
 ### Giving (`containers.process_give_phase`)
 

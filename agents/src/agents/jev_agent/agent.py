@@ -34,11 +34,14 @@ import structlog
 from .. import world_pb2 as pb
 from .client import WorldClient
 from .conversation import (
+    ACTION_JOIN,
+    ACTION_OPEN,
+    VIA_ACCEPTED,
     ConversationReport,
     ConversationSession,
     Converser,
     ModelConverser,
-    joined_conversation_id,
+    joined_conversation,
 )
 from .jevclient import JevClient, TypeSafeJevClient
 from .planner import Planner, alert_window_start, threat_alert
@@ -81,6 +84,16 @@ _T = TypeVar("_T")
 THOUGHT_CHANNEL = "thought"
 
 INTERRUPTED_BY_REFLEX = "interrupted: reflex stint started"
+# A conversation can start while the planner is mid-turn, because someone
+# accepted its invitation (docs/09 section 8.3). The conversation owns the body
+# from that tick, so single-tick actions are answered with this instead.
+INTERRUPTED_BY_CONVERSATION = "interrupted: conversation {conversation_id} started"
+
+
+def conversation_interruption(conversation_id: str) -> str:
+    """The answer a single-tick action gets when a conversation took the body."""
+    return INTERRUPTED_BY_CONVERSATION.format(conversation_id=conversation_id)
+
 
 # How long a planner tool that has just opened or joined a conversation waits
 # for the tick loop to see the object before it gives up on it.
@@ -250,8 +263,10 @@ class JevAgent:
         self._reflex_stint: Stint | None = None
         self._reflex_start_tick = 0
         self._reflex_start_health = 0
-        self._reflex_notes_for_tools: list[str] = []
-        self._reflex_notes_for_prompt: list[str] = []
+        # Reflex lines and conversation reports the planner has not been shown
+        # yet; one queue for the next tool result, one for the next prompt.
+        self._notes_for_tools: list[str] = []
+        self._notes_for_prompt: list[str] = []
 
         self._stint_requests: asyncio.Queue[_StintRequest] = asyncio.Queue()
         self._direct_requests: asyncio.Queue[_DirectRequest] = asyncio.Queue()
@@ -261,6 +276,9 @@ class JevAgent:
         self._held_stint: _HeldStint | None = None
         self._conversation: ConversationSession | None = None
         self._conversation_waiters: list[_ConversationWaiter] = []
+        # (tick, action) of the last `ConverseIntent` submitted, so a seat the
+        # actor never asked for can be recognised. -1 means none yet.
+        self._last_converse: tuple[int, str] = (-1, "")
         # -1 means awake; otherwise the tick the current sleep began.
         self._asleep_since = -1
         self._sleep_fatigue_before = 0
@@ -295,20 +313,23 @@ class JevAgent:
         self._reflex_watch.set_brief(EMPTY_REFLEX)
         self.reflex_store.save(EMPTY_REFLEX)
 
-    def drain_reflex_notes(self, *, for_prompt: bool = False) -> list[str]:
-        """Reflex report lines not yet shown, emptied as they are taken.
+    def drain_notes(self, *, for_prompt: bool = False) -> list[str]:
+        """Reflex lines and conversation reports not yet shown, emptied as taken.
 
         There are two queues over one source, because the contract shows each
-        line both in the next tool result and in the next turn prompt.
+        note both in the next tool result and in the next turn prompt.
         """
-        queue = (
-            self._reflex_notes_for_prompt
-            if for_prompt
-            else (self._reflex_notes_for_tools)
-        )
+        queue = self._notes_for_prompt if for_prompt else self._notes_for_tools
         notes = list(queue)
         queue.clear()
         return notes
+
+    def _note_for_planner(self, text: str) -> None:
+        """Queue one note for the next tool result and the next turn prompt."""
+        if not text:
+            return
+        self._notes_for_tools.append(text)
+        self._notes_for_prompt.append(text)
 
     async def run_stint(
         self, brief: Brief, driver: StintDriver | None = None
@@ -328,6 +349,12 @@ class JevAgent:
         """Submit one intent on the next tick and report what the world did."""
         if self._reflex_stint is not None:
             return f"{description} -> {INTERRUPTED_BY_REFLEX}"
+        session = self._conversation
+        if session is not None:
+            return (
+                f"{description} -> "
+                f"{conversation_interruption(session.conversation_id)}"
+            )
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         await self._direct_requests.put(
             _DirectRequest(intent=intent, description=description, future=future)
@@ -424,8 +451,11 @@ class JevAgent:
         # The reflex is checked before anything else: a single-tick action in
         # flight is answered as interrupted rather than with its own outcome.
         self._maybe_start_reflex(digest)
-        self._resolve_awaiting_direct(digest)
+        # Before the single-tick action is resolved, for the same reason as the
+        # reflex: a seat taken without asking answers it as interrupted rather
+        # than handing it the conversation's own event.
         self._detect_join(digest)
+        self._resolve_awaiting_direct(digest)
         self._expire_conversation_waiters()
 
         intent, sink = await self._choose_intent(digest)
@@ -437,6 +467,9 @@ class JevAgent:
                 sink("rejected: dead")
             await self._report_status()
             return
+
+        if intent.HasField("converse"):
+            self._last_converse = (observation.tick_id, intent.converse.action)
 
         try:
             result = await self.world.submit_intent(observation.tick_id, intent)
@@ -463,7 +496,7 @@ class JevAgent:
         """Pick this tick's intent and the callback that records its outcome."""
         reflex_stint = self._reflex_stint
         if reflex_stint is not None:
-            self._refuse_direct_requests()
+            self._refuse_direct_requests(INTERRUPTED_BY_REFLEX)
             intent = await reflex_stint.decide(digest)
             if reflex_stint.finished:
                 self._finish_reflex()
@@ -472,6 +505,11 @@ class JevAgent:
 
         session = self._conversation
         if session is not None:
+            # A queued stint simply waits: the session owns the body until the
+            # seat is gone, and `_stint_or_planning_intent` is never reached.
+            self._refuse_direct_requests(
+                conversation_interruption(session.conversation_id)
+            )
             intent = session.decide(digest)
             if session.finished:
                 self._finish_conversation()
@@ -651,7 +689,7 @@ class JevAgent:
         elif self._conversation is not None:
             interrupted = INTERRUPTED_CONVERSATION
         else:
-            self._refuse_direct_requests()
+            self._refuse_direct_requests(INTERRUPTED_BY_REFLEX)
 
         self._reflex_watch.begin()
         self._reflex_start_tick = self._model.tick
@@ -682,8 +720,7 @@ class JevAgent:
             self._reflex_start_health,
             self._model.self_info.health,
         )
-        self._reflex_notes_for_tools.append(line)
-        self._reflex_notes_for_prompt.append(line)
+        self._note_for_planner(line)
         self._release_held_stint(line)
         # The conversation session was never dropped, so it simply resumes; if
         # the world took the seat away it will notice on its next tick.
@@ -691,35 +728,60 @@ class JevAgent:
             MODE_CONVERSATION if self._conversation is not None else MODE_PLANNING
         )
 
-    def _refuse_direct_requests(self) -> None:
-        """Answer every in-flight and queued single-tick action at once."""
+    def _refuse_direct_requests(self, message: str) -> None:
+        """Answer every in-flight and queued single-tick action with `message`.
+
+        Used by both interruptions: a reflex stint and a conversation that
+        started while the planner was mid-turn.
+        """
         awaiting = self._awaiting_direct
         if awaiting is not None:
             self._awaiting_direct = None
             if not awaiting.future.done():
-                awaiting.future.set_result(
-                    f"{awaiting.description} -> {INTERRUPTED_BY_REFLEX}"
-                )
+                awaiting.future.set_result(f"{awaiting.description} -> {message}")
         for request in _drain(self._direct_requests):
             if not request.future.done():
-                request.future.set_result(
-                    f"{request.description} -> {INTERRUPTED_BY_REFLEX}"
-                )
+                request.future.set_result(f"{request.description} -> {message}")
 
     # -- conversations ------------------------------------------------------
 
     def _detect_join(self, digest: TickDigest) -> None:
-        """Enter conversation mode when the world says the actor took a seat."""
-        conversation_id = joined_conversation_id(digest)
+        """Enter conversation mode when the world says the actor took a seat.
+
+        The seat may come from an `open`, a `join`, an `accept` of someone
+        else's invitation, or someone accepting this actor's own. In the last
+        case the actor asked for nothing, so whatever single-tick action it had
+        in flight is answered as interrupted.
+        """
+        conversation_id, action = joined_conversation(digest)
         if not conversation_id or self._conversation is not None:
             return
+        via = self._join_via(action)
         stint = self._active_stint
         if stint is not None:
             stint.finish(END_JOINED_CONVERSATION)
             self._finish_stint(hold=True)
-        self._begin_conversation(conversation_id)
+        elif via == VIA_ACCEPTED:
+            # Nothing in flight belongs to this seat: the planner asked for an
+            # action and got a conversation instead.
+            self._refuse_direct_requests(conversation_interruption(conversation_id))
+        self._begin_conversation(conversation_id, via)
 
-    def _begin_conversation(self, conversation_id: str) -> None:
+    def _join_via(self, action: str) -> str:
+        """How the seat was taken, for the `conversation_start` trace line.
+
+        The world reports the inviter's side of an `accept` as a plain `join`,
+        so a `join` this actor did not ask for on the previous tick is the
+        inviter being accepted.
+        """
+        if action != ACTION_JOIN:
+            return action
+        tick, last_action = self._last_converse
+        if last_action in (ACTION_JOIN, ACTION_OPEN) and tick >= self._model.tick - 1:
+            return action
+        return VIA_ACCEPTED
+
+    def _begin_conversation(self, conversation_id: str, via: str = ACTION_JOIN) -> None:
         session = ConversationSession(
             conversation_id,
             self._model,
@@ -729,10 +791,10 @@ class JevAgent:
             reflex_line=lambda: self.reflex.prompt_line(),
             alert_line=self._alert_line,
         )
-        session.begin()
+        session.begin(via)
         self._conversation = session
         self.mode = MODE_CONVERSATION
-        logger.info("conversation_started", conversation_id=conversation_id)
+        logger.info("conversation_started", conversation_id=conversation_id, via=via)
 
     def _alert_line(self) -> str:
         """The threat alert as the planner would see it, or `""`."""
@@ -754,14 +816,24 @@ class JevAgent:
         self._spawn(self._report_conversation(session))
 
     async def _report_conversation(self, session: ConversationSession) -> None:
-        """Write the note, then release everyone waiting on the report."""
+        """Write the note, then deliver the report to whoever is owed it.
+
+        A tool parked on `await_conversation` gets it, or a stint the join cut
+        short carries it. A conversation nobody asked for - one that started
+        because someone accepted this actor's invitation - has no such owner,
+        so the report is queued as a note like a reflex line.
+        """
         report = await session.write_report()
         text = report.to_text()
+        delivered = self._held_stint is not None
         self._release_held_stint(text)
         for waiter in list(self._conversation_waiters):
             self._conversation_waiters.remove(waiter)
+            delivered = True
             if not waiter.future.done():
                 waiter.future.set_result(report)
+        if not delivered:
+            self._note_for_planner(text)
 
     def _expire_conversation_waiters(self) -> None:
         """Release a planner tool whose conversation never started."""

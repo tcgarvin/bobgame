@@ -53,6 +53,9 @@ logger = structlog.get_logger(__name__)
 
 ACTION_OPEN = "open"
 ACTION_JOIN = "join"
+# Mirrored in `items.py` with the other world constants, and named here beside
+# the actions it belongs with.
+ACTION_ACCEPT = items.ACTION_ACCEPT
 ACTION_SPEAK = "speak"
 ACTION_PASS = "pass"
 ACTION_LEAVE = "leave"
@@ -72,6 +75,12 @@ END_LEFT = "left"
 END_REMOVED = "removed"
 END_DIED = "died"
 END_NOBODY_JOINED = "nobody joined"
+
+# How the actor came to hold its seat, as the `conversation_start` trace says
+# it. `accepted` is the inviter's side of an `accept`: the world reports it as
+# a plain `join` although the actor submitted nothing (docs/09 section 8.2).
+VIA_ACCEPTED = "accepted"
+JOIN_ACTIONS = (ACTION_OPEN, ACTION_JOIN, ACTION_ACCEPT)
 
 # The world creates the conversation object on the tick it accepts the `open`
 # or `join`, but an observation can lag by a tick; wait this long for the
@@ -396,14 +405,19 @@ def converse_intent(
     conversation_id: str = "",
     text: str = "",
     direction: pb.Direction = pb.DIRECTION_UNSPECIFIED,
+    target_entity_id: str = "",
 ) -> pb.Intent:
-    """A `ConverseIntent` wrapped in an Intent, with the text truncated."""
+    """A `ConverseIntent` wrapped in an Intent, with the text truncated.
+
+    `target_entity_id` is the settler whose invitation an `accept` takes up.
+    """
     return pb.Intent(
         converse=pb.ConverseIntent(
             action=action,
             conversation_id=conversation_id,
             text=text[: items.CONVERSATION_TEXT_LIMIT],
             direction=direction,
+            target_entity_id=target_entity_id,
         )
     )
 
@@ -415,20 +429,30 @@ def give_intent(entity_id: str, kind: str, amount: int) -> pb.Intent:
     )
 
 
-def joined_conversation_id(digest: TickDigest) -> str:
-    """The conversation the actor joined or opened on this tick, if it did.
+def joined_conversation(digest: TickDigest) -> tuple[str, str]:
+    """`(conversation id, action)` for the seat the actor took on this tick.
 
     The world reports a successful `ConverseIntent` as an `EntityActed` with
     action type `converse` and details that start with the action name and the
-    conversation id, for example `join conv_12`.
+    conversation id: `open conv_12`, `join conv_12`, or `accept conv_12 mira`
+    for the settler who accepted an invitation. The inviter's own side of an
+    accept arrives as `join conv_12`, so the action alone cannot tell the two
+    apart; `JevAgent` does that from what it submitted.
+
+    Both values are empty when the actor took no seat.
     """
     for acted in digest.own_actions:
         if acted.action_type != CONVERSE_ACTION_TYPE or not acted.success:
             continue
         parts = acted.details.split()
-        if len(parts) >= 2 and parts[0] in (ACTION_OPEN, ACTION_JOIN):
-            return parts[1]
-    return ""
+        if len(parts) >= 2 and parts[0] in JOIN_ACTIONS:
+            return (parts[1], parts[0])
+    return ("", "")
+
+
+def joined_conversation_id(digest: TickDigest) -> str:
+    """The conversation the actor opened, joined or accepted into this tick."""
+    return joined_conversation(digest)[0]
 
 
 def transcript_for(
@@ -530,14 +554,19 @@ class ConversationSession:
 
     # -- per-tick -----------------------------------------------------------
 
-    def begin(self) -> None:
-        """Write the `conversation_start` trace line."""
+    def begin(self, via: str = ACTION_JOIN) -> None:
+        """Write the `conversation_start` trace line.
+
+        `via` is how the seat was taken: `open`, `join`, `accept`, or
+        `accepted` for the inviter whose invitation someone took up.
+        """
         self.trace.conversations.write(
             {
                 "event": "conversation_start",
                 "entity_id": self.model.entity_id,
                 "tick": self.model.tick,
                 "conversation_id": self.conversation_id,
+                "via": via,
             }
         )
 

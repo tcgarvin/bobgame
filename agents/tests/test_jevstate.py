@@ -360,3 +360,49 @@ def test_veins_show_their_units_and_what_they_yield() -> None:
     entry = next(item for item in state["nearby"] if item["id"] == "v1")
     assert entry["yields"] == "iron_ore"
     assert entry["remaining"] == 4
+
+
+# --- invitations to talk (docs/09 section 8.3) ------------------------------
+
+
+def test_an_open_invitation_is_one_line_with_its_offset_and_text() -> None:
+    state = _state_for(
+        make_entity("ada", (10, 10)),
+        entities=[make_entity("mira", (13, 12), open_to_talk=True)],
+        events=[utterance_event("mira", "Plan the wall?", (13, 12), open_to_talk=True)],
+    )
+
+    assert state["invitations"] == [
+        'mira at dx 3 dy 2 is open to talk: "Plan the wall?"'
+    ]
+
+
+def test_the_actors_own_invitation_says_how_long_it_has_left() -> None:
+    state = _state_for(
+        make_entity("ada", (10, 10)),
+        events=[utterance_event("ada", "Anyone free?", (10, 10), open_to_talk=True)],
+    )
+
+    assert state["invitations"] == ["you are open to talk (40 ticks left)"]
+
+
+def test_the_state_carries_no_invitations_block_when_there_are_none() -> None:
+    assert "invitations" not in _state_for(make_entity("ada", (10, 10)))
+
+
+def test_a_sleeping_neighbour_is_marked_asleep_and_the_others_are_not() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            7,
+            make_entity("ada", (10, 10)),
+            entities=[
+                make_entity("mira", (11, 10), asleep=True),
+                make_entity("bran", (9, 10)),
+            ],
+        )
+    )
+    state = build_state(model, instruction="", success_condition="", ticks_left=5)
+    by_id = {entry["id"]: entry for entry in state["entities"]}
+    assert by_id["mira"]["asleep"] is True
+    assert "asleep" not in by_id["bran"]

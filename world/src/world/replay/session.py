@@ -74,8 +74,8 @@ class ReplaySession:
             self._apply_objects(record)
         self._applied_through = target
 
-        self._apply_entities(self.loader.tick_record(target))
         self.world.tick = target
+        self._apply_entities(self.loader.tick_record(target))
         self.tick_id = target
         return target
 
@@ -338,7 +338,7 @@ class ReplaySession:
         # Dead entities first: each is detached immediately, so they never
         # hold a tile against a living entity standing on it.
         for update in sorted(updates, key=lambda item: bool(item.get("alive", True))):
-            entity = entity_from_state(update)
+            entity = entity_from_state(update, self.world.tick)
             try:
                 self.world.add_entity(entity)
             except PositionOccupiedError:
@@ -384,6 +384,7 @@ def _fallback_entity(event: dict[str, Any]) -> dict[str, Any]:
         "asleep": False,
         "sleeping_on": "",
         "collapsed": False,
+        "open_to_talk": False,
         "inventory": {},
     }
 

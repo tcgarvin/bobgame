@@ -53,7 +53,7 @@ def chunk_data_message(chunk: Chunk, world: World) -> dict[str, Any]:
     entities = []
     for entity_id in chunk.entities:
         try:
-            entities.append(entity_state(world.get_entity(entity_id)))
+            entities.append(entity_state(world.get_entity(entity_id), world.tick))
         except EntityNotFoundError:
             pass  # Entity may have been removed
 

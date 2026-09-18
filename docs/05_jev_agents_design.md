@@ -252,26 +252,34 @@ Questions in one Jev request:
   are strings such as `move_N`, `move_NE`, `follow_travel`, `stop_travel`,
   `travel_to:tree_9`, `extract:tree_9`, `collect:bush_3`, `attack:wolf_1`,
   `eat:berry`, `pickup:wood`, `deposit:chest_2:wood`, `withdraw:chest_2:berry`,
-  `craft:axe`, `equip:axe`, `place:chest:N`, `say:help`, `say:wolf_here`,
+  `craft:axe`, `equip:axe`, `place:chest:N`, `say:help`,
+  `say:wolf_here`,
   `say:come_here`, `say:all_good`, `wait`. Only include options that are
   currently legal (walkable directions, adjacent objects, affordable recipes,
   items in inventory). Cap at 40 options; keep `travel_to:` options to the 6
   nearest relevant objects. Each option's criteria text is a one-line
   description.
-- `eject` (Noul): "Should control return to the planner now, because the
-  brief's success condition is met, the brief has become impossible, or the
-  situation needs judgement the brief does not cover?"
+- `done` (Noul): "Is the brief's success condition met right now, as far as the
+  state shows?"
+- `stuck` (Noul): "Has the brief become impossible, or does the situation need a
+  judgement the brief does not cover?"
+  (These were one bundled `eject` question until 2026-09-18. Asked about
+  success *or* impossibility *or* judgement at once, Jev answered 0.5-0.6 on a
+  plainly finished job, so thirteen stints in one run ran to their tick budget
+  with nothing left to do. `JevDecision.eject` survives as a derived field,
+  `max(done, stuck)`, for the traces, the reports and the viewer.)
 - `danger` (Noul): "Is this entity in immediate danger of dying within a few
   ticks?" (used for logging and for a hard rule: if danger > 0.8 and health
   < 6, prefer moving away from the nearest wolf toward the settlement).
 
-Code rules on top of Jev: the stint ends when `eject` >= 0.7 for two
-consecutive ticks, when `ticks_left` hits 0, on death, or when the same failed
-action repeats 3 times. The final stint report says which.
+Code rules on top of Jev: the stint ends when `done` or `stuck` is >= 0.6 for
+two consecutive ticks (reason `eject`), when `ticks_left` hits 0, on death, or
+when the same failed action repeats 3 times. The final stint report says which.
 
 Per-tick log entry (JSONL, `logs/agent-<id>/stints.jsonl`): tick, position,
 stats, state size in tokens (as reported by Jev usage), options count, chosen
-action, top-3 probabilities, eject, danger, latency ms, intent result.
+action, top-3 probabilities, `done`, `stuck`, `eject`, danger, latency ms,
+intent result.
 
 ### Stint report (code, no LLM)
 
@@ -294,10 +302,15 @@ is fast, cheap, and literal, while the planner is slow and expensive. Tools:
 - `travel_to(x, y, max_ticks)` → a stint with a preset travel target and a
   brief of "follow the path; react to danger; eject on arrival".
 - Direct single-tick actions (each waits one tick and returns the result):
-  `move(direction)`, `attack(entity_id)`, `extract(object_id)`, `collect(object_id)`,
   `eat(kind)`, `pickup(kind, amount)`, `drop(kind, amount)`,
   `deposit(object_id, kind, amount)`, `withdraw(object_id, kind, amount)`,
-  `craft(recipe)`, `equip(kind)`, `place(kind, direction)`, `wait(ticks)`.
+  `craft(recipe)`, `equip(kind)`, `place(kind, direction)`, `rest(object_id)`,
+  `dismantle(object_id)`, `sleep()`, `wake()`,
+  `give(...)`, `wait(ticks)`.
+  There is deliberately no `move`, `attack`, `extract` or `collect`: walking,
+  fighting, mining and picking berries go through Jev, `travel_to` or `build`.
+  A single-tick planner call costs about 3 ticks (2 for the action, ~1 of model
+  thinking) where Jev does the same in 1.
 - `say(text)` → local speech (free text, 10 tiles). `shout(text)` → the
   `shout` channel (60 tiles); hearers see where it came from.
 - `write_note(board_id, slot, title, text)` and `read_board(board_id)`.
@@ -307,7 +320,7 @@ The planner loop: each planner turn gets the latest `look()` and the last
 stint report in the prompt, thinks, calls tools, and ends its turn with a
 one-paragraph reflection which is stored as `planner_thought` and shown in
 the viewer. Then the next turn starts immediately. Tool calls per turn are
-budgeted at 30 (see "Per-turn tool budget" below). Conversation history keeps
+budgeted at 20 (see "Per-turn tool budget" below). Conversation history keeps
 the first message plus as many whole recent turns as fit in 80 messages, cut
 only on turn boundaries, plus the persistent notes.
 
@@ -539,20 +552,22 @@ observation and viewer services: `move_results`, `action_results`
   8 tiles), both ending with the instruction to hand the body back to Jev with
   one `start_stint` fighting brief. A turn that starts within 5 ticks of a
   bite opens with the same alert above the `look` block, and the system prompt
-  has a real-time paragraph saying why the planner cannot fight by hand.
+  has a real-time paragraph saying why the planner cannot fight by hand. The
+  `attack`, `move`, `extract` and `collect` tools were later removed outright.
 - **Per-turn tool budget.** The original 12-call cap was a pydantic-ai
   `UsageLimits` hard stop. In run `20260917-091932-settlement` it ended 110 of
   155 turns, and each of those turns lost its reflection and its message
   history, so planners were amnesiac apart from `memory.md`. The budget is now
-  30 and soft: the tools live in a `FunctionToolset` wrapped by
-  `BudgetedToolset`, which appends `[tool budget: N of 30 calls left this
+  20 and soft: the tools live in a `FunctionToolset` wrapped by
+  `BudgetedToolset`, which appends `[tool budget: N of 20 calls left this
   turn]` to every tool result (with a wrap-up nudge at 5 and below) and
   answers a call past the budget with a "NOT EXECUTED" message instead of
   running it. The turn then ends normally and traces `tool_budget_spent`.
-  `UsageLimits(tool_calls_limit=36)` remains as a backstop; if it fires, the
+  `UsageLimits(tool_calls_limit=26)` remains as a backstop; if it fires, the
   messages captured so far are still kept as history and the trace says
   `tool_budget_reached`. The system prompt states the budget and that a stint
-  is one call.
+  is one call. It was 30 until a run where 29 of 50 turns spent the budget and
+  `move` alone was 312 of 1260 calls; removing the walking tools made 20 enough.
 - **`PLANNER_MODEL`** is prefixed with `openrouter:` only when it looks like a
   bare OpenRouter id (contains `/` and no `:`), so `provider:model` strings and
   test models pass through unchanged.

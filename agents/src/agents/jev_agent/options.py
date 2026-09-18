@@ -113,6 +113,12 @@ HEARD_SHOUT_KEY_PREFIX = "travel_to:shout:"
 JOIN_CONVERSATION_KEY_PREFIX = "join_conversation:"
 JOIN_CONVERSATION_OPTION_LIMIT = 2
 
+# Invitations (docs/09 section 8): a say carrying the `open_to_talk` flag keeps
+# the speaker open for `INVITATION_TICKS`, and standing next to an open speaker
+# and accepting starts a conversation with the two of them.
+TALK_TO_KEY_PREFIX = "talk_to:"
+INVITE_KEY_PREFIX = "invite:"
+
 # Object types worth walking across the map for.
 TRAVEL_TARGET_TYPES: frozenset[str] = (
     frozenset(
@@ -182,12 +188,14 @@ def enumerate_options(
     travel: TravelState | None = None,
     *,
     shouts: Sequence[str] = (),
+    invitations: Sequence[str] = (),
     max_options: int = MAX_OPTIONS,
 ) -> list[Option]:
     """Every action that is legal for this actor on this tick, best-first.
 
     `shouts` are the phrases the planner put in the brief; Jev may shout those
-    and nothing else.
+    and nothing else. `invitations` are the phrases it may say with the
+    `open_to_talk` flag, the same way.
     """
     options: list[Option] = [_wait_option()]
     position = model.position
@@ -195,6 +203,7 @@ def enumerate_options(
 
     options.extend(_survival_options(model, inventory, position, travel, shouts))
     options.extend(_conversation_options(model, position, travel))
+    options.extend(_invitation_options(model, position, travel, invitations))
     options.extend(_travel_control_options(model, travel))
     options.extend(_interaction_options(model, inventory, position))
     options.extend(_crafting_options(model, inventory))
@@ -386,6 +395,106 @@ def _conversation_options(
             )
         )
     return options
+
+
+def _invitation_options(
+    model: WorldModel,
+    position: Coord,
+    travel: TravelState | None,
+    invitations: Sequence[str],
+) -> list[Option]:
+    """Accepting someone's invitation to talk, and saying one of your own.
+
+    Neither is offered while the actor already holds a seat: an invitation ends
+    the moment its speaker sits down, and an accept needs both of them free.
+    """
+    if model.my_conversation() is not None:
+        return []
+    options = _talk_to_options(model, position, travel)
+    options.extend(_invite_options(model, invitations))
+    return options
+
+
+def _talk_to_options(
+    model: WorldModel, position: Coord, travel: TravelState | None
+) -> list[Option]:
+    """One option per settler who is open to talk: accept it, or walk over."""
+    options: list[Option] = []
+    for invitation in model.open_invitations():
+        key = f"{TALK_TO_KEY_PREFIX}{invitation.entity_id}"
+        distance = chebyshev(invitation.position, position)
+        if distance == 1:
+            options.append(
+                Option(
+                    key=key,
+                    description=(
+                        f"accept {invitation.entity_id}'s invitation to talk: a "
+                        "conversation with the two of you starts on a free tile "
+                        "next to you both"
+                    ),
+                    intent=pb.Intent(
+                        converse=pb.ConverseIntent(
+                            action=items.ACTION_ACCEPT,
+                            target_entity_id=invitation.entity_id,
+                        )
+                    ),
+                    clears_travel=True,
+                )
+            )
+            continue
+        path = find_path(model, position, invitation.position, stop_adjacent=True)
+        if not path:
+            continue
+        dx = invitation.position[0] - position[0]
+        dy = invitation.position[1] - position[1]
+        said = f' who said "{invitation.text}" and' if invitation.text else " who"
+        options.append(
+            Option(
+                key=key,
+                description=(
+                    f"walk to {invitation.entity_id} at dx {dx} dy {dy},{said} is "
+                    "open to talk; next to them you can accept and a "
+                    "conversation starts"
+                ),
+                intent=_move(direction_between(position, path[0])),
+                travel_target=TravelState(
+                    target=invitation.position,
+                    label=f"{invitation.entity_id}, who is open to talk",
+                    stop_adjacent=True,
+                ),
+            )
+        )
+    return options
+
+
+def _invite_options(model: WorldModel, invitations: Sequence[str]) -> list[Option]:
+    """One option per invitation phrase the planner wrote into the brief.
+
+    Nobody within earshot means nobody would hear it, and an invitation that is
+    already open cannot be made more open, so neither case is offered.
+    """
+    if not model.allies_near(model.position, items.SAY_RADIUS):
+        return []
+    if model.my_invitation_live():
+        return []
+    return [
+        Option(
+            key=f"{INVITE_KEY_PREFIX}{index}",
+            description=(
+                f'say "{phrase}" and stay open to talk for '
+                f"{items.INVITATION_TICKS} ticks: anyone who hears it can walk "
+                "up and start a conversation with you"
+            ),
+            intent=pb.Intent(
+                say=pb.SayIntent(
+                    text=phrase,
+                    channel=items.LOCAL_CHANNEL,
+                    open_to_talk=True,
+                )
+            ),
+        )
+        for index, phrase in enumerate(invitations[:MAX_BRIEF_SHOUTS])
+    ]
 
 
 def _rest_options(model: WorldModel) -> list[Option]:

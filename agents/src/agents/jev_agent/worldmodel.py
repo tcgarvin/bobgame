@@ -137,6 +137,9 @@ class EntityInfo:
     fatigue: int = 0
     max_fatigue: int = items.MAX_FATIGUE
     asleep: bool = False
+    # True while this entity's invitation to talk is still open: anyone next to
+    # it may accept and a conversation starts (docs/09 section 8).
+    open_to_talk: bool = False
 
     @property
     def fatigue_word(self) -> str:
@@ -158,7 +161,8 @@ class HeardUtterance:
 
     `conversation_id` is empty for ordinary speech; it names the conversation
     for a line spoken in one, and for the opening line, which is heard on the
-    local channel.
+    local channel. `open_to_talk` is set when the speaker said it as an
+    invitation, so it stays open to an accept for `INVITATION_TICKS`.
     """
 
     tick: int
@@ -167,6 +171,7 @@ class HeardUtterance:
     text: str
     position: Coord
     conversation_id: str = ""
+    open_to_talk: bool = False
 
 
 @dataclass(frozen=True)
@@ -276,6 +281,21 @@ def conversation_from_object(obj: ObjectInfo) -> ConversationInfo:
         utterances=_parse_int(state.get("utterances", "")),
         transcript=_parse_transcript(state.get("transcript", "")),
     )
+
+
+@dataclass(frozen=True)
+class OpenInvitation:
+    """Another settler who is open to talk, and where to go to accept.
+
+    `position` is the best known one: where the settler stands if it is in
+    view, otherwise where it was standing when the invitation was heard.
+    `text` is the most recent flagged line heard from it, or `""` when the
+    invitation was only seen on the settler itself.
+    """
+
+    entity_id: str
+    position: Coord
+    text: str
 
 
 @dataclass(frozen=True)
@@ -502,6 +522,7 @@ class WorldModel:
                     utterance.text,
                     (utterance.position.x, utterance.position.y),
                     utterance.conversation_id,
+                    utterance.open_to_talk,
                 )
                 self.heard.append(heard)
                 digest.utterances.append(heard)
@@ -719,6 +740,66 @@ class WorldModel:
         ]
         return max(ticks, default=-1)
 
+    def open_invitations(self) -> list[OpenInvitation]:
+        """Every other settler open to talk right now, nearest first.
+
+        A settler qualifies when it is in view with the flag set, or when a
+        flagged line was heard from it less than `INVITATION_TICKS` ago. A
+        settler in view *without* the flag is dropped even if it was heard with
+        one: the world's own view of the entity is newer than the line.
+        """
+        invitations: dict[str, OpenInvitation] = {}
+        for utterance in self.heard:
+            if not utterance.open_to_talk or utterance.speaker_id == self.entity_id:
+                continue
+            if self.tick - utterance.tick >= items.INVITATION_TICKS:
+                continue
+            invitations[utterance.speaker_id] = OpenInvitation(
+                entity_id=utterance.speaker_id,
+                position=utterance.position,
+                text=utterance.text,
+            )
+        for entity in self.entities.values():
+            if entity.entity_id == self.entity_id or entity.entity_type == "wolf":
+                continue
+            heard = invitations.get(entity.entity_id)
+            if not entity.alive or not entity.open_to_talk:
+                if entity.last_seen == self.tick:
+                    invitations.pop(entity.entity_id, None)
+                continue
+            invitations[entity.entity_id] = OpenInvitation(
+                entity_id=entity.entity_id,
+                position=entity.position,
+                text="" if heard is None else heard.text,
+            )
+        return sorted(
+            invitations.values(),
+            key=lambda invitation: (
+                chebyshev(invitation.position, self.position),
+                invitation.entity_id,
+            ),
+        )
+
+    def last_own_invitation_tick(self) -> int:
+        """The tick of this actor's most recent flagged say, or -1 for never."""
+        ticks = [
+            u.tick
+            for u in self.heard
+            if u.speaker_id == self.entity_id and u.open_to_talk
+        ]
+        return max(ticks, default=-1)
+
+    def my_invitation_ticks_left(self) -> int:
+        """Ticks this actor's own invitation still stands; 0 when none does."""
+        last = self.last_own_invitation_tick()
+        if last < 0:
+            return 0
+        return max(0, items.INVITATION_TICKS - (self.tick - last))
+
+    def my_invitation_live(self) -> bool:
+        """Whether this actor's own invitation to talk is still open."""
+        return self.my_invitation_ticks_left() > 0
+
     def damage_since(self, tick: int) -> list[DamageTaken]:
         """Every hit the actor took at or after `tick`, oldest first."""
         return [hit for hit in self.damage_log if hit.tick >= tick]
@@ -749,6 +830,7 @@ def _entity_info(entity: pb.Entity, tick: int) -> EntityInfo:
         fatigue=entity.fatigue,
         max_fatigue=entity.max_fatigue or items.MAX_FATIGUE,
         asleep=entity.asleep,
+        open_to_talk=entity.open_to_talk,
     )
 
 

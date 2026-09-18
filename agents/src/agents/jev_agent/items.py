@@ -278,6 +278,12 @@ CONVERSATION_MAX_UTTERANCES = 40
 CONVERSATION_TEXT_LIMIT = 300
 CONVERSATION_TRANSCRIPT_KEPT = 12
 
+# A say with `open_to_talk` keeps the speaker open for this many ticks: anyone
+# standing next to them may accept and a conversation starts (docs/09 section 8).
+INVITATION_TICKS = 40
+# The `ConverseIntent` action that takes up an open invitation.
+ACTION_ACCEPT = "accept"
+
 
 # --- Recipes ---------------------------------------------------------------
 

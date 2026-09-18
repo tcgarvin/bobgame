@@ -151,6 +151,8 @@ const DAWN_FRACTION = 0.1;
 /** Marker drawn above a sleeping entity, red once it has collapsed. */
 const SLEEP_MARKER_COLOR = '#cfe3ff';
 const COLLAPSE_MARKER_COLOR = '#ff6b6b';
+const INVITATION_MARKER_DEPTH = 29;
+const INVITATION_MARKER_COLOR = '#ffe066';
 
 /** How often the address bar is rewritten (about 4 Hz). */
 const URL_SYNC_MS = 250;
@@ -222,6 +224,8 @@ export class GameScene extends Phaser.Scene {
   private damageFlashUntil: Map<string, number> = new Map();
   /** "z" markers above sleeping entities, keyed by entity id. */
   private sleepMarkers: Map<string, Phaser.GameObjects.Text> = new Map();
+  /** Small speech-bubble markers above entities open to talk, keyed by entity id. */
+  private invitationMarkers: Map<string, Phaser.GameObjects.Text> = new Map();
   /** Screen-space day/night tint over the map. */
   private nightOverlay?: Phaser.GameObjects.Rectangle;
   private connectionText?: Phaser.GameObjects.Text;
@@ -776,6 +780,8 @@ export class GameScene extends Phaser.Scene {
     this.thoughtBubbles.delete(entityId);
     this.sleepMarkers.get(entityId)?.destroy();
     this.sleepMarkers.delete(entityId);
+    this.invitationMarkers.get(entityId)?.destroy();
+    this.invitationMarkers.delete(entityId);
     this.damageFlashUntil.delete(entityId);
   }
 
@@ -1175,6 +1181,7 @@ export class GameScene extends Phaser.Scene {
       // Speech wins the space above the head; the thought bubble yields to it.
       this.updateThoughtBubble(entity.entityId, x, y, entity.alive && !bubble);
       this.updateSleepMarker(entity, x, y);
+      this.updateInvitationMarker(entity, x, y);
 
       if (entity.alive) {
         this.drawEntityBars(entity, x, y, entity.entityId === selectedId);
@@ -1298,6 +1305,40 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
+   * Show a small "..." speech-bubble marker above an entity whose invitation
+   * to talk is live (`open_to_talk`, docs/09_conversation_and_reflex.md
+   * section 8). Live and in replay alike; removed when the flag turns false
+   * or the entity disappears (`removeEntitySprite`).
+   */
+  private updateInvitationMarker(entity: InterpolatedEntity, x: number, y: number): void {
+    const open = entity.openToTalk && entity.alive;
+    let marker = this.invitationMarkers.get(entity.entityId);
+
+    if (!open) {
+      marker?.setVisible(false);
+      return;
+    }
+
+    if (!marker) {
+      marker = this.add.text(0, 0, '…', {
+        fontFamily: 'monospace',
+        fontSize: '14px',
+        fontStyle: 'bold',
+        color: '#333333',
+        backgroundColor: INVITATION_MARKER_COLOR,
+        padding: { x: 4, y: 0 },
+      });
+      marker.setOrigin(0.5, 1);
+      marker.setDepth(INVITATION_MARKER_DEPTH);
+      this.invitationMarkers.set(entity.entityId, marker);
+    }
+
+    marker.setVisible(true);
+    marker.x = x + (TILE_SIZE * SCALE) / 3;
+    marker.y = y - (TILE_SIZE * SCALE) / 2 - 16;
+  }
+
+  /**
    * Draw the health bar (and, for players, the thin hunger bar) above an
    * entity, plus a selection outline for the currently selected one.
    */
@@ -1360,5 +1401,9 @@ export class GameScene extends Phaser.Scene {
       marker.destroy();
     }
     this.sleepMarkers.clear();
+    for (const marker of this.invitationMarkers.values()) {
+      marker.destroy();
+    }
+    this.invitationMarkers.clear();
   }
 }
