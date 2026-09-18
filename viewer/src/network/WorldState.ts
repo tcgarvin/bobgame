@@ -119,6 +119,9 @@ export interface InterpolatedEntity {
   // Position at tick start (for interpolation origin)
   startX: number;
   startY: number;
+  // performance.now() timestamp the current move (start -> target) began;
+  // set only when the target actually changes, never by tick_started.
+  moveStartTime: number;
   // Stats (defaults are used until the server reports real values)
   health: number;
   maxHealth: number;
@@ -206,6 +209,14 @@ const DEFAULT_MAX_HEALTH = 20;
 const DEFAULT_MAX_HUNGER = 100;
 const DEFAULT_MAX_FATIGUE = 100;
 
+/**
+ * Fraction of a tick's duration a move animation takes to finish, so the
+ * slide visibly settles onto the target tile before the next tick's result
+ * can arrive and (re)start a new animation. See `update()` and
+ * `beginEntityMove`.
+ */
+const MOVE_FRACTION = 0.8;
+
 export class WorldState {
   private entities: Map<string, InterpolatedEntity> = new Map();
   private objects: Map<string, TrackedObject> = new Map();
@@ -227,7 +238,6 @@ export class WorldState {
   private clock: WorldClock | null = null;
   private currentTickId: number = 0;
   private tickDurationMs: number = 1000;
-  private tickStartTime: number = 0;
   private worldSize: { width: number; height: number } = { width: 100, height: 100 };
   private chunkSize: number = 32;
   private initialized: boolean = false;
@@ -624,7 +634,6 @@ export class WorldState {
     this.settlement = msg.settlement ? { ...msg.settlement } : null;
     // A seek sends a snapshot: take its clock, else keep waiting for a tick.
     this.clock = msg.clock ? { ...msg.clock } : null;
-    this.tickStartTime = performance.now();
 
     // Note: Entities and objects now come via chunk_data messages
     this.initialized = true;
@@ -702,14 +711,12 @@ export class WorldState {
     this.currentTickId = msg.tick_id;
     if (msg.clock) this.clock = { ...msg.clock };
     this.tickDurationMs = msg.tick_duration_ms;
-    this.tickStartTime = performance.now();
 
-    // Snap current positions to targets and prepare for new interpolation
-    for (const entity of this.entities.values()) {
-      entity.startX = entity.currentX;
-      entity.startY = entity.currentY;
-      // Target remains unchanged until tick_completed
-    }
+    // Interpolation is per-entity and driven only by moveStartTime, which is
+    // set when a target actually changes (see beginEntityMove). Do not touch
+    // start/current/target or restart any animation here: a tick starting is
+    // not a move happening, and an in-flight slide must keep animating
+    // uninterrupted across this event.
   }
 
   /**
@@ -719,22 +726,18 @@ export class WorldState {
   private handleTickCompleted(msg: TickCompletedMessage): void {
     if (msg.clock) this.clock = { ...msg.clock };
 
+    const now = performance.now();
     for (const move of msg.moves ?? []) {
       const entity = this.entities.get(move.entity_id);
       if (entity && move.success) {
-        // Update target position for interpolation
-        entity.targetX = move.to.x;
-        entity.targetY = move.to.y;
-        // Reset start position to current for smooth transition
-        entity.startX = entity.currentX;
-        entity.startY = entity.currentY;
+        this.beginEntityMove(entity, move.to.x, move.to.y, now);
       }
     }
 
     // Full per-entity state (positions + stats). Also covers entities that
     // appeared without an explicit entity_spawned message.
     for (const update of msg.entity_updates ?? []) {
-      this.applyEntityUpdate(update);
+      this.applyEntityUpdate(update, now);
     }
 
     // Apply object changes
@@ -786,16 +789,30 @@ export class WorldState {
       this.utteranceHandler?.(utterance);
     }
 
-    // Reset tick start time for movement interpolation
-    this.tickStartTime = performance.now();
     this.stateUpdateHandler?.();
+  }
+
+  /**
+   * Begin a new per-entity move animation: snap to the previous target (in
+   * case the last move's animation had not finished), then set start = that
+   * settled tile, target = the new destination, and restart the clock. This
+   * guarantees a move always begins from a settled tile, never mid-flight.
+   */
+  private beginEntityMove(entity: InterpolatedEntity, x: number, y: number, now: number): void {
+    entity.currentX = entity.targetX;
+    entity.currentY = entity.targetY;
+    entity.startX = entity.currentX;
+    entity.startY = entity.currentY;
+    entity.targetX = x;
+    entity.targetY = y;
+    entity.moveStartTime = now;
   }
 
   /**
    * Apply one entity_updates entry, creating the entity if it is new.
    * Reports the health delta so the renderer can flash damaged entities.
    */
-  private applyEntityUpdate(update: EntityUpdate): void {
+  private applyEntityUpdate(update: EntityUpdate, now: number): void {
     let entity = this.entities.get(update.entity_id);
     if (!entity) {
       entity = this.createInterpolatedEntity({ ...update, tags: [] });
@@ -805,11 +822,11 @@ export class WorldState {
 
     entity.entityType = update.entity_type;
 
+    // The move for this tick (if any) already set target to this same
+    // position above, so this check prevents a second restart in the same
+    // tick and only fires for a position change the moves loop did not see.
     if (entity.targetX !== update.position.x || entity.targetY !== update.position.y) {
-      entity.targetX = update.position.x;
-      entity.targetY = update.position.y;
-      entity.startX = entity.currentX;
-      entity.startY = entity.currentY;
+      this.beginEntityMove(entity, update.position.x, update.position.y, now);
     }
 
     const previousHealth = entity.health;
@@ -947,12 +964,24 @@ export class WorldState {
     if (!this.initialized) return;
 
     const now = performance.now();
-    const elapsed = now - this.tickStartTime;
-    const rawProgress = Math.min(1, elapsed / this.tickDurationMs);
-    const progress = easeOutQuad(rawProgress);
+    // tickDurationMs already reflects the server's actual cadence: the live
+    // world sends its real tick length, and the replay server adjusts
+    // tick_duration_ms for playback speed itself (see tick_started/snapshot
+    // handling above), so no separate replay-cadence value is needed here.
+    const moveDurationMs = this.tickDurationMs * MOVE_FRACTION;
 
     for (const entity of this.entities.values()) {
-      // Interpolate position
+      if (entity.startX === entity.targetX && entity.startY === entity.targetY) {
+        continue;
+      }
+      const elapsed = now - entity.moveStartTime;
+      const rawProgress = moveDurationMs > 0 ? Math.min(1, elapsed / moveDurationMs) : 1;
+      if (rawProgress >= 1) {
+        entity.currentX = entity.targetX;
+        entity.currentY = entity.targetY;
+        continue;
+      }
+      const progress = easeOutQuad(rawProgress);
       entity.currentX = entity.startX + (entity.targetX - entity.startX) * progress;
       entity.currentY = entity.startY + (entity.targetY - entity.startY) * progress;
     }
@@ -974,6 +1003,7 @@ export class WorldState {
       targetY: state.position.y,
       startX: state.position.x,
       startY: state.position.y,
+      moveStartTime: performance.now(),
       health: state.health ?? maxHealth,
       maxHealth,
       hunger: state.hunger ?? maxHunger,

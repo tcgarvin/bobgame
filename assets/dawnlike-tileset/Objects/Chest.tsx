@@ -4,7 +4,6 @@
  <tile id="0" type="bobtile">
   <properties>
    <property name="key" value="chest-closed"/>
-   <property name="two-frame-animation" type="bool" value="true"/>
   </properties>
  </tile>
  <tile id="16" type="bobtile">

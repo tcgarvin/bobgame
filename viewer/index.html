@@ -42,6 +42,24 @@
         border-radius: 4px;
       }
 
+      /* Below the entity-picker row so a long help line never runs under it. */
+      #hud-box {
+        position: absolute;
+        left: 8px;
+        top: 48px;
+        padding: 6px 8px;
+        line-height: 1.4;
+      }
+      #hud-box div {
+        white-space: pre;
+      }
+      #hud-help {
+        color: #ffffff;
+      }
+      #hud-position {
+        color: #aaaaaa;
+      }
+
       #entity-picker-box {
         position: absolute;
         top: 8px;
@@ -245,7 +263,7 @@
       #object-panel {
         position: absolute;
         left: 8px;
-        top: 96px;
+        top: 120px;
         width: 300px;
         max-height: 45vh;
         overflow-y: auto;
@@ -347,6 +365,11 @@
   <body>
     <div id="app"></div>
     <div id="ui-root">
+      <div id="hud-box" class="panel">
+        <div id="hud-help">Arrows/WASD: pan | Scroll: zoom | F: follow | P: panel | 0: settlement | 1-5: jump</div>
+        <div id="hud-connection">Connecting...</div>
+        <div id="hud-position">Tile: (0, 0) Zoom: 1.0x</div>
+      </div>
       <div id="entity-picker-box" class="panel">
         <label for="entity-picker">Entity</label>
         <select id="entity-picker">

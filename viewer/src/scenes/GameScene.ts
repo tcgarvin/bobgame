@@ -10,7 +10,7 @@ import type {
 import type { SpriteIndex } from '../sprites';
 import { getSpriteFrame } from '../sprites';
 import { ChunkManager, ViewportTracker } from '../terrain';
-import { INSPECTABLE_TYPES, ObjectPanel, OverlayUI, ReplayBar } from '../ui';
+import { Hud, INSPECTABLE_TYPES, ObjectPanel, OverlayUI, ReplayBar } from '../ui';
 import type { DeepLinkParams, DeepLinkState } from '../DeepLink';
 import { buildQuery, buildUrl, parseDeepLink, resolveWsUrl } from '../DeepLink';
 import { CONVERSATION_TYPE, parseConversationParticipants } from '../conversation';
@@ -228,7 +228,6 @@ export class GameScene extends Phaser.Scene {
   private invitationMarkers: Map<string, Phaser.GameObjects.Text> = new Map();
   /** Screen-space day/night tint over the map. */
   private nightOverlay?: Phaser.GameObjects.Rectangle;
-  private connectionText?: Phaser.GameObjects.Text;
   private statusBars?: Phaser.GameObjects.Graphics;
   /** Marker on each conversation's anchor tile, keyed by object id. */
   private conversationMarkers: Map<string, Phaser.GameObjects.Graphics> = new Map();
@@ -243,9 +242,9 @@ export class GameScene extends Phaser.Scene {
   // Camera controls
   private cameraFollowing: boolean = true;
   private followTarget?: Phaser.GameObjects.Sprite;
-  private positionText?: Phaser.GameObjects.Text;
 
   // HTML overlay
+  private hud?: Hud;
   private overlay?: OverlayUI;
   private objectPanel?: ObjectPanel;
   private replayBar?: ReplayBar;
@@ -257,6 +256,7 @@ export class GameScene extends Phaser.Scene {
   private lastUrlQuery: string = '';
   private lastUrlSyncMs: number = 0;
   private connectionLabel: string = 'Connecting...';
+  private connectionColor: string = '#ffff00';
   private keyHandler?: (event: KeyboardEvent) => void;
 
   constructor() {
@@ -279,38 +279,14 @@ export class GameScene extends Phaser.Scene {
     // Setup scroll wheel zoom
     this.setupScrollZoom();
 
-    // Display instructions and connection status
-    this.add
-      .text(
-        10,
-        10,
-        'Arrows/WASD: pan | Scroll: zoom | F: follow | P: panel | 0: settlement | 1-5: jump',
-        {
-          fontFamily: 'monospace',
-          fontSize: '12px',
-          color: '#ffffff',
-        }
-      )
-      .setScrollFactor(0)
-      .setDepth(100);
-
-    this.connectionText = this.add
-      .text(10, 30, 'Connecting...', {
-        fontFamily: 'monospace',
-        fontSize: '12px',
-        color: '#ffff00',
-      })
-      .setScrollFactor(0)
-      .setDepth(100);
-
-    this.positionText = this.add
-      .text(10, 50, 'Pos: (0, 0) Tile: (0, 0)', {
-        fontFamily: 'monospace',
-        fontSize: '12px',
-        color: '#aaaaaa',
-      })
-      .setScrollFactor(0)
-      .setDepth(100);
+    // Help line, connection status and camera position now live in the HTML
+    // overlay (src/ui/Hud.ts): a scroll-factor-0 Phaser text is still scaled
+    // by camera zoom, so it shrank/grew and drifted at zoom != 1.
+    this.hud = new Hud();
+    this.hud.setHelp(
+      'Arrows/WASD: pan | Scroll: zoom | F: follow | P: panel | 0: settlement | 1-5: jump'
+    );
+    this.hud.setConnection(this.connectionLabel, this.connectionColor);
 
     // Graphics layer for health/hunger bars and the selection ring
     this.statusBars = this.add.graphics();
@@ -681,24 +657,22 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updateConnectionStatus(state: ConnectionState): void {
-    if (!this.connectionText) return;
-
     switch (state) {
       case 'connected':
         this.connectionLabel = 'Connected';
-        this.connectionText.setColor('#00ff00');
+        this.connectionColor = '#00ff00';
         break;
       case 'connecting':
         this.connectionLabel = 'Connecting...';
-        this.connectionText.setColor('#ffff00');
+        this.connectionColor = '#ffff00';
         break;
       case 'reconnecting':
         this.connectionLabel = 'Reconnecting...';
-        this.connectionText.setColor('#ff8800');
+        this.connectionColor = '#ff8800';
         break;
       case 'disconnected':
         this.connectionLabel = 'Disconnected';
-        this.connectionText.setColor('#ff0000');
+        this.connectionColor = '#ff0000';
         break;
     }
     this.refreshConnectionText();
@@ -706,12 +680,11 @@ export class GameScene extends Phaser.Scene {
 
   /** Connection state plus the replay badge and the current tick. */
   private refreshConnectionText(): void {
-    if (!this.connectionText) return;
     const badge = this.worldState.isReplay() ? ' [replay]' : '';
     const tick = this.worldState.isInitialized()
       ? ` t${this.worldState.getCurrentTick()}`
       : '';
-    this.connectionText.setText(`${this.connectionLabel}${badge}${tick}`);
+    this.hud?.setConnection(`${this.connectionLabel}${badge}${tick}`, this.connectionColor);
   }
 
   private createEntitySprite(entity: InterpolatedEntity): void {
@@ -785,6 +758,26 @@ export class GameScene extends Phaser.Scene {
     this.damageFlashUntil.delete(entityId);
   }
 
+  /**
+   * Position a world-space text label so it stays a constant on-screen size
+   * and a constant screen-pixel offset from the entity regardless of camera
+   * zoom (`MIN_ZOOM`-`MAX_ZOOM`). `worldX`/`worldY` are the anchor point in
+   * world pixels (typically the entity's head); `screenOffsetX`/`screenOffsetY`
+   * are the desired offset from that anchor in on-screen pixels.
+   */
+  private placeLabel(
+    label: Phaser.GameObjects.Text,
+    worldX: number,
+    worldY: number,
+    screenOffsetX: number,
+    screenOffsetY: number,
+  ): void {
+    const zoom = this.cameras.main.zoom > 0 ? this.cameras.main.zoom : 1;
+    label.setScale(1 / zoom);
+    label.x = worldX + screenOffsetX / zoom;
+    label.y = worldY + screenOffsetY / zoom;
+  }
+
   /** Show a spoken (`local`, `shout` or `conversation`) utterance above the speaker for a few seconds. */
   private showSpeechBubble(utterance: UtteranceEvent): void {
     if (!SPEECH_BUBBLE_CHANNELS.has(utterance.channel)) return;
@@ -796,12 +789,13 @@ export class GameScene extends Phaser.Scene {
 
     const text = this.add.text(0, 0, utterance.text, {
       fontFamily: 'monospace',
-      fontSize: '12px',
+      fontSize: '14px',
       color: '#ffffff',
       backgroundColor: '#000000cc',
       padding: { x: 4, y: 2 },
       wordWrap: { width: 180 },
       align: 'center',
+      resolution: 2,
     });
     text.setOrigin(0.5, 1);
     text.setDepth(30);
@@ -830,11 +824,12 @@ export class GameScene extends Phaser.Scene {
     if (!bubble) {
       bubble = this.add.text(0, 0, '', {
         fontFamily: 'monospace',
-        fontSize: '12px',
+        fontSize: '14px',
         fontStyle: 'bold',
         color: '#333333',
         backgroundColor: '#ffffffdd',
         padding: { x: 4, y: 0 },
+        resolution: 2,
       });
       bubble.setOrigin(0, 1);
       bubble.setDepth(29);
@@ -844,8 +839,7 @@ export class GameScene extends Phaser.Scene {
     const dots = 1 + (Math.floor(this.time.now / THOUGHT_DOT_MS) % 3);
     bubble.setText('.'.repeat(dots).padEnd(3, ' '));
     bubble.setVisible(true);
-    bubble.x = x + (TILE_SIZE * SCALE) / 4;
-    bubble.y = y - (TILE_SIZE * SCALE) / 2 - 2;
+    this.placeLabel(bubble, x, y - (TILE_SIZE * SCALE) / 2, 12, -2);
   }
 
   private createObjectSprite(obj: TrackedObject): void {
@@ -1049,6 +1043,9 @@ export class GameScene extends Phaser.Scene {
       zoom: (level: number) => {
         this.cameras.main.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, level));
       },
+      // Read access to the interpolated entities, for console checks and scripted tests.
+      entities: () => this.worldState.getEntities(),
+      tick: () => this.worldState.getCurrentTick(),
       pos: () => {
         const cam = this.cameras.main;
         const tileX = Math.floor(cam.scrollX / (TILE_SIZE * SCALE));
@@ -1056,7 +1053,7 @@ export class GameScene extends Phaser.Scene {
         return { x: cam.scrollX, y: cam.scrollY, tileX, tileY };
       },
     };
-    console.log('Camera controls available: cam.goto(x,y), cam.follow(), cam.free(), cam.zoom(n), cam.pos()');
+    console.log('Camera controls available: cam.goto(x,y), cam.follow(), cam.free(), cam.zoom(n), cam.pos(), cam.entities(), cam.tick()');
   }
 
   private toggleCameraFollow(follow?: boolean): void {
@@ -1175,8 +1172,7 @@ export class GameScene extends Phaser.Scene {
 
       const bubble = this.speechBubbles.get(entity.entityId);
       if (bubble) {
-        bubble.x = x;
-        bubble.y = y - (TILE_SIZE * SCALE) / 2 - 14;
+        this.placeLabel(bubble, x, y - (TILE_SIZE * SCALE) / 2, 0, -14);
       }
       // Speech wins the space above the head; the thought bubble yields to it.
       this.updateThoughtBubble(entity.entityId, x, y, entity.alive && !bubble);
@@ -1202,14 +1198,16 @@ export class GameScene extends Phaser.Scene {
     this.syncUrl();
 
     // Update position display
-    if (this.positionText) {
+    {
       const cam = this.cameras.main;
       const centerX = cam.scrollX + cam.width / 2;
       const centerY = cam.scrollY + cam.height / 2;
       const tileX = Math.floor(centerX / (TILE_SIZE * SCALE));
       const tileY = Math.floor(centerY / (TILE_SIZE * SCALE));
       const followStatus = this.cameraFollowing ? ' [Following]' : ' [Free]';
-      this.positionText.setText(`Tile: (${tileX}, ${tileY}) Zoom: ${cam.zoom.toFixed(1)}x${followStatus}`);
+      this.hud?.setPosition(
+        `Tile: (${tileX}, ${tileY}) Zoom: ${cam.zoom.toFixed(1)}x${followStatus}`
+      );
     }
 
     // Camera panning
@@ -1291,6 +1289,7 @@ export class GameScene extends Phaser.Scene {
         color: SLEEP_MARKER_COLOR,
         backgroundColor: '#00000099',
         padding: { x: 3, y: 0 },
+        resolution: 2,
       });
       marker.setOrigin(0.5, 1);
       marker.setDepth(28);
@@ -1300,8 +1299,7 @@ export class GameScene extends Phaser.Scene {
     const collapsed = entity.maxFatigue > 0 && entity.fatigue >= entity.maxFatigue;
     marker.setColor(collapsed ? COLLAPSE_MARKER_COLOR : SLEEP_MARKER_COLOR);
     marker.setVisible(true);
-    marker.x = x - (TILE_SIZE * SCALE) / 3;
-    marker.y = y - (TILE_SIZE * SCALE) / 2 - 2;
+    this.placeLabel(marker, x, y - (TILE_SIZE * SCALE) / 2, -16, -2);
   }
 
   /**
@@ -1327,6 +1325,7 @@ export class GameScene extends Phaser.Scene {
         color: '#333333',
         backgroundColor: INVITATION_MARKER_COLOR,
         padding: { x: 4, y: 0 },
+        resolution: 2,
       });
       marker.setOrigin(0.5, 1);
       marker.setDepth(INVITATION_MARKER_DEPTH);
@@ -1334,8 +1333,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     marker.setVisible(true);
-    marker.x = x + (TILE_SIZE * SCALE) / 3;
-    marker.y = y - (TILE_SIZE * SCALE) / 2 - 16;
+    this.placeLabel(marker, x, y - (TILE_SIZE * SCALE) / 2, 16, -16);
   }
 
   /**

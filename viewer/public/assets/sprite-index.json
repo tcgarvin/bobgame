@@ -755,16 +755,6 @@
     "spritesheet": "Objects/Decor0.png"
   },
   "chest-closed": {
-    "animationFrames": [
-      {
-        "frame": 0,
-        "spritesheet": "Items/Chest0.png"
-      },
-      {
-        "frame": 0,
-        "spritesheet": "Items/Chest1.png"
-      }
-    ],
     "columns": 8,
     "frame": 0,
     "spritesheet": "Items/Chest0.png"
