@@ -45,7 +45,7 @@ from .llm import planner_model_settings, resolve_model_name
 from .stint import DriverChoice
 from .options import Option
 from .pathfinding import find_path
-from .pricing import usage_from_messages
+from .pricing import CostLedger, usage_from_messages
 from .tracelog import AgentTrace
 from .worldmodel import ConversationInfo, TickDigest, TranscriptLine, WorldModel
 
@@ -249,8 +249,11 @@ class ModelConverser:
     neither can touch the world.
     """
 
-    def __init__(self, model_name: str = "") -> None:
+    def __init__(self, model_name: str = "", ledger: CostLedger = CostLedger()) -> None:
         self.model_name = resolve_model_name(model_name)
+        # As in `Planner`: the agent passes its own ledger, the default is a
+        # sink for tests.
+        self.ledger = ledger
         settings = planner_model_settings(self.model_name)
         self.move_agent: Agent[None, ConverserMove] = Agent(
             self.model_name,
@@ -270,14 +273,16 @@ class ModelConverser:
     async def move(self, prompt: str) -> MoveCall:
         """Ask the model for one move."""
         result = await self.move_agent.run(prompt)
-        return MoveCall(result.output, usage_from_messages(result.new_messages()))
+        usage = usage_from_messages(result.new_messages())
+        self.ledger.add_converser(usage)
+        return MoveCall(result.output, usage)
 
     async def note(self, prompt: str) -> NoteCall:
         """Ask the model what to keep from the conversation."""
         result = await self.note_agent.run(prompt)
-        return NoteCall(
-            result.output.strip(), usage_from_messages(result.new_messages())
-        )
+        usage = usage_from_messages(result.new_messages())
+        self.ledger.add_converser(usage)
+        return NoteCall(result.output.strip(), usage)
 
 
 @dataclass

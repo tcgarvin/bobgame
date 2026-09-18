@@ -13,9 +13,13 @@ run was billed at.
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from pydantic_ai.messages import ModelMessage, ModelResponse
+
+from .jevclient import JevClient, JevDecision
 
 # $42 per billion input tokens, the price Jev is billed at.
 JEV_USD_PER_MILLION_INPUT_TOKENS = 0.042
@@ -86,3 +90,81 @@ def pricing_payload(planner_model: str) -> dict[str, Any]:
         "jev_usd_per_million_input_tokens": JEV_USD_PER_MILLION_INPUT_TOKENS,
         "planner_model": planner_model,
     }
+
+
+@dataclass
+class CostLedger:
+    """What one agent process has spent since it started, in US dollars.
+
+    Mutable on purpose: there is one ledger per agent, every model call adds to
+    it, and `as_json()` is serialised into every status report so the viewer can
+    show live spend (docs/11_cost_accounting.md, "Live cost in the viewer").
+    Amounts are cumulative for this process, so a restarted agent starts at zero.
+    """
+
+    planner_usd: float = 0.0
+    converser_usd: float = 0.0
+    jev_usd: float = 0.0
+    planner_turns: int = 0
+    jev_calls: int = 0
+
+    def add_planner(self, usage: Mapping[str, Any]) -> None:
+        """Record one planner turn from its `usage` block."""
+        self.planner_usd += _usage_cost(usage)
+        self.planner_turns += 1
+
+    def add_converser(self, usage: Mapping[str, Any]) -> None:
+        """Record one converser call (a move or a closing note)."""
+        self.converser_usd += _usage_cost(usage)
+
+    def add_jev(self, input_tokens: int) -> None:
+        """Record one Jev call from its input token count."""
+        self.jev_usd += jev_cost_usd(input_tokens)
+        self.jev_calls += 1
+
+    def total_usd(self) -> float:
+        """Everything spent so far."""
+        return self.planner_usd + self.converser_usd + self.jev_usd
+
+    def as_json(self) -> str:
+        """The ledger as the JSON the status report carries."""
+        return json.dumps(
+            {
+                "planner_usd": round(self.planner_usd, COST_DECIMALS),
+                "converser_usd": round(self.converser_usd, COST_DECIMALS),
+                "jev_usd": round(self.jev_usd, COST_DECIMALS),
+                "total_usd": round(self.total_usd(), COST_DECIMALS),
+                "planner_turns": self.planner_turns,
+                "jev_calls": self.jev_calls,
+            }
+        )
+
+
+def _usage_cost(usage: Mapping[str, Any]) -> float:
+    """The dollar cost in a `usage` block, 0.0 when it carries none."""
+    cost = usage.get("cost_usd", 0.0)
+    if isinstance(cost, (int, float)):
+        return float(cost)
+    return 0.0
+
+
+class LedgerJevClient:
+    """A `JevClient` that adds every call it forwards to a `CostLedger`.
+
+    Wrapping the client once is how every Jev call - ordinary stints, reflex
+    stints and conversation sessions - is counted without touching each call
+    site. The wrapped client's owner keeps it and closes it; this wrapper owns
+    nothing, so it has nothing to close.
+    """
+
+    def __init__(self, client: JevClient, ledger: CostLedger) -> None:
+        self._client = client
+        self._ledger = ledger
+
+    async def decide(
+        self, state: Mapping[str, Any], options: Mapping[str, str]
+    ) -> JevDecision:
+        """Delegate the call, then bill it."""
+        decision = await self._client.decide(state, options)
+        self._ledger.add_jev(decision.input_tokens)
+        return decision

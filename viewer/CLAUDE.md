@@ -299,3 +299,24 @@ the `shout` channel get the same speech bubble as `local` ones.
   were unavailable in this pass, so the marker, lines and panels are checked
   by `tsc`/`vite build` and code reading only. `scripts/fake_replay_server.mjs`
   would be the place to add a scripted conversation object for a real check.
+
+## Live cost (docs/11_cost_accounting.md)
+
+- `agent_status` carries `cost` (`AgentCost`: `planner_usd`, `converser_usd`,
+  `jev_usd`, `total_usd`, `planner_turns`, `jev_calls`), the agent process's
+  cumulative spend. It is recorded with the run, so replay shows it unchanged.
+- `WorldState` keeps the latest cost per entity, a per-entity restart offset (a
+  `total_usd` that falls means the agent process restarted: the old value is
+  added to the offset so run totals never drop) and a history of
+  `(tick_id, summed total_usd)` points capped at `COST_HISTORY_SIZE` (600).
+  `getAgentCost(entityId)` and `getRunCost()` read them; the run cost carries
+  `usd_per_hour_recent` (last 150 ticks, null under 30 ticks of history) and
+  `usd_per_hour_average` (total over `tick_id * tick_duration_ms`). All three
+  are cleared with `agentStatuses` on a snapshot, which is what a seek sends.
+- `OverlayUI.refreshCost` writes `#cost-readout` next to the clock (`$0.11 ·
+  $1.36/h · planner $0.03 · Jev $0.08`, converser only when non-zero, a muted
+  `-` until the first report) and `renderStats` adds a "Spend" row. `formatUsd`
+  is the report's rule: four decimals under $1, two above.
+- `scripts/fake_replay_server.mjs` sends a synthetic ledger so the readout can
+  be seen without a real recording. Not verified in a browser in this pass:
+  `tsc`/`vite build` only.

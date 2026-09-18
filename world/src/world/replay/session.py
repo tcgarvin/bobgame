@@ -242,6 +242,7 @@ class ReplaySession:
                 "brief": status.get("brief", ""),
                 "planner_thought": status.get("planner_thought", ""),
                 "stint": status.get("stint"),
+                "cost": status.get("cost"),
             }
             for status in self.loader.agent_status_up_to(tick_id)
         ]
@@ -256,6 +257,7 @@ class ReplaySession:
                 "brief": status.get("brief", ""),
                 "planner_thought": status.get("planner_thought", ""),
                 "stint": status.get("stint"),
+                "cost": status.get("cost"),
             }
             for status in self.loader.agent_status.get(tick_id, [])
         ]

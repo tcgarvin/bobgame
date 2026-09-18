@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -16,11 +17,15 @@ from pydantic_ai.usage import RequestUsage
 
 from agents.jev_agent.pricing import (
     JEV_USD_PER_MILLION_INPUT_TOKENS,
+    CostLedger,
+    LedgerJevClient,
     jev_cost_usd,
     pricing_payload,
     usage_from_messages,
 )
 from agents.jev_agent.tracelog import AgentTrace
+
+from helpers import FakeJevClient
 
 
 def response(
@@ -149,3 +154,73 @@ def test_the_pricing_path_sits_beside_the_reflex_file(tmp_path: Path) -> None:
     assert trace.pricing_path == trace.reflex_path.parent / "pricing.json"
     trace.pricing_path.write_text(json.dumps(pricing_payload("test")))
     assert json.loads(trace.pricing_path.read_text())["planner_model"] == "test"
+
+
+# -- the cost ledger ---------------------------------------------------------
+
+
+def test_the_ledger_sums_planner_converser_and_jev_spending() -> None:
+    ledger = CostLedger()
+
+    ledger.add_planner({"cost_usd": 0.004})
+    ledger.add_planner({"cost_usd": 0.0009})
+    ledger.add_converser({"cost_usd": 0.0002})
+    ledger.add_jev(1_000_000)
+
+    assert ledger.planner_usd == pytest.approx(0.0049)
+    assert ledger.planner_turns == 2
+    assert ledger.converser_usd == pytest.approx(0.0002)
+    assert ledger.jev_usd == pytest.approx(JEV_USD_PER_MILLION_INPUT_TOKENS)
+    assert ledger.jev_calls == 1
+    assert ledger.total_usd() == pytest.approx(0.0051 + 0.042)
+
+
+def test_a_usage_block_without_a_cost_adds_nothing_but_still_counts_a_turn() -> None:
+    ledger = CostLedger()
+
+    ledger.add_planner({"input_tokens": 100, "cost_missing": True})
+
+    assert ledger.planner_usd == 0.0
+    assert ledger.planner_turns == 1
+
+
+def test_the_ledger_json_carries_the_total_rounded_to_eight_decimals() -> None:
+    ledger = CostLedger()
+    ledger.add_planner({"cost_usd": 0.001234567891})
+    ledger.add_jev(123)
+
+    payload = json.loads(ledger.as_json())
+
+    assert payload == {
+        "planner_usd": 0.00123457,
+        "converser_usd": 0.0,
+        "jev_usd": jev_cost_usd(123),
+        "total_usd": round(0.001234567891 + jev_cost_usd(123), 8),
+        "planner_turns": 1,
+        "jev_calls": 1,
+    }
+
+
+def test_an_empty_ledger_reports_zeroes() -> None:
+    assert json.loads(CostLedger().as_json()) == {
+        "planner_usd": 0.0,
+        "converser_usd": 0.0,
+        "jev_usd": 0.0,
+        "total_usd": 0.0,
+        "planner_turns": 0,
+        "jev_calls": 0,
+    }
+
+
+async def test_the_ledger_client_bills_every_call_it_forwards() -> None:
+    inner = FakeJevClient(default_action="wait")
+    ledger = CostLedger()
+    client = LedgerJevClient(inner, ledger)
+
+    first = await client.decide({"tick": 1}, {"wait": "do nothing"})
+    await client.decide({"tick": 2}, {"wait": "do nothing"})
+
+    assert first.action == "wait"
+    assert len(inner.calls) == 2, "the wrapper delegates every call"
+    assert ledger.jev_calls == 2
+    assert ledger.jev_usd == pytest.approx(2 * jev_cost_usd(first.input_tokens))

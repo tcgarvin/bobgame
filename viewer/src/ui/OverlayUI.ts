@@ -12,6 +12,7 @@
 
 import type { InterpolatedEntity, TrackedObject, WorldState } from '../network';
 import type {
+  AgentCost,
   AgentDetailMessage,
   AgentStint,
   PlannerTurnEvent,
@@ -47,6 +48,24 @@ const TIRED_FATIGUE = 60;
 export function fatigueState(fatigue: number, maxFatigue: number): string {
   if (maxFatigue > 0 && fatigue >= maxFatigue) return 'exhausted';
   return fatigue >= TIRED_FATIGUE ? 'tired' : 'fresh';
+}
+
+/**
+ * Dollars the way the cost report prints them (docs/11_cost_accounting.md):
+ * four decimals under $1, two above.
+ */
+export function formatUsd(usd: number): string {
+  const decimals = Math.abs(usd) < 1 ? 4 : 2;
+  return `$${usd.toFixed(decimals)}`;
+}
+
+/** `$0.0074 · planner $0.0049 · Jev $0.0025 (1 turn, 60 Jev calls)`. */
+export function formatAgentCost(cost: AgentCost): string {
+  const parts = [formatUsd(cost.total_usd), `planner ${formatUsd(cost.planner_usd)}`];
+  if (cost.converser_usd > 0) parts.push(`converser ${formatUsd(cost.converser_usd)}`);
+  parts.push(`Jev ${formatUsd(cost.jev_usd)}`);
+  const turns = `${cost.planner_turns} turn${cost.planner_turns === 1 ? '' : 's'}`;
+  return `${parts.join(' · ')} (${turns}, ${cost.jev_calls} Jev calls)`;
 }
 
 /** How long to wait before re-requesting detail while playback runs. */
@@ -96,6 +115,7 @@ export class OverlayUI {
   private picker: HTMLSelectElement;
   private followIndicator: HTMLElement;
   private clockEl: HTMLElement;
+  private costEl: HTMLElement;
   private panel: HTMLElement;
   private nameEl: HTMLElement;
   private modeEl: HTMLElement;
@@ -124,6 +144,7 @@ export class OverlayUI {
     this.picker = requireElement<HTMLSelectElement>('entity-picker');
     this.followIndicator = requireElement('follow-indicator');
     this.clockEl = requireElement('clock-readout');
+    this.costEl = requireElement('cost-readout');
     this.panel = requireElement('agent-panel');
     this.nameEl = requireElement('ap-name');
     this.modeEl = requireElement('ap-mode');
@@ -170,6 +191,7 @@ export class OverlayUI {
   /** Rebuild the picker options and the panel contents. */
   refresh(): void {
     this.refreshClock();
+    this.refreshCost();
     this.refreshPicker();
     this.refreshPanel();
   }
@@ -191,6 +213,28 @@ export class OverlayUI {
     this.clockEl.textContent = `day ${clock.day} · ${clock.tick_of_day}/${clock.day_length} · ${
       clock.night ? 'night' : 'day'
     }`;
+  }
+
+  /**
+   * `$0.11 · $1.36/h · planner $0.03 · Jev $0.08` for the whole run, muted
+   * until the first cost report arrives. The converser is shown only when it
+   * has spent something, to keep the line short.
+   */
+  private refreshCost(): void {
+    const cost = this.worldState.getRunCost();
+    if (!cost) {
+      this.costEl.textContent = '-';
+      this.costEl.classList.add('muted');
+      return;
+    }
+    this.costEl.classList.remove('muted');
+    const parts = [formatUsd(cost.total_usd)];
+    const rate = cost.usd_per_hour_recent ?? cost.usd_per_hour_average;
+    if (rate !== null) parts.push(`${formatUsd(rate)}/h`);
+    parts.push(`planner ${formatUsd(cost.planner_usd)}`);
+    if (cost.converser_usd > 0) parts.push(`converser ${formatUsd(cost.converser_usd)}`);
+    parts.push(`Jev ${formatUsd(cost.jev_usd)}`);
+    this.costEl.textContent = parts.join(' · ');
   }
 
   private refreshPicker(): void {
@@ -371,6 +415,10 @@ export class OverlayUI {
     }
     rows.push(this.kvRow('Wielded', entity.wielded || 'nothing'));
     rows.push(this.kvRow('Alive', entity.alive ? 'yes' : 'no'));
+    const cost = this.worldState.getAgentCost(entity.entityId);
+    if (cost) {
+      rows.push(this.kvRow('Spend', formatAgentCost(cost)));
+    }
     this.statsEl.replaceChildren(...rows);
   }
 

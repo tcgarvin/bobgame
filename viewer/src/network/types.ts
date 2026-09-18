@@ -196,6 +196,20 @@ export interface AgentStint {
 
 export type AgentMode = 'planning' | 'stint' | 'idle' | string;
 
+/**
+ * Cumulative spend reported by one agent process (docs/11_cost_accounting.md).
+ * All amounts are US dollars since that process started, so a restarted agent
+ * starts again from zero.
+ */
+export interface AgentCost {
+  planner_usd: number;
+  converser_usd: number;
+  jev_usd: number;
+  total_usd: number;
+  planner_turns: number;
+  jev_calls: number;
+}
+
 export interface AgentStatusMessage {
   type: 'agent_status';
   entity_id: string;
@@ -203,6 +217,8 @@ export interface AgentStatusMessage {
   brief: string;
   planner_thought: string;
   stint: AgentStint | null;
+  /** Cumulative spend for this agent, or null on a run without cost data. */
+  cost: AgentCost | null;
   /** Replay only: the tick this status was recorded at. */
   tick_id?: number;
 }

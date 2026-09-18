@@ -412,7 +412,29 @@ function agentStatus(entityId, tick) {
       `The chest is still light on wood and the oak stand is four tiles north. ` +
       `Keeping ${entityId} on the axe for another stint (tick ${tick}).`,
     stint: stintRecord(entityId, tick),
+    cost: fakeCost(entityId, tick),
   };
+}
+
+// A plausible cumulative ledger: Jev every tick, a planner turn every 40.
+function fakeCost(entityId, tick) {
+  const seed = entityId.charCodeAt(0) % 5;
+  const jevCalls = tick + seed;
+  const plannerTurns = Math.floor(tick / 40) + 1;
+  const jevUsd = jevCalls * 0.00004;
+  const plannerUsd = plannerTurns * 0.0049;
+  return {
+    planner_usd: round8(plannerUsd),
+    converser_usd: 0,
+    jev_usd: round8(jevUsd),
+    total_usd: round8(plannerUsd + jevUsd),
+    planner_turns: plannerTurns,
+    jev_calls: jevCalls,
+  };
+}
+
+function round8(value) {
+  return Math.round(value * 1e8) / 1e8;
 }
 
 function agentDetail(entityId, tick) {

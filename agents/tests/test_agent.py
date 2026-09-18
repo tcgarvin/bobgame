@@ -818,3 +818,25 @@ async def test_a_sleeper_holds_the_wake_and_refuses_other_queued_actions(
 
     assert picked is wake
     assert move.future.result() == "move north -> failed: asleep"
+
+
+async def test_the_status_report_carries_the_running_cost(tmp_path: Path) -> None:
+    jev = FakeJevClient(default_action="wait")
+    world = FakeWorldClient(observations(4))
+    agent = build_agent(world, jev, tmp_path)
+
+    async def plan() -> None:
+        await agent.run_stint(
+            Brief(instruction="Stand guard", success_condition="never", max_ticks=2)
+        )
+        await asyncio.sleep(3600)
+
+    agent.planner.run = plan  # type: ignore[method-assign]
+    await agent.run()
+
+    costs = [json.loads(status[4]) for status in world.statuses]
+    assert costs, "every status report carries a cost block"
+    assert costs[-1]["jev_calls"] == len(jev.calls) == 2
+    assert costs[-1]["jev_usd"] > costs[0]["jev_usd"], "Jev ticks cost money"
+    assert costs[0]["jev_calls"] == 1, "the first report follows the first Jev tick"
+    assert costs[-1]["total_usd"] == costs[-1]["jev_usd"]

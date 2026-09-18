@@ -196,6 +196,7 @@ class WorldClient:
         brief: str,
         planner_thought: str,
         stint_json: str,
+        cost_json: str = "",
     ) -> bool:
         """Push the agent's internal state to the world for the viewer."""
         response = await asyncio.to_thread(
@@ -207,6 +208,7 @@ class WorldClient:
                 brief=brief,
                 planner_thought=planner_thought,
                 stint_json=stint_json,
+                cost_json=cost_json,
             ),
         )
         return bool(response.accepted)

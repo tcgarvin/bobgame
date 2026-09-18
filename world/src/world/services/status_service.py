@@ -41,7 +41,7 @@ class AgentStatusServiceServicer(world_pb2_grpc.AgentStatusServiceServicer):
     def ReportStatus(
         self, request: pb.AgentStatusReport, context: grpc.ServicerContext
     ) -> pb.AgentStatusAck:
-        """Validate the lease, parse the stint payload, broadcast to viewers."""
+        """Validate the lease, parse the stint and cost payloads, broadcast to viewers."""
         if not self.lease_manager.is_valid_lease(request.lease_id, request.entity_id):
             logger.debug(
                 "agent_status_rejected_invalid_lease",
@@ -61,6 +61,17 @@ class AgentStatusServiceServicer(world_pb2_grpc.AgentStatusServiceServicer):
                 )
                 return pb.AgentStatusAck(accepted=False)
 
+        cost: Any = None
+        if request.cost_json:
+            try:
+                cost = json.loads(request.cost_json)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "agent_status_invalid_cost_json",
+                    entity_id=request.entity_id,
+                    error=str(exc),
+                )
+
         status = {
             "type": "agent_status",
             "entity_id": request.entity_id,
@@ -68,6 +79,7 @@ class AgentStatusServiceServicer(world_pb2_grpc.AgentStatusServiceServicer):
             "brief": request.brief,
             "planner_thought": request.planner_thought,
             "stint": stint,
+            "cost": cost,
         }
         self.broadcast(status)
         self.record(status)

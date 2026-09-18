@@ -101,3 +101,73 @@ at the price in `pricing.json`, or at the current constant when that file is
 missing, and report planner cost as unavailable rather than zero.
 
 Formatting: dollars are printed with four decimals below $1 and two above.
+
+## Live cost in the viewer
+
+The viewer shows the run's spend and run rate next to the clock, and each
+settler's spend in the agent panel. The data rides on the existing agent
+status report, so it is recorded with the run and works in replay unchanged.
+
+### Agent -> world: `AgentStatusReport.cost_json` (field 7)
+
+Each agent keeps a `CostLedger` (in `pricing.py`) of everything it has spent
+since its process started, and serialises it into every status report:
+
+```json
+{"planner_usd": 0.0049, "converser_usd": 0.0, "jev_usd": 0.0025,
+ "total_usd": 0.0074, "planner_turns": 1, "jev_calls": 60}
+```
+
+- `planner_usd` grows by `usage["cost_usd"]` after each planner turn
+  (`turn_end` and `tool_budget_reached` alike).
+- `converser_usd` grows by the converser's move and note usage.
+- `jev_usd` grows by `jev_cost_usd(input_tokens)` after every Jev call, in
+  every place Jev is called (stints, reflex stints, conversation sessions).
+  Wrap the `JevClient` once (`LedgerJevClient`) rather than editing each call
+  site.
+- Values are rounded to 8 decimals. Amounts are cumulative for this agent
+  process; a restarted agent starts again from zero, which the viewer can
+  detect as a drop and handles by adding the new series on top of the last
+  value seen (see below).
+
+The status report is deduplicated against the previous one; cost is part of
+that comparison, so a Jev tick that spent money always produces a report.
+
+### World: pass-through and recording
+
+`status_service.py` parses `cost_json` the same way as `stint_json` (invalid
+JSON is logged and dropped, the report still goes out) and puts it under
+`"cost"` on the `agent_status` viewer message (`null` when absent, like
+`stint`). `recording.py` and the replay loader need no change: they record and
+replay the dict as is.
+
+### Viewer
+
+`AgentStatusMessage` gains `cost: AgentCost | null`. `WorldState` keeps, per
+entity, the latest cost and a small history of `(tick_id, total_usd)` points,
+and exposes:
+
+- `getAgentCost(entityId)`: the latest cost for one settler.
+- `getRunCost()`: `{planner_usd, converser_usd, jev_usd, total_usd}` summed
+  over every entity's latest cost, plus `usd_per_hour_recent` computed from
+  the summed total over the last 150 ticks of history (using
+  `tick_duration_ms` to turn ticks into hours; `null` until at least 30
+  ticks of history exist) and `usd_per_hour_average` (= total over
+  `tick_id * tick_duration_ms`).
+- A restart (an entity's `total_usd` falling below its previous value) adds
+  the previous value to a per-entity offset so sums keep rising. Seeking
+  backwards in replay clears history and offsets (`WorldState` already clears
+  `agentStatuses` on a seek: do the same there).
+
+UI, in `index.html` and `OverlayUI.ts`:
+
+- Next to the clock readout, a `cost-readout` element:
+  `$0.11 · $1.36/h · planner $0.03 · Jev $0.08` (converser is shown only when
+  it is non-zero, to keep the line short). It is `-` and muted until the first
+  cost arrives. The rate shown is the recent rate, falling back to the average
+  when the recent one is not yet available.
+- In the agent panel's stats block, one line: `spend $0.0074 · planner
+  $0.0049 · Jev $0.0025 (1 turn, 60 Jev calls)`.
+
+Dollar formatting follows the same rule as the report: four decimals under
+$1, two above.

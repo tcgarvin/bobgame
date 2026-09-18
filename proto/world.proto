@@ -455,6 +455,7 @@ message AgentStatusReport {
   string brief = 4;           // current brief text ("" when planning)
   string planner_thought = 5; // latest planner reasoning summary
   string stint_json = 6;      // JSON: last Jev decision {tick, action, probabilities, eject, ...}
+  string cost_json = 7;       // JSON: cumulative spend {planner_usd, converser_usd, jev_usd, total_usd, ...} (docs/11)
 }
 
 message AgentStatusAck {

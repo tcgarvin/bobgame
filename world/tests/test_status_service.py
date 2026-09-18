@@ -46,6 +46,7 @@ def test_accepts_and_broadcasts_a_report(
             brief="gather wood",
             planner_thought="we need an axe",
             stint_json='{"tick": 4, "action": "extract:tree_9"}',
+            cost_json='{"total_usd": 0.0074, "planner_usd": 0.0049}',
         ),
         None,
     )
@@ -59,6 +60,7 @@ def test_accepts_and_broadcasts_a_report(
             "brief": "gather wood",
             "planner_thought": "we need an axe",
             "stint": {"tick": 4, "action": "extract:tree_9"},
+            "cost": {"total_usd": 0.0074, "planner_usd": 0.0049},
         }
     ]
 
@@ -75,6 +77,7 @@ def test_empty_stint_json_becomes_null(
 
     assert ack.accepted is True
     assert broadcasts[0]["stint"] is None
+    assert broadcasts[0]["cost"] is None
 
 
 def test_rejects_invalid_lease(
@@ -119,3 +122,25 @@ def test_rejects_invalid_stint_json(
 
     assert ack.accepted is False
     assert broadcasts == []
+
+
+def test_invalid_cost_json_is_dropped_but_report_goes_out(
+    service: AgentStatusServiceServicer,
+    lease: Lease,
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    ack = service.ReportStatus(
+        pb.AgentStatusReport(
+            lease_id=lease.lease_id,
+            entity_id="ada",
+            mode="stint",
+            brief="gather wood",
+            cost_json="{not json",
+        ),
+        None,
+    )
+
+    assert ack.accepted is True
+    assert len(broadcasts) == 1
+    assert broadcasts[0]["cost"] is None
+    assert broadcasts[0]["brief"] == "gather wood"

@@ -73,6 +73,14 @@
       #clock-readout.night {
         color: #8fb0ff;
       }
+      #cost-readout {
+        color: #c9c9dd;
+        white-space: nowrap;
+      }
+      /* The readouts start as a muted '-' and colour up once data arrives. */
+      #entity-picker-box .muted {
+        color: #8a8a9a;
+      }
 
       #agent-panel {
         position: absolute;
@@ -346,6 +354,7 @@
         </select>
         <span id="follow-indicator" class="off">follow off</span>
         <span id="clock-readout" class="muted">-</span>
+        <span id="cost-readout" class="muted">-</span>
       </div>
       <div id="agent-panel" class="panel">
         <h2 id="ap-name">No entity selected</h2>

@@ -61,7 +61,7 @@ from .stint import (
     StintDriver,
     StintReport,
 )
-from .pricing import pricing_payload
+from .pricing import CostLedger, LedgerJevClient, pricing_payload
 from .tracelog import AgentTrace, resolve_log_root
 from .worldmodel import TickDigest, WorldModel
 
@@ -220,7 +220,10 @@ class JevAgent:
         converser: Converser | None = None,
     ) -> None:
         self.world = world
-        self.jev = jev
+        self.ledger = CostLedger()
+        # Wrapped once here, so every Jev call - ordinary stints, reflex stints
+        # and conversation sessions - is billed to this agent's ledger.
+        self.jev: JevClient = LedgerJevClient(jev, self.ledger)
         self.entity_id = entity_id
         self.log_root = resolve_log_root() if log_root is None else log_root
         self.trace = AgentTrace(entity_id, self.log_root)
@@ -228,10 +231,16 @@ class JevAgent:
 
         self.mode = MODE_IDLE
         self.planner = Planner(
-            self, entity_id, model_name=planner_model, trace=self.trace
+            self,
+            entity_id,
+            model_name=planner_model,
+            trace=self.trace,
+            ledger=self.ledger,
         )
         self.converser: Converser = (
-            ModelConverser(planner_model) if converser is None else converser
+            ModelConverser(planner_model, self.ledger)
+            if converser is None
+            else converser
         )
 
         _write_pricing(self.trace, self.planner.model_name)
@@ -260,7 +269,7 @@ class JevAgent:
         self._wake_waiters: list[_WakeWaiter] = []
         self._background: set[asyncio.Task[None]] = set()
         self._pending_thought = ""
-        self._last_status = ("", "", "", "")
+        self._last_status = ("", "", "", "", "")
         self._running = False
 
     # -- AgentBridge --------------------------------------------------------
@@ -867,12 +876,19 @@ class JevAgent:
                 "in conversation",
                 self.planner.last_thought,
                 session.status_json(),
+                self.ledger.as_json(),
             )
         else:
             stint = self._reflex_stint or self._active_stint
             brief = stint.brief.summary() if stint is not None else ""
             stint_json = stint.status_json() if stint is not None else ""
-            status = (self.mode, brief, self.planner.last_thought, stint_json)
+            status = (
+                self.mode,
+                brief,
+                self.planner.last_thought,
+                stint_json,
+                self.ledger.as_json(),
+            )
         if status == self._last_status:
             return
         self._last_status = status

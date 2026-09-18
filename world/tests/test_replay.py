@@ -100,6 +100,7 @@ def build_run(runs_dir: Path) -> Path:
             "brief": "pick berries",
             "planner_thought": "hungry",
             "stint": {"tick": 1, "action": "collect:bush_1"},
+            "cost": {"total_usd": 0.0074, "jev_usd": 0.0025},
         }
     )
 
@@ -382,6 +383,7 @@ class TestReplayWebSocketService:
         assert status["entity_id"] == "alice"
         assert status["brief"] == "pick berries"
         assert status["stint"] == {"tick": 1, "action": "collect:bush_1"}
+        assert status["cost"] == {"total_usd": 0.0074, "jev_usd": 0.0025}
 
     async def test_unknown_run_replies_with_error(self, replay_client: Any) -> None:
         await replay_client.send({"type": "open_run", "run_id": "nope"})

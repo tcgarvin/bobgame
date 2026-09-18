@@ -595,20 +595,22 @@ class SubmitIntentResponse(_message.Message):
     def __init__(self, accepted: bool = ..., reason: _Optional[str] = ...) -> None: ...
 
 class AgentStatusReport(_message.Message):
-    __slots__ = ("lease_id", "entity_id", "mode", "brief", "planner_thought", "stint_json")
+    __slots__ = ("lease_id", "entity_id", "mode", "brief", "planner_thought", "stint_json", "cost_json")
     LEASE_ID_FIELD_NUMBER: _ClassVar[int]
     ENTITY_ID_FIELD_NUMBER: _ClassVar[int]
     MODE_FIELD_NUMBER: _ClassVar[int]
     BRIEF_FIELD_NUMBER: _ClassVar[int]
     PLANNER_THOUGHT_FIELD_NUMBER: _ClassVar[int]
     STINT_JSON_FIELD_NUMBER: _ClassVar[int]
+    COST_JSON_FIELD_NUMBER: _ClassVar[int]
     lease_id: str
     entity_id: str
     mode: str
     brief: str
     planner_thought: str
     stint_json: str
-    def __init__(self, lease_id: _Optional[str] = ..., entity_id: _Optional[str] = ..., mode: _Optional[str] = ..., brief: _Optional[str] = ..., planner_thought: _Optional[str] = ..., stint_json: _Optional[str] = ...) -> None: ...
+    cost_json: str
+    def __init__(self, lease_id: _Optional[str] = ..., entity_id: _Optional[str] = ..., mode: _Optional[str] = ..., brief: _Optional[str] = ..., planner_thought: _Optional[str] = ..., stint_json: _Optional[str] = ..., cost_json: _Optional[str] = ...) -> None: ...
 
 class AgentStatusAck(_message.Message):
     __slots__ = ("accepted",)

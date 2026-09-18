@@ -5,6 +5,7 @@
  */
 
 import type {
+  AgentCost,
   AgentDetailMessage,
   AgentStatusMessage,
   EntityLogMessage,
@@ -47,6 +48,60 @@ import {
 
 /** How many action/utterance log entries are kept per entity. */
 export const ENTITY_LOG_SIZE = 10;
+
+/** How many (tick, total spend) points the run cost history keeps. */
+export const COST_HISTORY_SIZE = 600;
+
+/** Window, in ticks, the recent spend rate is measured over. */
+const COST_RECENT_WINDOW_TICKS = 150;
+
+/** Ticks of history needed before a recent rate is reported at all. */
+const COST_MIN_WINDOW_TICKS = 30;
+
+const MS_PER_HOUR = 3_600_000;
+
+/** One point in the run's spend history. */
+export interface CostPoint {
+  tickId: number;
+  totalUsd: number;
+}
+
+/**
+ * Run-wide spend: every settler's latest cost summed, plus spend rates.
+ * The rates are null until there is enough history to measure them.
+ */
+export interface RunCost {
+  planner_usd: number;
+  converser_usd: number;
+  jev_usd: number;
+  total_usd: number;
+  usd_per_hour_recent: number | null;
+  usd_per_hour_average: number | null;
+}
+
+/** Read a cost payload from the wire, defaulting every missing number. */
+function normaliseCost(raw: Partial<AgentCost> | null | undefined): AgentCost | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const number = (value: unknown): number =>
+    typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  return {
+    planner_usd: number(raw.planner_usd),
+    converser_usd: number(raw.converser_usd),
+    jev_usd: number(raw.jev_usd),
+    total_usd: number(raw.total_usd),
+    planner_turns: number(raw.planner_turns),
+    jev_calls: number(raw.jev_calls),
+  };
+}
+
+const ZERO_COST: AgentCost = {
+  planner_usd: 0,
+  converser_usd: 0,
+  jev_usd: 0,
+  total_usd: 0,
+  planner_turns: 0,
+  jev_calls: 0,
+};
 
 /**
  * Entity with interpolation state for smooth rendering
@@ -154,6 +209,10 @@ export class WorldState {
   private objects: Map<string, TrackedObject> = new Map();
   private entityLogs: Map<string, EntityLogEntry[]> = new Map();
   private agentStatuses: Map<string, AgentStatusMessage> = new Map();
+  private agentCosts: Map<string, AgentCost> = new Map();
+  /** Spend an agent process booked before its current process restarted. */
+  private costOffsets: Map<string, AgentCost> = new Map();
+  private costHistory: CostPoint[] = [];
   private agentDetails: Map<string, AgentDetailMessage> = new Map();
   private selectedEntityId: string = '';
   private selectedObjectId: string = '';
@@ -294,6 +353,52 @@ export class WorldState {
     const log = this.entityLogs.get(entityId);
     if (!log) return [];
     return log.slice().reverse();
+  }
+
+  /** Latest reported spend for an entity, or null if none has arrived. */
+  getAgentCost(entityId: string): AgentCost | null {
+    const cost = this.agentCosts.get(entityId);
+    return cost ? { ...cost } : null;
+  }
+
+  /**
+   * Run-wide spend, or null until the first cost report arrives.
+   *
+   * `usd_per_hour_recent` comes from the last COST_RECENT_WINDOW_TICKS ticks of
+   * history and is null until COST_MIN_WINDOW_TICKS of it exist;
+   * `usd_per_hour_average` spreads the total over the whole run so far.
+   */
+  getRunCost(): RunCost | null {
+    if (this.agentCosts.size === 0) return null;
+    const summed = this.sumCosts();
+    return {
+      planner_usd: summed.planner_usd,
+      converser_usd: summed.converser_usd,
+      jev_usd: summed.jev_usd,
+      total_usd: summed.total_usd,
+      usd_per_hour_recent: this.recentSpendRate(),
+      usd_per_hour_average: this.averageSpendRate(summed.total_usd),
+    };
+  }
+
+  private recentSpendRate(): number | null {
+    if (this.costHistory.length < 2) return null;
+    const newest = this.costHistory[this.costHistory.length - 1];
+    let oldest = newest;
+    for (let i = this.costHistory.length - 1; i >= 0; i--) {
+      const point = this.costHistory[i];
+      if (newest.tickId - point.tickId > COST_RECENT_WINDOW_TICKS) break;
+      oldest = point;
+    }
+    const ticks = newest.tickId - oldest.tickId;
+    if (ticks < COST_MIN_WINDOW_TICKS || this.tickDurationMs <= 0) return null;
+    return ((newest.totalUsd - oldest.totalUsd) * MS_PER_HOUR) / (ticks * this.tickDurationMs);
+  }
+
+  private averageSpendRate(totalUsd: number): number | null {
+    const elapsedMs = this.currentTickId * this.tickDurationMs;
+    if (elapsedMs <= 0) return null;
+    return (totalUsd * MS_PER_HOUR) / elapsedMs;
   }
 
   /** Latest agent status for an entity, or null if none has arrived. */
@@ -483,6 +588,9 @@ export class WorldState {
     this.entities.clear();
     this.entityLogs.clear();
     this.agentStatuses.clear();
+    this.agentCosts.clear();
+    this.costOffsets.clear();
+    this.costHistory = [];
 
     // Clear existing objects
     for (const obj of this.objects.values()) {
@@ -764,7 +872,69 @@ export class WorldState {
 
   private handleAgentStatus(msg: AgentStatusMessage): void {
     this.agentStatuses.set(msg.entity_id, msg);
+    const cost = normaliseCost(msg.cost);
+    if (cost) {
+      this.recordAgentCost(msg.entity_id, cost, msg.tick_id ?? this.currentTickId);
+    }
     this.stateUpdateHandler?.();
+  }
+
+  /**
+   * Store one agent's latest cost and extend the run's spend history.
+   *
+   * An agent process that restarted reports a total below the one it last
+   * reported; the value it reached is moved into a per-entity offset so the
+   * run total never goes backwards.
+   */
+  private recordAgentCost(entityId: string, cost: AgentCost, tickId: number): void {
+    const previous = this.agentCosts.get(entityId);
+    if (previous && cost.total_usd < previous.total_usd) {
+      const offset = this.costOffsets.get(entityId) ?? ZERO_COST;
+      this.costOffsets.set(entityId, {
+        planner_usd: offset.planner_usd + previous.planner_usd,
+        converser_usd: offset.converser_usd + previous.converser_usd,
+        jev_usd: offset.jev_usd + previous.jev_usd,
+        total_usd: offset.total_usd + previous.total_usd,
+        planner_turns: offset.planner_turns + previous.planner_turns,
+        jev_calls: offset.jev_calls + previous.jev_calls,
+      });
+    }
+    this.agentCosts.set(entityId, cost);
+    this.pushCostPoint(tickId, this.sumCosts().total_usd);
+  }
+
+  /**
+   * Add the summed total for `tickId` to the history.
+   *
+   * Replay delivers several statuses for one tick and, after a backwards seek,
+   * statuses for ticks already in the history, so the point for a tick is
+   * replaced and anything after it dropped.
+   */
+  private pushCostPoint(tickId: number, totalUsd: number): void {
+    while (this.costHistory.length > 0) {
+      const last = this.costHistory[this.costHistory.length - 1];
+      if (last.tickId < tickId) break;
+      this.costHistory.pop();
+    }
+    this.costHistory.push({ tickId, totalUsd });
+    if (this.costHistory.length > COST_HISTORY_SIZE) {
+      this.costHistory.splice(0, this.costHistory.length - COST_HISTORY_SIZE);
+    }
+  }
+
+  /** Every entity's latest cost plus its restart offsets, summed. */
+  private sumCosts(): AgentCost {
+    const total = { ...ZERO_COST };
+    for (const [entityId, cost] of this.agentCosts) {
+      const offset = this.costOffsets.get(entityId) ?? ZERO_COST;
+      total.planner_usd += cost.planner_usd + offset.planner_usd;
+      total.converser_usd += cost.converser_usd + offset.converser_usd;
+      total.jev_usd += cost.jev_usd + offset.jev_usd;
+      total.total_usd += cost.total_usd + offset.total_usd;
+      total.planner_turns += cost.planner_turns + offset.planner_turns;
+      total.jev_calls += cost.jev_calls + offset.jev_calls;
+    }
+    return total;
   }
 
   /**

@@ -63,7 +63,7 @@ from .options import (
     WOLF_ALERT_RADIUS,
     TravelState,
 )
-from .pricing import usage_from_messages
+from .pricing import CostLedger, usage_from_messages
 from .stint import Brief, StintDriver, StintReport
 from .tracelog import AgentTrace
 from .worldmodel import HeardUtterance, WorldModel
@@ -1305,8 +1305,12 @@ class Planner:
         *,
         model_name: str = "",
         trace: AgentTrace,
+        ledger: CostLedger = CostLedger(),
     ) -> None:
         self.model_name = resolve_model_name(model_name)
+        # The agent always passes its own ledger; the default is a sink for
+        # tests and scripts that build a planner on its own.
+        self.ledger = ledger
         self.bridge = bridge
         self.entity_id = entity_id
         self.trace = trace
@@ -1426,12 +1430,14 @@ class Planner:
         if self.last_thought:
             self.bridge.set_thought(self.last_thought)
         logger.info("planner_thought", entity_id=self.entity_id, text=self.last_thought)
+        usage = usage_from_messages(result.new_messages())
+        self.ledger.add_planner(usage)
         self._trace(
             "turn_end",
             thought=self.last_thought,
             tool_calls=self._tool_calls_this_turn,
             duration_ms=int((time.monotonic() - started) * 1000),
-            usage=usage_from_messages(result.new_messages()),
+            usage=usage,
         )
         await self._recover_from_text_only_turn()
         return self.last_thought
@@ -1448,10 +1454,12 @@ class Planner:
         # length is still what went into the run: everything past it is what
         # this turn added, and what this turn's requests cost.
         added = run_messages[len(self.history) :]
+        usage = usage_from_messages(added)
+        self.ledger.add_planner(usage)
         self._trace(
             "tool_budget_reached",
             tool_calls=self._tool_calls_this_turn,
-            usage=usage_from_messages(added),
+            usage=usage,
         )
         self.history = trim_history(run_messages)
         self.last_thought = "Ran out of tool calls this turn; continuing."
