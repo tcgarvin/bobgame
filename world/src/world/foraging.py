@@ -11,14 +11,16 @@ from .items import (
     BUILDING_KINDS,
     DISMANTLE_WORK,
     EXTRACT_THRESHOLD,
-    EXTRACT_TOOL,
+    EXTRACT_TOOLS,
     EXTRACT_WORK_BARE,
-    EXTRACT_WORK_WITH_TOOL,
+    EXTRACT_WORK_BY_TOOL,
     EXTRACT_YIELD,
     EXTRACTABLE_TYPES,
+    VEIN_REQUIRED_TOOLS,
     default_remaining,
 )
 from .state import World, WorldObject
+from .sleep import is_tired
 from .stats import hunger_restored
 from .types import CollectIntent, EatIntent, ExtractIntent, is_same_or_adjacent
 
@@ -283,10 +285,31 @@ def object_remaining(obj_type: str, raw_remaining: str) -> int:
 
 
 def extract_work(wielded: str, object_type: str) -> int:
-    """Work units one extract action contributes."""
-    if wielded and wielded == EXTRACT_TOOL.get(object_type, ""):
-        return EXTRACT_WORK_WITH_TOOL
+    """Work units one extract action contributes when fresh.
+
+    A tool only helps on the objects it suits (axes on trees, pickaxes on rock,
+    clay and veins); the tier decides how much (docs/10, "Tools and tiers").
+    """
+    if wielded and wielded in EXTRACT_TOOLS.get(object_type, frozenset()):
+        return EXTRACT_WORK_BY_TOOL.get(wielded, EXTRACT_WORK_BARE)
     return EXTRACT_WORK_BARE
+
+
+def tired_work(work: int) -> int:
+    """Work units a tired settler gets out of `work` (docs/10, "Fatigue")."""
+    return max(1, work // 2)
+
+
+def missing_vein_tool(wielded: str, object_type: str) -> str:
+    """Failure detail when `wielded` cannot work this object, else "".
+
+    Ore veins need a pickaxe of a high enough tier; everything else in
+    EXTRACTABLE_TYPES can be worked bare-handed.
+    """
+    required = VEIN_REQUIRED_TOOLS.get(object_type, frozenset())
+    if not required or wielded in required:
+        return ""
+    return " or ".join(sorted(required))
 
 
 def process_extract_phase(
@@ -349,6 +372,7 @@ def _dismantle_object(
     object_id = obj.object_id
 
     for entity_id in workers:
+        # One unit per action; the tired penalty (half, minimum 1) is a no-op.
         progress += 1
         if progress < DISMANTLE_WORK:
             events.acted(
@@ -410,7 +434,12 @@ def _extract_from_object(
             events.acted(entity_id, "extract", False, f"{object_id} is depleted")
             continue
         entity = world.get_entity(entity_id)
-        progress += extract_work(entity.wielded, obj.object_type)
+        tools = missing_vein_tool(entity.wielded, obj.object_type)
+        if tools:
+            events.acted(entity_id, "extract", False, f"{object_id} needs a {tools}")
+            continue
+        work = extract_work(entity.wielded, obj.object_type)
+        progress += tired_work(work) if is_tired(entity) else work
         if progress >= EXTRACT_THRESHOLD:
             progress -= EXTRACT_THRESHOLD
             remaining -= 1

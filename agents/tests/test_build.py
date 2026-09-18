@@ -281,3 +281,13 @@ def test_summary_counts_what_happened() -> None:
     text = executor.summary()
     assert "BUILD road" in text
     assert "left to do: 3" in text
+
+
+def test_a_furnace_and_an_anvil_are_placeable_structures() -> None:
+    for kind in ("furnace", "anvil"):
+        plan = make_plan(
+            kind=kind, shape="tiles", start=(0, 0), end=(0, 0), explicit=[(12, 10)]
+        )
+        assert plan.tiles == ((12, 10),)
+        assert not plan.is_ground
+        assert not plan.blocks

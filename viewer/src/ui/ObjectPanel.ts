@@ -36,7 +36,13 @@ const BUILDING_TYPES = new Set([
   'chair',
   'table',
   'workshop_table',
+  // Crafting stations (docs/10_metal_and_sleep.md, section 1).
+  'furnace',
+  'anvil',
 ]);
+
+/** Stations that hold per-settler craft progress in `craft:<entity_id>`. */
+const STATION_TYPES = new Set(['workshop_table', 'furnace', 'anvil']);
 
 /** Ground-layer buildings: they lie under structures and never block. */
 const GROUND_LAYER_TYPES = new Set(['road', 'wood_floor', 'stone_floor']);
@@ -63,6 +69,8 @@ const RESOURCE_TYPES = new Set([
   'boulder',
   'reeds',
   'clay_deposit',
+  'copper_vein',
+  'iron_vein',
 ]);
 
 /** Object types that have something worth inspecting. */
@@ -73,6 +81,8 @@ export const INSPECTABLE_TYPES = new Set([
   'bush',
   'reeds',
   'clay_deposit',
+  'copper_vein',
+  'iron_vein',
   ...BUILDING_TYPES,
 ]);
 
@@ -120,6 +130,32 @@ function readProgress(obj: TrackedObject): number {
   if (raw === undefined || raw === '') return 0;
   const value = Number.parseInt(raw, 10);
   return Number.isNaN(value) ? 0 : value;
+}
+
+/**
+ * Per-settler craft progress on a station: state keys `craft:<entity_id>` hold
+ * `<recipe>:<done>` (docs/10_metal_and_sleep.md, section 1). Malformed values
+ * are skipped rather than guessed at.
+ */
+function readCraftProgress(
+  obj: TrackedObject
+): Array<{ entityId: string; recipe: string; done: string }> {
+  const rows: Array<{ entityId: string; recipe: string; done: string }> = [];
+  for (const [key, value] of Object.entries(obj.state)) {
+    if (!key.startsWith('craft:')) continue;
+    const entityId = key.slice('craft:'.length);
+    const separator = value.lastIndexOf(':');
+    if (separator <= 0) {
+      console.warn(`Object ${obj.objectId}: unreadable craft progress ${key}=${value}`);
+      continue;
+    }
+    rows.push({
+      entityId,
+      recipe: value.slice(0, separator),
+      done: value.slice(separator + 1),
+    });
+  }
+  return rows.sort((a, b) => a.entityId.localeCompare(b.entityId));
 }
 
 function readContents(obj: TrackedObject): Array<[string, number]> {
@@ -185,6 +221,15 @@ export class ObjectPanel {
         rows.push(this.kvRow('blocks', obj.objectType === 'door' ? 'wolves' : 'everyone'));
       }
       rows.push(this.kvRow('dismantling', `${readProgress(obj)} / ${DISMANTLE_WORK}`));
+      if (STATION_TYPES.has(obj.objectType)) {
+        const crafts = readCraftProgress(obj);
+        if (crafts.length > 0) {
+          rows.push(this.sectionLabel('Crafting'));
+          for (const craft of crafts) {
+            rows.push(this.kvRow(craft.entityId, `crafting ${craft.recipe} ${craft.done}`));
+          }
+        }
+      }
     } else if (RESOURCE_TYPES.has(obj.objectType)) {
       const remaining = obj.state.remaining;
       if (remaining !== undefined && remaining !== '') {

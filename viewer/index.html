@@ -66,6 +66,13 @@
       #follow-indicator.off {
         color: #8a8a9a;
       }
+      #clock-readout {
+        color: #c9c9dd;
+        white-space: nowrap;
+      }
+      #clock-readout.night {
+        color: #8fb0ff;
+      }
 
       #agent-panel {
         position: absolute;
@@ -338,6 +345,7 @@
           <option value="">(none)</option>
         </select>
         <span id="follow-indicator" class="off">follow off</span>
+        <span id="clock-readout" class="muted">-</span>
       </div>
       <div id="agent-panel" class="panel">
         <h2 id="ap-name">No entity selected</h2>

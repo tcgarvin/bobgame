@@ -65,17 +65,46 @@ REST_ACTIONS = frozenset({"rest"})
 EXTRACT_ACTIONS = frozenset({"extract"})
 CONVERSE_ACTIONS = frozenset({"converse"})
 GIVE_ACTIONS = frozenset({"give"})
+SLEEP_ACTIONS = frozenset({"sleep"})
+WAKE_ACTIONS = frozenset({"wake"})
+COLLAPSE_ACTIONS = frozenset({"collapse"})
 
-# Building kinds (docs/08_building.md). A town lays hundreds of these, so they
-# are counted but only the first of each kind becomes a notable moment.
-BUILDING_KINDS = frozenset(
-    {
-        "road", "wood_floor", "stone_floor", "wood_wall", "stone_wall",
-        "door", "bed", "chair", "table", "workshop_table",
-    }
+# Building kinds (docs/08_building.md, docs/10_metal_and_sleep.md). A town
+# lays hundreds of these, so they are counted but only the first of each kind
+# becomes a notable moment. `furnace`/`anvil` are the metal-tier stations.
+STATION_KINDS = frozenset({"furnace", "anvil"})
+BUILDING_KINDS = (
+    frozenset(
+        {
+            "road",
+            "wood_floor",
+            "stone_floor",
+            "wood_wall",
+            "stone_wall",
+            "door",
+            "bed",
+            "chair",
+            "table",
+            "workshop_table",
+        }
+    )
+    | STATION_KINDS
 )
-# Bulk intermediates: counted, never a moment of their own.
-BULK_CRAFTS = BUILDING_KINDS | frozenset({"plank", "rope"})
+
+# The metal tier (docs/10_metal_and_sleep.md, sections 2 and 7).
+SMELT_KINDS = frozenset({"charcoal", "copper_ingot", "iron_ingot"})
+INGOT_KINDS = frozenset({"copper_ingot", "iron_ingot"})
+METAL_TOOL_KINDS = frozenset(
+    {"copper_axe", "copper_pickaxe", "iron_axe", "iron_pickaxe", "iron_sword"}
+)
+IRON_TOOL_KINDS = frozenset({"iron_axe", "iron_pickaxe", "iron_sword"})
+
+# Bulk intermediates: counted, never a moment of their own. Smelting products
+# and metal tools would otherwise spam a "craft" moment per settler per item;
+# they get their own milestones (first ingot, first iron tool) instead.
+BULK_CRAFTS = (
+    BUILDING_KINDS | frozenset({"plank", "rope"}) | SMELT_KINDS | METAL_TOOL_KINDS
+)
 WORKSHOP_RECIPES = frozenset(
     {"stone_wall", "stone_floor", "door", "bed", "chair", "table"}
 )
@@ -84,6 +113,16 @@ WORKSHOP_RECIPES = frozenset(
 CRAFTED_RE = re.compile(r"crafted (\S+)")
 PLACED_RE = re.compile(r"placed (\S+?)(?:_\d+)? ")
 DISMANTLED_RE = re.compile(r"dismantled (\S+?)(?:_\d+)? ")
+
+# Vein extraction (docs/10_metal_and_sleep.md, section 2): a successful
+# `extract` on a copper_vein/iron_vein reports "worked <object_id> (+1
+# <ore kind>)".
+VEIN_YIELD_RE = re.compile(r"\(\+1 (copper_ore|iron_ore)\)")
+
+# Sleep and wake details (world/src/world/sleep.py): "asleep on <bed id|the
+# ground>" and "woke up: <reason>".
+SLEEP_RE = re.compile(r"^asleep on (.+)$")
+WAKE_RE = re.compile(r"^woke up: (.+)$")
 
 # Conversation and give details, docs/09_conversation_and_reflex.md sections 2.3
 # and 3: "open conv_12", "join conv_12", "gave 3 stone to mira".
@@ -453,6 +492,41 @@ class WorldFacts:
     utterances: int = 0
     shouts: int = 0
 
+    # Metal tier and sleep (docs/10_metal_and_sleep.md, section 7).
+    vein_yields: Counter[str] = field(default_factory=Counter)
+    sleeps: Counter[str] = field(default_factory=Counter)
+    collapses: int = 0
+    wakes: Counter[str] = field(default_factory=Counter)
+    sleep_data_available: bool = False
+    # One entry per night seen, at that night's midpoint tick:
+    # {"day", "tick", "asleep"}. Only meaningful when `sleep_data_available`.
+    night_midpoints: list[dict] = field(default_factory=list)
+
+    @property
+    def smelts(self) -> dict[str, int]:
+        """Charcoal and ingot craft counts, a subset of `crafts`."""
+        return {
+            kind: count for kind, count in self.crafts.items() if kind in SMELT_KINDS
+        }
+
+    @property
+    def stations_placed(self) -> dict[str, int]:
+        """Furnace/anvil placement counts, a subset of `placements`."""
+        return {
+            kind: count
+            for kind, count in self.placements.items()
+            if kind in STATION_KINDS
+        }
+
+    @property
+    def metal_tools_crafted(self) -> dict[str, int]:
+        """Copper/iron tool craft counts, a subset of `crafts`."""
+        return {
+            kind: count
+            for kind, count in self.crafts.items()
+            if kind in METAL_TOOL_KINDS
+        }
+
     def as_dict(self) -> dict:
         return {
             "ticks": self.ticks,
@@ -470,6 +544,15 @@ class WorldFacts:
             "notes_written": self.notes_written,
             "utterances": self.utterances,
             "shouts": self.shouts,
+            "smelts": self.smelts,
+            "stations_placed": self.stations_placed,
+            "metal_tools_crafted": self.metal_tools_crafted,
+            "vein_yields": dict(self.vein_yields),
+            "sleeps": dict(self.sleeps),
+            "collapses": self.collapses,
+            "wakes": dict(self.wakes),
+            "sleep_data_available": self.sleep_data_available,
+            "night_midpoints": self.night_midpoints,
         }
 
 
@@ -486,9 +569,18 @@ def scan_world_ticks(
     moments: list[Moment] = []
     wolf_ids: set[str] = set()
     seen_first_wolf = False
+    seen_first_ingot = False
+    seen_first_iron_tool = False
+    seen_first_collapse = False
+    seen_first_asleep_death = False
     first_tick_set = False
     conversations: dict[str, ConversationRecord] = {}
     giving: list[GiveEvent] = []
+    # Asleep state per entity as of the *previous* tick's `entity_updates`,
+    # used to tell whether a death this tick struck a sleeper (death clears
+    # `asleep` on the same tick, so the current tick's own state can't say).
+    last_asleep: dict[str, bool] = {}
+    night_ticks_by_day: defaultdict[int, list[tuple[int, int]]] = defaultdict(list)
 
     for record in iter_jsonl(path):
         if record.get("type") != "tick":
@@ -499,6 +591,21 @@ def scan_world_ticks(
             facts.first_tick = tick
             first_tick_set = True
         facts.last_tick = max(facts.last_tick, tick)
+
+        clock = record.get("clock")
+        entity_updates = record.get("entity_updates", ())
+        asleep_now = {
+            eu["entity_id"]: bool(eu.get("asleep", False))
+            for eu in entity_updates
+            if eu.get("entity_id")
+        }
+        if clock is not None:
+            facts.sleep_data_available = True
+            if clock.get("night"):
+                night_ticks_by_day[int(clock.get("day", 0))].append(
+                    (tick, sum(asleep_now.values()))
+                )
+
         facts.utterances += len(record.get("utterances", ()))
         facts.shouts += sum(
             1 for u in record.get("utterances", ()) if u.get("channel") == "shout"
@@ -509,9 +616,7 @@ def scan_world_ticks(
             conv_id = utterance.get("conversation_id", "")
             if not conv_id:
                 continue
-            record_conv = conversations.setdefault(
-                conv_id, ConversationRecord(conv_id)
-            )
+            record_conv = conversations.setdefault(conv_id, ConversationRecord(conv_id))
             record_conv.utterance_ticks.append(tick)
             speaker = utterance.get("speaker_id", "")
             if speaker:
@@ -528,8 +633,12 @@ def scan_world_ticks(
                 if not seen_first_wolf:
                     seen_first_wolf = True
                     moments.append(
-                        Moment(tick, "first_wolf", spawn.get("entity_id", ""),
-                               "first wolf appeared")
+                        Moment(
+                            tick,
+                            "first_wolf",
+                            spawn.get("entity_id", ""),
+                            "first wolf appeared",
+                        )
                     )
 
         # A damage record in the same tick names whoever landed the blow.
@@ -546,6 +655,16 @@ def scan_world_ticks(
             moments.append(
                 Moment(tick, "death", entity, f"{entity} killed by {killer}")
             )
+            if last_asleep.get(entity, False) and not seen_first_asleep_death:
+                seen_first_asleep_death = True
+                moments.append(
+                    Moment(
+                        tick,
+                        "milestone",
+                        entity,
+                        f"first death while asleep: {entity} killed by {killer}",
+                    )
+                )
 
         for despawn in record.get("entities_despawned", ()):
             entity = despawn.get("entity_id", "")
@@ -556,8 +675,12 @@ def scan_world_ticks(
                     killer = attackers.get(entity, "")
                     who = f" by {killer}" if killer else ""
                     moments.append(
-                        Moment(tick, "wolf_killed", killer or entity,
-                               f"{entity} killed{who}")
+                        Moment(
+                            tick,
+                            "wolf_killed",
+                            killer or entity,
+                            f"{entity} killed{who}",
+                        )
                     )
 
         for action in record.get("actions", ()):
@@ -572,22 +695,42 @@ def scan_world_ticks(
                 facts.crafts[kind] += 1
                 if kind in WORKSHOP_RECIPES:
                     facts.workshop_crafts += 1
-                if kind not in BULK_CRAFTS:
+                if kind in INGOT_KINDS and not seen_first_ingot:
+                    seen_first_ingot = True
                     moments.append(
-                        Moment(tick, "craft", entity, f"{entity} {details}")
+                        Moment(
+                            tick,
+                            "milestone",
+                            entity,
+                            f"first ingot: {entity} {details}",
+                        )
                     )
+                if kind in IRON_TOOL_KINDS and not seen_first_iron_tool:
+                    seen_first_iron_tool = True
+                    moments.append(
+                        Moment(
+                            tick,
+                            "milestone",
+                            entity,
+                            f"first iron tool: {entity} {details}",
+                        )
+                    )
+                if kind not in BULK_CRAFTS:
+                    moments.append(Moment(tick, "craft", entity, f"{entity} {details}"))
             elif action_type in PLACE_ACTIONS:
                 match = PLACED_RE.search(details)
                 kind = match.group(1) if match else details or "?"
                 facts.placements[kind] += 1
                 if kind not in BUILDING_KINDS:
-                    moments.append(
-                        Moment(tick, "place", entity, f"{entity} {details}")
-                    )
+                    moments.append(Moment(tick, "place", entity, f"{entity} {details}"))
                 elif facts.placements[kind] == 1:
                     moments.append(
-                        Moment(tick, "milestone", entity,
-                               f"first {kind}: {entity} {details}")
+                        Moment(
+                            tick,
+                            "milestone",
+                            entity,
+                            f"first {kind}: {entity} {details}",
+                        )
                     )
             elif action_type in REST_ACTIONS:
                 facts.rests += 1
@@ -595,10 +738,37 @@ def scan_world_ticks(
                 match = DISMANTLED_RE.search(details)
                 if match:
                     facts.dismantles[match.group(1)] += 1
+                else:
+                    vein_match = VEIN_YIELD_RE.search(details)
+                    if vein_match:
+                        facts.vein_yields[vein_match.group(1)] += 1
+            elif action_type in SLEEP_ACTIONS:
+                match = SLEEP_RE.match(details)
+                if match:
+                    place = match.group(1)
+                    facts.sleeps["ground" if place == "the ground" else "bed"] += 1
+            elif action_type in WAKE_ACTIONS:
+                match = WAKE_RE.match(details)
+                if match:
+                    facts.wakes[match.group(1)] += 1
+            elif action_type in COLLAPSE_ACTIONS:
+                facts.collapses += 1
+                if not seen_first_collapse:
+                    seen_first_collapse = True
+                    moments.append(
+                        Moment(
+                            tick,
+                            "milestone",
+                            entity,
+                            f"first collapse: {entity} {details}",
+                        )
+                    )
             elif action_type in NOTE_ACTIONS:
                 facts.notes_written += 1
                 moments.append(
-                    Moment(tick, "write_note", entity, f"{entity} wrote a note: {details}")
+                    Moment(
+                        tick, "write_note", entity, f"{entity} wrote a note: {details}"
+                    )
                 )
             elif action_type in CONVERSE_ACTIONS:
                 open_match = CONVERSE_OPEN_RE.match(details)
@@ -630,6 +800,16 @@ def scan_world_ticks(
                             amount=int(match.group(1)),
                         )
                     )
+
+        if asleep_now:
+            last_asleep = asleep_now
+
+    for day in sorted(night_ticks_by_day):
+        entries = sorted(night_ticks_by_day[day])
+        mid_tick, mid_asleep = entries[len(entries) // 2]
+        facts.night_midpoints.append(
+            {"day": day, "tick": mid_tick, "asleep": mid_asleep}
+        )
 
     for conv in conversations.values():
         if conv.joins:
@@ -680,11 +860,15 @@ def planner_moments(agent_id: str, layout: RunLayout) -> list[Moment]:
         if event == "turn_failed":
             error = str(row.get("error", ""))[:160]
             moments.append(
-                Moment(tick, "planner_failed", agent_id, f"{agent_id} turn failed: {error}")
+                Moment(
+                    tick, "planner_failed", agent_id, f"{agent_id} turn failed: {error}"
+                )
             )
         elif event == "history_reset":
             moments.append(
-                Moment(tick, "history_reset", agent_id, f"{agent_id} planner history reset")
+                Moment(
+                    tick, "history_reset", agent_id, f"{agent_id} planner history reset"
+                )
             )
     return moments
 
@@ -914,12 +1098,12 @@ def _first_reflex_registration(
     return None, ""
 
 
-def select_moments(moments: list[Moment], limit: int) -> tuple[list[Moment], Counter[str]]:
+def select_moments(
+    moments: list[Moment], limit: int
+) -> tuple[list[Moment], Counter[str]]:
     """Keep at most ``limit`` moments, dropping the most common kinds first."""
     order = {kind: i for i, kind in enumerate(MOMENT_PRIORITY)}
-    ranked = sorted(
-        moments, key=lambda m: (order.get(m.kind, len(order)), m.tick)
-    )
+    ranked = sorted(moments, key=lambda m: (order.get(m.kind, len(order)), m.tick))
     kept = ranked[:limit]
     omitted = Counter(m.kind for m in ranked[limit:])
     return sorted(kept, key=lambda m: (m.tick, m.kind)), omitted
@@ -971,25 +1155,33 @@ def print_report(
     if layout.meta:
         started = layout.meta.get("started_at", "?")
         finished = layout.meta.get("finished_at") or "(unfinished)"
-        print(f"config: {layout.meta.get('config_name', '?')}  "
-              f"started: {started}  finished: {finished}")
+        print(
+            f"config: {layout.meta.get('config_name', '?')}  "
+            f"started: {started}  finished: {finished}"
+        )
     print(f"stint ticks: {totals['stint_ticks']}")
     print(f"stints: {totals['stints']} ends={totals['end_reasons']}")
-    print(f"planner turns: {totals['planner_turns']}"
-          f" failures={totals['planner_turn_failures']}"
-          f" history_resets={totals['history_resets']}"
-          f" tool_budget_spent={totals['budget_spent']}"
-          f" tool_budget_hard_stops={totals['budget_hard_stops']}")
+    print(
+        f"planner turns: {totals['planner_turns']}"
+        f" failures={totals['planner_turn_failures']}"
+        f" history_resets={totals['history_resets']}"
+        f" tool_budget_spent={totals['budget_spent']}"
+        f" tool_budget_hard_stops={totals['budget_hard_stops']}"
+    )
     print(f"tool calls: {totals['tools']}")
     print(f"jev actions: {totals['actions']}")
     if totals["latency_p50_median"]:
-        print("jev latency p50 (median of agents): "
-              f"{totals['latency_p50_median']:.0f} ms")
+        print(
+            "jev latency p50 (median of agents): "
+            f"{totals['latency_p50_median']:.0f} ms"
+        )
     print()
 
-    header = (f"{'agent':7s} {'ticks':>5s} {'stints':>6s} {'turns':>5s} {'p50ms':>6s} "
-              f"{'p95ms':>6s} {'tok':>5s} {'eject':>5s} {'dang':>5s} {'top':>4s} "
-              f"{'fail':>4s} rejected")
+    header = (
+        f"{'agent':7s} {'ticks':>5s} {'stints':>6s} {'turns':>5s} {'p50ms':>6s} "
+        f"{'p95ms':>6s} {'tok':>5s} {'eject':>5s} {'dang':>5s} {'top':>4s} "
+        f"{'fail':>4s} rejected"
+    )
     print(header)
     for s in summaries:
         print(
@@ -1005,17 +1197,50 @@ def print_report(
 
     if facts is not None:
         print()
-        print(f"== world: ticks {facts.first_tick}..{facts.last_tick} "
-              f"({facts.ticks} recorded) ==")
+        print(
+            f"== world: ticks {facts.first_tick}..{facts.last_tick} "
+            f"({facts.ticks} recorded) =="
+        )
         print(f"deaths: {sum(facts.deaths.values())} by={dict(facts.killers)}")
-        print(f"wolves: spawned={facts.wolves_spawned} "
-              f"despawned={dict(facts.wolves_despawned)}")
+        print(
+            f"wolves: spawned={facts.wolves_spawned} "
+            f"despawned={dict(facts.wolves_despawned)}"
+        )
         print(f"crafts: {dict(facts.crafts)}")
         print(f"placements: {dict(facts.placements)}")
-        print(f"building: dismantles={dict(facts.dismantles)} "
-              f"workshop_crafts={facts.workshop_crafts} rests={facts.rests}")
-        print(f"notes written: {facts.notes_written}  utterances: {facts.utterances}"
-              f"  shouts: {facts.shouts}")
+        print(
+            f"building: dismantles={dict(facts.dismantles)} "
+            f"workshop_crafts={facts.workshop_crafts} rests={facts.rests}"
+        )
+        print(
+            f"notes written: {facts.notes_written}  utterances: {facts.utterances}"
+            f"  shouts: {facts.shouts}"
+        )
+        print()
+        print("== metal tier ==")
+        print(f"smelts: {facts.smelts}")
+        print(f"stations placed: {facts.stations_placed}")
+        print(f"metal tools crafted: {facts.metal_tools_crafted}")
+        print(f"vein yields: {dict(facts.vein_yields)}")
+        print()
+        print("== sleep ==")
+        if facts.sleep_data_available:
+            print(
+                f"sleeps: {dict(facts.sleeps)}  collapses: {facts.collapses}  "
+                f"wakes: {dict(facts.wakes)}"
+            )
+            if facts.night_midpoints:
+                print(
+                    "asleep at night midpoint, by day: "
+                    + ", ".join(
+                        f"day {entry['day']} (t{entry['tick']}): {entry['asleep']}"
+                        for entry in facts.night_midpoints
+                    )
+                )
+            else:
+                print("asleep at night midpoint, by day: no complete night recorded")
+        else:
+            print("unavailable (run recorded before docs/10_metal_and_sleep.md)")
     elif not layout.meta:
         world_log = layout.root / "world.log"
         if world_log.exists():

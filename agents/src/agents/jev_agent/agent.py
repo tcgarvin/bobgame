@@ -84,6 +84,60 @@ INTERRUPTED_BY_REFLEX = "interrupted: reflex stint started"
 # for the tick loop to see the object before it gives up on it.
 CONVERSATION_START_GRACE_TICKS = 4
 
+# How long the `sleep` tool waits for the tick loop to see the actor asleep
+# before it decides the sleep never happened.
+SLEEP_START_GRACE_TICKS = 3
+
+# The world's own wording for falling asleep, collapsing and waking.
+SLEEP_ACTION = "sleep"
+COLLAPSE_ACTION = "collapse"
+WAKE_ACTION = "wake"
+GROUND_SLEEP_PLACE = "the ground"
+UNKNOWN_WAKE_REASON = "unknown"
+
+ASLEEP_REJECTION = "failed: asleep"
+
+
+@dataclass(frozen=True)
+class SleepRecord:
+    """One completed sleep, as the planner's `sleep` tool reports it."""
+
+    start_tick: int
+    end_tick: int
+    reason: str
+    fatigue_before: int
+    fatigue_after: int
+    where: str
+
+    @property
+    def ticks_slept(self) -> int:
+        """World ticks between falling asleep and waking."""
+        return max(0, self.end_tick - self.start_tick)
+
+    def to_text(self) -> str:
+        """The line the `sleep` tool returns."""
+        return (
+            f"slept on {self.where} from tick {self.start_tick} to "
+            f"{self.end_tick} ({self.ticks_slept} ticks); woke because "
+            f"{self.reason}; fatigue {self.fatigue_before} -> {self.fatigue_after}"
+        )
+
+
+def sleep_place(digest: TickDigest) -> str:
+    """Where the world says the actor fell asleep, from its own action event."""
+    for acted in digest.own_actions:
+        if acted.action_type in (SLEEP_ACTION, COLLAPSE_ACTION) and acted.success:
+            return acted.details or GROUND_SLEEP_PLACE
+    return GROUND_SLEEP_PLACE
+
+
+def wake_reason(digest: TickDigest) -> str:
+    """Why the actor woke, from the world's `wake` action event."""
+    for acted in digest.own_actions:
+        if acted.action_type == WAKE_ACTION and acted.success:
+            return acted.details or UNKNOWN_WAKE_REASON
+    return UNKNOWN_WAKE_REASON
+
 
 @dataclass
 class _StintRequest:
@@ -110,6 +164,15 @@ class _ConversationWaiter:
     """A planner tool parked until the conversation it started has ended."""
 
     future: asyncio.Future[ConversationReport | None]
+    deadline_tick: int
+
+
+@dataclass
+class _WakeWaiter:
+    """A planner `sleep` tool parked until the actor is awake again."""
+
+    # The rendered sleep, or "" when no sleep was seen.
+    future: asyncio.Future[str]
     deadline_tick: int
 
 
@@ -165,6 +228,12 @@ class JevAgent:
         self._held_stint: _HeldStint | None = None
         self._conversation: ConversationSession | None = None
         self._conversation_waiters: list[_ConversationWaiter] = []
+        # -1 means awake; otherwise the tick the current sleep began.
+        self._asleep_since = -1
+        self._sleep_fatigue_before = 0
+        self._sleep_place = GROUND_SLEEP_PLACE
+        self._last_sleep: SleepRecord | None = None
+        self._wake_waiters: list[_WakeWaiter] = []
         self._background: set[asyncio.Task[None]] = set()
         self._pending_thought = ""
         self._last_status = ("", "", "", "")
@@ -260,6 +329,25 @@ class JevAgent:
         self._conversation_waiters.append(waiter)
         return await waiter.future
 
+    async def await_wake(self, since_tick: int) -> str:
+        """Block until the actor, asleep since `since_tick`, has woken.
+
+        Returns the sleep as one line, or `""` when the tick loop never saw the
+        actor asleep, so there was no sleep to sit through.
+        """
+        last = self._last_sleep
+        if self._asleep_since < 0 and last is not None and last.end_tick >= since_tick:
+            return last.to_text()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._wake_waiters.append(
+            _WakeWaiter(
+                future=future,
+                deadline_tick=self._model.tick + SLEEP_START_GRACE_TICKS,
+            )
+        )
+        return await future
+
     def set_thought(self, thought: str) -> None:
         """Queue a planner reflection to be spoken on the `thought` channel."""
         self._pending_thought = thought
@@ -295,6 +383,11 @@ class JevAgent:
 
     async def _handle_tick(self, observation: pb.Observation) -> None:
         digest = self._model.update(observation)
+        self._note_sleep_transitions(digest)
+        if self._model.self_info.asleep:
+            await self._sleeping_tick(observation, digest)
+            return
+        self._expire_wake_waiters()
         # The reflex is checked before anything else: a single-tick action in
         # flight is answered as interrupted rather than with its own outcome.
         self._maybe_start_reflex(digest)
@@ -400,6 +493,105 @@ class JevAgent:
             )
 
         return pb.Intent(wait=pb.WaitIntent()), None
+
+    # -- sleep --------------------------------------------------------------
+
+    async def _sleeping_tick(
+        self, observation: pb.Observation, digest: TickDigest
+    ) -> None:
+        """A tick spent asleep: nothing thinks, and only a `wake` is submitted.
+
+        Jev, the planner and the converser are all skipped, so whatever mode
+        the actor was in simply resumes on the tick it wakes.
+        """
+        self._resolve_awaiting_direct(digest)
+        request = self._wake_request_while_asleep()
+        if request is not None:
+            self._awaiting_direct = request
+            try:
+                await self.world.submit_intent(observation.tick_id, request.intent)
+            except grpc.RpcError as error:
+                logger.warning("submit_intent_rpc_error", details=error.details())
+        await self._report_status()
+
+    def _wake_request_while_asleep(self) -> _DirectRequest | None:
+        """The queued `wake` the planner asked for, if that is what is next.
+
+        The world refuses every other intent from a sleeper, so any other
+        queued action is answered with that refusal instead of being held.
+        """
+        if self._awaiting_direct is not None:
+            return None
+        while not self._direct_requests.empty():
+            request = self._direct_requests.get_nowait()
+            if request.intent.WhichOneof("action") == WAKE_ACTION:
+                return request
+            if not request.future.done():
+                request.future.set_result(
+                    f"{request.description} -> {ASLEEP_REJECTION}"
+                )
+        return None
+
+    def _note_sleep_transitions(self, digest: TickDigest) -> None:
+        """Record falling asleep and waking in the stints trace."""
+        info = self._model.self_info
+        if info.asleep and self._asleep_since < 0:
+            self._asleep_since = self._model.tick
+            self._sleep_fatigue_before = info.fatigue
+            self._sleep_place = sleep_place(digest)
+            self.trace.stints.write(
+                {
+                    "event": "sleep_start",
+                    "entity_id": self.entity_id,
+                    "tick": self._model.tick,
+                    "where": self._sleep_place,
+                    "fatigue": info.fatigue,
+                }
+            )
+            logger.info("fell_asleep", where=self._sleep_place, fatigue=info.fatigue)
+            return
+        if info.asleep or self._asleep_since < 0:
+            return
+        record = SleepRecord(
+            start_tick=self._asleep_since,
+            end_tick=self._model.tick,
+            reason=wake_reason(digest),
+            fatigue_before=self._sleep_fatigue_before,
+            fatigue_after=info.fatigue,
+            where=self._sleep_place,
+        )
+        self._asleep_since = -1
+        self._last_sleep = record
+        self.trace.stints.write(
+            {
+                "event": "sleep_end",
+                "entity_id": self.entity_id,
+                "tick": record.end_tick,
+                "where": record.where,
+                "reason": record.reason,
+                "ticks_slept": record.ticks_slept,
+                "fatigue_before": record.fatigue_before,
+                "fatigue_after": record.fatigue_after,
+            }
+        )
+        logger.info("woke_up", reason=record.reason, ticks=record.ticks_slept)
+        self._release_wake_waiters(record.to_text())
+
+    def _release_wake_waiters(self, text: str) -> None:
+        """Answer every parked `sleep` tool with this sleep (or with nothing)."""
+        for waiter in list(self._wake_waiters):
+            self._wake_waiters.remove(waiter)
+            if not waiter.future.done():
+                waiter.future.set_result(text)
+
+    def _expire_wake_waiters(self) -> None:
+        """Release a `sleep` tool whose sleep never started."""
+        for waiter in list(self._wake_waiters):
+            if self._model.tick < waiter.deadline_tick:
+                continue
+            self._wake_waiters.remove(waiter)
+            if not waiter.future.done():
+                waiter.future.set_result("")
 
     # -- reflex -------------------------------------------------------------
 
@@ -632,6 +824,7 @@ class JevAgent:
             if not waiter.future.done():
                 waiter.future.set_result(None)
         self._conversation_waiters.clear()
+        self._release_wake_waiters("")
         for stint_request in _drain(self._stint_requests):
             if not stint_request.future.done():
                 stint_request.future.set_exception(RuntimeError(reason))

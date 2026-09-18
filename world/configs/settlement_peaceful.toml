@@ -14,6 +14,8 @@ spawn_mode = "settlement"
 wolves = false
 tick_duration_ms = 2000
 intent_deadline_ms = 1200
+# A day is 300 ticks = 10 minutes at 2 s ticks; nights start at tick 200.
+day_length_ticks = 300
 
 [[entities]]
 id = "ada"

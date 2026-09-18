@@ -19,7 +19,7 @@ from .events import (
     UtteranceEvent,
 )
 from .movement import MoveResult
-from .state import Entity, World, WorldObject
+from .state import Entity, World, WorldClock, WorldObject
 from .types import Position
 
 
@@ -41,7 +41,22 @@ def entity_state(entity: Entity) -> dict[str, Any]:
         "max_hunger": entity.max_hunger,
         "wielded": entity.wielded,
         "alive": entity.alive,
+        "fatigue": entity.fatigue,
+        "max_fatigue": entity.max_fatigue,
+        "asleep": entity.asleep,
+        "sleeping_on": entity.sleeping_on,
+        "collapsed": entity.collapsed,
         "inventory": {kind: count for kind, count in entity.inventory.items},
+    }
+
+
+def clock_payload(clock: WorldClock) -> dict[str, Any]:
+    """JSON shape for the world clock (docs/10_metal_and_sleep.md)."""
+    return {
+        "day": clock.day,
+        "tick_of_day": clock.tick_of_day,
+        "day_length": clock.day_length,
+        "night": clock.night,
     }
 
 
@@ -71,6 +86,11 @@ def entity_from_state(state: dict[str, Any]) -> Entity:
         max_hunger=int(state.get("max_hunger", 100)),
         wielded=state.get("wielded", ""),
         alive=bool(state.get("alive", True)),
+        fatigue=int(state.get("fatigue", 0)),
+        max_fatigue=int(state.get("max_fatigue", 100)),
+        asleep=bool(state.get("asleep", False)),
+        sleeping_on=state.get("sleeping_on", ""),
+        collapsed=bool(state.get("collapsed", False)),
     )
 
 

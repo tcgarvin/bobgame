@@ -83,6 +83,7 @@ reopening per line: that produces one gzip member per line and no compression.
   "chunk_size": 32,
   "tick_duration_ms": 2000,
   "intent_deadline_ms": 1200,
+  "day_length_ticks": 300,
   "settlement": {"x": 168, "y": 904},
   "wolves": true,
   "map_path": "saves/island.npz",
@@ -110,7 +111,9 @@ field names and shapes are exactly the viewer's `tick_completed` message, plus
 the events the viewer message leaves out:
 
 ```json
-{"type": "tick", "tick_id": 412, "wall_ms": 1758133812345, "duration_ms": 3.1,
+{"type": "tick", "tick_id": 412,
+ "clock": {"day": 1, "tick_of_day": 112, "day_length": 300, "night": false},
+ "wall_ms": 1758133812345, "duration_ms": 3.1,
  "moves": [{"entity_id": "ada", "from": {"x":1,"y":1}, "to": {"x":2,"y":1}, "success": true}],
  "entity_updates": [ {…viewer EntityState for every entity, every tick…} ],
  "object_changes": [{"object_id": "bush_5060", "field": "berry_count", "old_value": "1", "new_value": "0"}],
@@ -128,6 +131,15 @@ the events the viewer message leaves out:
 `entity_updates` is the full state of every entity after the tick, which is
 what makes seeking cheap: entity state at tick N is just that list. Objects are
 deltas over `world/objects.jsonl.gz`.
+
+Each entity state carries `entity_id`, `position`, `entity_type`, `tags`,
+`health`, `max_health`, `hunger`, `max_hunger`, `wielded`, `alive`, `fatigue`,
+`max_fatigue`, `asleep`, `sleeping_on`, `collapsed` and `inventory`
+(docs/10_metal_and_sleep.md adds the last five). `clock` is the world clock at
+that tick and appears on the `tick` record, on the viewer's `tick_completed`
+and `snapshot` messages, and on the replay server's copies of both; the replay
+server falls back to computing it from `day_length_ticks` for runs recorded
+before the clock existed.
 
 ### `agent_status`
 

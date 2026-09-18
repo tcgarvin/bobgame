@@ -32,6 +32,9 @@ Available intents (defined in `proto/world.proto`):
 - `PickupIntent`, `DropIntent`, `DepositIntent`, `WithdrawIntent` - Piles and chests
 - `WriteNoteIntent` - Write a message board slot
 - `RestIntent` - Heal on a bed (see docs/08_building.md)
+- `ConverseIntent`, `GiveIntent` - Conversations and handing items over (docs/09)
+- `SleepIntent`, `WakeIntent` - Sleep on a bed (`object_id`) or on the ground
+  (empty), and wake again (see docs/10_metal_and_sleep.md)
 
 ### Foraging Pattern
 
@@ -323,18 +326,44 @@ code-owned walk like the heard-shout option. A join during a stint ends it with
 reason `joined_conversation` and `start_stint` returns after the conversation
 with the report appended.
 
+### Stations, metal and sleep (docs/10_metal_and_sleep.md)
+
+`items.py` also mirrors the deeper tree: `Recipe` carries `station`
+(`""`, `workshop_table`, `furnace` or `anvil`) and `work` (craft actions),
+`EXTRACT_TOOLS`/`EXTRACT_WORK_BY_TOOL` give the tool tiers,
+`EXTRACT_REQUIRED_TOOLS` gates the two veins, and the fatigue, day and
+sleep-recovery numbers live beside them. `recipe_table_text()` renders the
+station and the action count, and the planner prompt is generated from it.
+
+`options.py` offers a craft only when the recipe's station is on or next to the
+tile, names the work and the progress banked in the station under this actor's
+name, refuses a vein the wielded tool cannot bite, and offers `sleep:<bed>`,
+`sleep:ground` (whenever fatigue > 0) and `wake` (only while asleep).
+`jevstate.py` adds `self.fatigue`, `self.asleep`, the `clock` block and the
+fatigue physics line.
+
+**The asleep wait**: while `observation.self.asleep` is true `agent.py` submits
+nothing, and calls neither Jev nor the planner nor the converser - the one
+exception is a `wake` the planner queued, which is the only intent the world
+accepts from a sleeper. The reflex cannot fire while asleep; the tick the actor
+wakes is an ordinary tick, so a bite that woke it triggers the reflex there.
+Falling asleep and waking are written to `stints.jsonl.gz` as `sleep_start` and
+`sleep_end` (with the wake reason). The planner's `sleep` tool parks on
+`JevAgent.await_wake` until then; `craft` repeats the craft action until the
+recipe completes or an action fails.
+
 ### Building (docs/08_building.md)
 
 `items.py` restates the world's contract for the agent: the full recipe table
-(inputs, output count, `needs_workshop`), the ground/structure layer split, the
+(inputs, output count, `station`, `work`), the ground/structure layer split, the
 building kinds, and what `reeds` and `clay_deposit` yield. It is a mirror, so a
 change in `world/src/world/items.py` has to be copied here in the same commit.
 
 What Jev may choose (`options.py`):
 
 - **craft** only when the recipe would actually succeed: the inputs are in the
-  pack and, for a workshop recipe, `WorldModel.workshop_table_near()` finds a
-  placed `workshop_table` on or next to the tile. Craft options are ordered by
+  pack and, for a station recipe, `WorldModel.station_near(kind)` finds a
+  placed station of that kind on or next to the tile. Craft options are ordered by
   `CRAFT_PRIORITY`, drop recipes for something already carried, and are capped
   at `CRAFT_OPTION_LIMIT`, because `MAX_OPTIONS` is 40 and the movement options
   must survive.

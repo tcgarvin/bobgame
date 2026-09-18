@@ -26,6 +26,9 @@ def make_entity(
     wielded: str = "",
     alive: bool = True,
     inventory: Mapping[str, int] | None = None,
+    fatigue: int = 0,
+    max_fatigue: int = 100,
+    asleep: bool = False,
 ) -> pb.Entity:
     """A proto Entity with sensible player defaults."""
     items = [
@@ -43,6 +46,9 @@ def make_entity(
         wielded=wielded,
         alive=alive,
         inventory=pb.Inventory(items=items),
+        fatigue=fatigue,
+        max_fatigue=max_fatigue,
+        asleep=asleep,
     )
 
 
@@ -94,6 +100,7 @@ def make_observation(
     objects: Sequence[pb.WorldObject] = (),
     entities: Sequence[pb.Entity] = (),
     events: Sequence[pb.ObservationEvent] = (),
+    clock: pb.WorldClock | None = None,
 ) -> pb.Observation:
     """An Observation with a fully walkable view unless told otherwise."""
     position = (self_entity.position.x, self_entity.position.y)
@@ -104,6 +111,20 @@ def make_observation(
         visible_objects=list(objects),
         visible_entities=list(entities),
         events=list(events),
+        clock=clock if clock is not None else make_clock(tick),
+    )
+
+
+def make_clock(
+    tick: int, day_length: int = 300, night_start: int = 200
+) -> pb.WorldClock:
+    """The world clock for `tick`, with the settlement day length."""
+    tick_of_day = tick % day_length
+    return pb.WorldClock(
+        day=tick // day_length,
+        tick_of_day=tick_of_day,
+        day_length=day_length,
+        night=tick_of_day >= night_start,
     )
 
 

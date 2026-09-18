@@ -73,6 +73,10 @@ class RecordingBridge:
         self.reflex_notes: list[str] = []
         self.conversation_reports: list[ConversationReport] = []
         self.direct_result = ""
+        # Consumed one per `direct_action` call, ahead of `direct_result`.
+        self.direct_results: list[str] = []
+        self.wake_calls: list[int] = []
+        self.wake_result = ""
 
     @property
     def model(self) -> WorldModel:
@@ -99,6 +103,8 @@ class RecordingBridge:
 
     async def direct_action(self, intent: pb.Intent, description: str) -> str:
         self.actions.append((intent, description))
+        if self.direct_results:
+            return self.direct_results.pop(0)
         if self.direct_result:
             return self.direct_result
         return f"{description} -> ok"
@@ -106,6 +112,10 @@ class RecordingBridge:
     async def wait_ticks(self, ticks: int) -> str:
         self.waits.append(ticks)
         return f"waited {ticks}"
+
+    async def await_wake(self, since_tick: int) -> str:
+        self.wake_calls.append(since_tick)
+        return self.wake_result
 
     async def await_conversation(self) -> ConversationReport | None:
         if not self.conversation_reports:
@@ -219,7 +229,7 @@ def test_the_prompt_gives_the_goal_the_physics_numbers_and_the_budget() -> None:
     assert "build a civilization" in SETTLEMENT_NARRATIVE
     assert "has 16 health" in SETTLEMENT_NARRATIVE
     assert "for 3 every tick" in SETTLEMENT_NARRATIVE
-    assert "A wielded sword adds +" in SETTLEMENT_NARRATIVE
+    assert "sword +3" in SETTLEMENT_NARRATIVE
     assert "`shout` reaches 60 tiles" in SETTLEMENT_NARRATIVE
     assert "You get 30 tool calls per turn" in SETTLEMENT_NARRATIVE
 
@@ -568,7 +578,7 @@ async def test_a_turn_writes_its_prompt_tools_and_result_to_the_trace(
     result = next(line for line in lines if line["event"] == "tool_result")
     assert result["tool"] == "remember"
     assert str(result["result"]).startswith(
-        "noted\n[tick 5; this turn has cost 0 ticks"
+        "noted\n[tick 5 \u00b7 day 0 5/300 day; this turn has cost 0 ticks"
     )
 
     end = lines[-1]
@@ -699,7 +709,10 @@ async def test_tool_results_carry_the_clock_and_the_alert(
     _bitten(world_model, tick=9, health=17)
     with agent.override(model=TestModel(call_tools=["recall"])):
         result = await agent.run("go", deps=deps)
-    assert "[tick 9; this turn has cost 4 ticks so far]" in result.output
+    assert (
+        "[tick 9 \u00b7 day 0 9/300 day; this turn has cost 4 ticks so far]"
+        in result.output
+    )
     assert "!! UNDER ATTACK" in result.output
 
 
@@ -801,16 +814,14 @@ def test_the_prompt_teaches_every_recipe() -> None:
         assert recipe.cost_text() in SETTLEMENT_NARRATIVE, name
 
 
-def test_the_prompt_marks_the_workshop_recipes() -> None:
-    workshop = [name for name, r in RECIPES.items() if r.needs_workshop]
-    assert workshop
-    for name in workshop:
+def test_the_prompt_marks_each_recipes_station_and_work() -> None:
+    for name, recipe in RECIPES.items():
         line = next(
             line
             for line in SETTLEMENT_NARRATIVE.splitlines()
             if line.startswith(f"  {name} =")
         )
-        assert "[workshop table]" in line
+        assert f"[{recipe.station or 'hand'}, {recipe.work} action" in line
 
 
 def test_the_prompt_says_how_placed_objects_behave() -> None:
@@ -1113,3 +1124,166 @@ async def test_give_submits_a_give_intent(
     assert intent.give.kind == "plank"
     assert intent.give.amount == 3
     assert description == "give 3 plank to mira"
+
+
+# --- stations, work and sleep (docs/10_metal_and_sleep.md) ------------------
+
+
+def test_the_prompt_gives_the_fatigue_the_day_and_the_tier_numbers() -> None:
+    for phrase in (
+        "Fatigue runs from 0 to 100",
+        "every 4 ticks by day",
+        "From 60 you are tired",
+        "At 100 you collapse",
+        "A day is 300 ticks",
+        "1 fatigue per tick at\n  night",
+        "copper_vein needs a wielded pickaxe",
+        "3 work makes one unit",
+        "workshop_table, furnace or anvil",
+        "iron_sword +5",
+    ):
+        assert phrase in SETTLEMENT_NARRATIVE, phrase
+
+
+def test_the_recipe_table_in_the_prompt_comes_from_items() -> None:
+    for name, recipe in RECIPES.items():
+        line = f"  {name} = {recipe.cost_text()}"
+        assert line in SETTLEMENT_NARRATIVE, name
+    assert "[furnace, 2 actions]" in SETTLEMENT_NARRATIVE
+    assert "[hand, 1 action]" in SETTLEMENT_NARRATIVE
+
+
+async def test_craft_repeats_the_action_until_the_recipe_completes(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.direct_results = [
+        "craft charcoal -> craft ok: charcoal 1/2",
+        "craft charcoal -> craft ok: crafted charcoal x2",
+    ]
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("craft", {"recipe": "charcoal"})):
+        result = await agent.run("go", deps=deps)
+
+    assert len(bridge.actions) == 2
+    assert all(intent.craft.recipe == "charcoal" for intent, _ in bridge.actions)
+    assert "charcoal 1/2" in result.output
+    assert "crafted charcoal" in result.output
+
+
+async def test_craft_stops_at_the_first_failed_action(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.direct_results = [
+        "craft iron_ingot -> craft failed: iron_ingot needs a furnace nearby"
+    ]
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("craft", {"recipe": "iron_ingot"})):
+        result = await agent.run("go", deps=deps)
+
+    assert len(bridge.actions) == 1
+    assert "needs a furnace nearby" in result.output
+
+
+async def test_a_hand_recipe_still_takes_exactly_one_craft_action(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.direct_result = "craft plank -> craft ok: crafted plank x2"
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("craft", {"recipe": "plank"})):
+        await agent.run("go", deps=deps)
+    assert len(bridge.actions) == 1
+
+
+async def test_sleep_submits_the_intent_and_returns_the_wake(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    for reason in ("rested", "damaged", "hungry", "bed removed", "asked"):
+        bridge.actions.clear()
+        bridge.direct_result = "sleep on bed_1 -> sleep ok: asleep on bed_1"
+        bridge.wake_result = (
+            f"slept on bed_1 from tick 5 to tick 60 (55 ticks); woke because "
+            f"{reason}; fatigue 80 -> 25"
+        )
+        agent = build_planner_agent("test")
+        with agent.override(model=_call_tool("sleep", {"bed_object_id": "bed_1"})):
+            result = await agent.run("go", deps=deps)
+
+        intent, _ = bridge.actions[-1]
+        assert intent.sleep.object_id == "bed_1"
+        assert f"woke because {reason}" in result.output
+        assert "fatigue 80 -> 25" in result.output
+
+
+async def test_sleep_on_the_ground_names_no_bed(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.direct_result = "sleep on the ground -> sleep ok: asleep on the ground"
+    bridge.wake_result = "slept on the ground from tick 5 to tick 9 (4 ticks)"
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("sleep", {"bed_object_id": ""})):
+        result = await agent.run("go", deps=deps)
+
+    intent, description = bridge.actions[-1]
+    assert intent.sleep.object_id == ""
+    assert "the ground" in description
+    assert "4 ticks" in result.output
+
+
+async def test_a_refused_sleep_does_not_wait_for_a_wake(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.direct_result = "sleep on bed_1 -> sleep failed: bed_1 is taken"
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("sleep", {"bed_object_id": "bed_1"})):
+        result = await agent.run("go", deps=deps)
+
+    assert not bridge.wake_calls
+    assert "is taken" in result.output
+
+
+async def test_wake_says_so_when_you_are_not_asleep(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("wake", {})):
+        result = await agent.run("go", deps=deps)
+    assert "you are not asleep" in result.output
+    assert not bridge.actions
+
+
+async def test_wake_submits_the_intent_while_asleep(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.model.update(
+        make_observation(9, make_entity("ada", (10, 10), fatigue=50, asleep=True))
+    )
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("wake", {})):
+        await agent.run("go", deps=deps)
+    intent, _ = bridge.actions[-1]
+    assert intent.HasField("wake")
+
+
+def test_look_names_the_veins_and_stations_it_knows(world_model: WorldModel) -> None:
+    world_model.update(
+        make_observation(
+            7,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object("fur_1", "furnace", (11, 10)),
+                make_object("anv_1", "anvil", (9, 10)),
+                make_object("cop_1", "copper_vein", (12, 12)),
+                make_object("iro_1", "iron_vein", (12, 13)),
+            ],
+        )
+    )
+    summary = describe_world(world_model)
+    for line in (
+        "furnace: 1 known",
+        "anvil: 1 known",
+        "copper_vein: 1",
+        "iron_vein: 1",
+    ):
+        assert line in summary
+    assert "day 0 7/300 day" in summary
+    assert "fatigue 0/100 (fresh)" in summary

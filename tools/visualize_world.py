@@ -62,6 +62,8 @@ OBJECT_COLORS = {
     "boulder": (110, 110, 110),
     "reeds": (90, 230, 190),  # Aqua
     "clay_deposit": (200, 90, 50),  # Terracotta
+    "copper_vein": (255, 150, 0),  # Bright orange
+    "iron_vein": (190, 70, 230),  # Violet
 }
 
 

@@ -243,10 +243,11 @@ def test_reeds_and_clay_can_be_harvested_like_trees() -> None:
     assert "extract:clay_1" in offered
 
 
-def test_reed_harvesting_does_not_promise_a_tool() -> None:
+def test_reed_harvesting_states_the_bare_handed_work_rate() -> None:
     model = build_model(objects=[make_object("reeds_1", "reeds", (11, 10))])
     descriptions = options_to_criteria(enumerate_options(model))
-    assert "no tool helps here" in descriptions["extract:reeds_1"]
+    assert "1 work per action bare-handed" in descriptions["extract:reeds_1"]
+    assert "3 work per unit" in descriptions["extract:reeds_1"]
     assert "fiber" in descriptions["extract:reeds_1"]
 
 
@@ -444,3 +445,163 @@ def test_the_walk_is_not_offered_again_while_already_walking_there() -> None:
     )
     walk = option_by_key(model, f"{HEARD_SHOUT_KEY_PREFIX}bram")
     assert f"{HEARD_SHOUT_KEY_PREFIX}bram" not in keys(model, walk.travel_target)
+
+
+# --- stations, veins and sleep (docs/10_metal_and_sleep.md) -----------------
+
+
+def test_a_furnace_recipe_needs_a_furnace_and_not_a_workshop_table() -> None:
+    inventory = {"wood": 3, "copper_ore": 2, "charcoal": 1}
+    at_table = build_model(
+        self_entity=make_entity("ada", (10, 10), inventory=inventory),
+        objects=[make_object("ws_1", "workshop_table", (11, 10))],
+    )
+    assert "craft:charcoal" not in keys(at_table)
+
+    at_furnace = build_model(
+        self_entity=make_entity("ada", (10, 10), inventory=inventory),
+        objects=[make_object("fur_1", "furnace", (11, 10))],
+    )
+    offered = keys(at_furnace)
+    assert "craft:charcoal" in offered
+    assert "craft:copper_ingot" in offered
+
+
+def test_an_anvil_recipe_needs_an_anvil() -> None:
+    inventory = {"plank": 2, "iron_ingot": 3}
+    at_table = build_model(
+        self_entity=make_entity("ada", (10, 10), inventory=inventory),
+        objects=[make_object("ws_1", "workshop_table", (11, 10))],
+    )
+    assert "craft:iron_sword" not in keys(at_table)
+
+    at_anvil = build_model(
+        self_entity=make_entity("ada", (10, 10), inventory=inventory),
+        objects=[make_object("anv_1", "anvil", (10, 11))],
+    )
+    assert "craft:iron_sword" in keys(at_anvil)
+
+
+def test_a_multi_action_craft_names_its_work_and_the_progress_banked() -> None:
+    inventory = {"wood": 3}
+    fresh = build_model(
+        self_entity=make_entity("ada", (10, 10), inventory=inventory),
+        objects=[make_object("fur_1", "furnace", (11, 10))],
+    )
+    description = options_to_criteria(enumerate_options(fresh))["craft:charcoal"]
+    assert "at the furnace within reach" in description
+    assert "2 craft actions, 0 done so far" in description
+
+    started = build_model(
+        self_entity=make_entity("ada", (10, 10), inventory=inventory),
+        objects=[
+            make_object("fur_1", "furnace", (11, 10), {"craft:ada": "charcoal:1"})
+        ],
+    )
+    resumed = options_to_criteria(enumerate_options(started))["craft:charcoal"]
+    assert "2 craft actions, 1 done so far" in resumed
+
+
+def test_another_settlers_craft_progress_is_not_read_as_your_own() -> None:
+    model = build_model(
+        self_entity=make_entity("ada", (10, 10), inventory={"wood": 3}),
+        objects=[
+            make_object("fur_1", "furnace", (11, 10), {"craft:bob": "charcoal:1"})
+        ],
+    )
+    description = options_to_criteria(enumerate_options(model))["craft:charcoal"]
+    assert "2 craft actions, 0 done so far" in description
+
+
+def test_a_vein_is_only_harvestable_with_a_pickaxe_of_the_right_tier() -> None:
+    veins = [
+        make_object("copper_1", "copper_vein", (11, 10)),
+        make_object("iron_1", "iron_vein", (10, 11)),
+    ]
+    bare = build_model(objects=veins)
+    assert "extract:copper_1" not in keys(bare)
+    assert "extract:iron_1" not in keys(bare)
+
+    stone_pick = build_model(
+        self_entity=make_entity("ada", (10, 10), wielded="pickaxe"),
+        objects=veins,
+    )
+    assert "extract:copper_1" in keys(stone_pick)
+    assert "extract:iron_1" not in keys(stone_pick)
+
+    copper_pick = build_model(
+        self_entity=make_entity("ada", (10, 10), wielded="copper_pickaxe"),
+        objects=veins,
+    )
+    assert "extract:iron_1" in keys(copper_pick)
+
+
+def test_a_vein_option_states_the_work_the_wielded_tool_adds() -> None:
+    model = build_model(
+        self_entity=make_entity("ada", (10, 10), wielded="iron_pickaxe"),
+        objects=[make_object("copper_1", "copper_vein", (11, 10))],
+    )
+    description = options_to_criteria(enumerate_options(model))["extract:copper_1"]
+    assert "5 work per action with the iron_pickaxe" in description
+    assert "copper_ore" in description
+    assert "4 units left" in description
+
+
+def test_the_metal_tools_can_be_wielded() -> None:
+    model = build_model(
+        self_entity=make_entity(
+            "ada", (10, 10), inventory={"iron_sword": 1, "copper_pickaxe": 1}
+        )
+    )
+    offered = keys(model)
+    assert "equip:iron_sword" in offered
+    assert "equip:copper_pickaxe" in offered
+
+
+def test_sleep_is_offered_on_the_ground_and_on_an_adjacent_bed_when_tired() -> None:
+    model = build_model(
+        self_entity=make_entity("ada", (10, 10), fatigue=40),
+        objects=[make_object("bed_1", "bed", (11, 10))],
+    )
+    descriptions = options_to_criteria(enumerate_options(model))
+    assert "sleep:ground" in descriptions
+    assert "sleep:bed_1" in descriptions
+    assert "wake" not in descriptions
+
+
+def test_a_fresh_settler_is_not_offered_sleep() -> None:
+    model = build_model(self_entity=make_entity("ada", (10, 10), fatigue=0))
+    assert "sleep:ground" not in keys(model)
+
+
+def test_the_sleep_descriptions_carry_the_recovery_for_the_time_of_day() -> None:
+    day = build_model(
+        self_entity=make_entity("ada", (10, 10), fatigue=40),
+        objects=[make_object("bed_1", "bed", (11, 10))],
+    )
+    by_day = options_to_criteria(enumerate_options(day))
+    assert "1 fatigue per 2 ticks" in by_day["sleep:bed_1"]
+    assert "1 fatigue per 4 ticks" in by_day["sleep:ground"]
+
+    night = WorldModel("ada")
+    night.update(
+        make_observation(
+            250,
+            make_entity("ada", (10, 10), fatigue=40),
+            objects=[make_object("bed_1", "bed", (11, 10))],
+        )
+    )
+    at_night = options_to_criteria(enumerate_options(night))
+    assert "1 fatigue per tick" in at_night["sleep:bed_1"]
+    assert "1 fatigue per 2 ticks" in at_night["sleep:ground"]
+
+
+def test_only_waking_is_offered_to_a_sleeper() -> None:
+    model = build_model(
+        self_entity=make_entity("ada", (10, 10), fatigue=40, asleep=True),
+        objects=[make_object("bed_1", "bed", (11, 10))],
+    )
+    offered = keys(model)
+    assert "wake" in offered
+    assert "sleep:ground" not in offered
+    assert "sleep:bed_1" not in offered

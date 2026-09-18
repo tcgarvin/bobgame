@@ -9,6 +9,7 @@ from .events import RespawnEvent, TickEvents
 from .exceptions import ObjectNotFoundError
 from .items import BED, FOOD_HUNGER_RESTORE, REST_HEAL
 from .settlement import NoSettlementSiteError, nearest_free_walkable
+from .sleep import GROUND, RESPAWN_FATIGUE, is_tired
 from .state import World
 from .types import (
     Position,
@@ -76,7 +77,11 @@ def process_hunger_phase(world: World, events: TickEvents) -> None:
 
 
 def process_health_regen(world: World) -> None:
-    """Regenerate health for well-fed, wounded entities."""
+    """Regenerate health for well-fed, rested, wounded entities.
+
+    Tired entities do not regenerate (docs/10_metal_and_sleep.md). Bed
+    sleepers are skipped because the fatigue phase already healed them.
+    """
     if world.tick % REGEN_INTERVAL_TICKS != 0:
         return
 
@@ -84,6 +89,10 @@ def process_health_regen(world: World) -> None:
         if entity.health >= entity.max_health:
             continue
         if entity.hunger <= REGEN_HUNGER_THRESHOLD:
+            continue
+        if is_tired(entity):
+            continue
+        if entity.asleep and entity.sleeping_on != GROUND:
             continue
         world.set_entity(entity.with_health(entity.health + REGEN_AMOUNT))
 
@@ -201,7 +210,9 @@ def process_respawns(world: World, events: TickEvents) -> None:
             logger.warning("respawn_blocked", entity_id=entity_id)
             continue
 
-        world.set_entity(entity.as_respawned(entity.position, RESPAWN_HUNGER))
+        world.set_entity(
+            entity.as_respawned(entity.position, RESPAWN_HUNGER, RESPAWN_FATIGUE)
+        )
         world.attach_entity(entity_id, position)
         world.clear_death(entity_id)
         events.respawns.append(RespawnEvent(entity_id=entity_id, position=position))

@@ -39,6 +39,17 @@ message Entity {
   int32 max_hunger = 10;
   string wielded = 11;      // item kind currently wielded, "" if none
   bool alive = 12;
+  int32 fatigue = 13;       // 0 = fresh, max_fatigue = exhausted (docs/10)
+  int32 max_fatigue = 14;
+  bool asleep = 15;
+}
+
+// The world's day clock (docs/10_metal_and_sleep.md, "The day").
+message WorldClock {
+  int64 day = 1;
+  int32 tick_of_day = 2;
+  int32 day_length = 3;
+  bool night = 4;
 }
 
 message Inventory {
@@ -165,6 +176,8 @@ message Observation {
 
   // Events since last observation
   repeated ObservationEvent events = 7;
+
+  WorldClock clock = 8;
 }
 
 message ObservationEvent {
@@ -283,6 +296,8 @@ message Intent {
     RestIntent rest = 17;
     ConverseIntent converse = 18;
     GiveIntent give = 19;
+    SleepIntent sleep = 20;
+    WakeIntent wake = 21;
   }
 }
 
@@ -349,6 +364,15 @@ message WriteNoteIntent {
 message RestIntent {
   string object_id = 1;
 }
+
+// Fall asleep on a bed (object_id) or on the ground (empty). Sleep persists
+// until woken; see docs/10_metal_and_sleep.md.
+message SleepIntent {
+  string object_id = 1;
+}
+
+// Wake up voluntarily.
+message WakeIntent {}
 
 message MoveIntent {
   Direction direction = 1;

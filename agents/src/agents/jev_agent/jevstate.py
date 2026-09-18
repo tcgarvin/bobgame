@@ -24,8 +24,9 @@ HISTORY_LINES = 8
 
 MAP_LEGEND = (
     ". walkable, # blocked or wall, ~ water, T tree, o rock, b bush, r reeds, "
-    "y clay, C chest, B board, X workshop table, + door, z bed, f furniture, "
-    ", road or floor, i item pile, @ self, P player, W wolf, ? unknown"
+    "y clay, v ore vein, C chest, B board, X workshop table, F furnace, "
+    "A anvil, + door, z bed, f furniture, , road or floor, i item pile, "
+    "@ self, P player, W wolf, ? unknown"
 )
 
 # Structure-layer glyphs. A tile shows its structure, not the road under it.
@@ -38,10 +39,14 @@ _OBJECT_GLYPHS: Mapping[str, str] = {
     items.BUSH: "b",
     items.REEDS: "r",
     items.CLAY_DEPOSIT: "y",
+    items.COPPER_VEIN: "v",
+    items.IRON_VEIN: "v",
     "chest": "C",
     "message_board": "B",
     "item_pile": "i",
     items.WORKSHOP_TABLE: "X",
+    items.FURNACE: "F",
+    items.ANVIL: "A",
     items.WOOD_WALL: "#",
     items.STONE_WALL: "#",
     items.DOOR: "+",
@@ -143,11 +148,20 @@ def build_state(
             "position": [origin[0], origin[1]],
             "health": f"{self_info.health}/{self_info.max_health}",
             "hunger": f"{self_info.hunger}/{self_info.max_hunger}",
+            "fatigue": (
+                f"{self_info.fatigue}/{self_info.max_fatigue} "
+                f"({self_info.fatigue_word})"
+            ),
+            "asleep": self_info.asleep,
             "wielded": self_info.wielded,
             "inventory": dict(self_info.inventory),
-            # Workshop recipes only work here, so say so plainly.
-            "at_workshop_table": model.workshop_table_near() is not None,
+            # Station recipes only work here, so say so plainly.
+            "at_workshop_table": model.station_near(items.WORKSHOP_TABLE) is not None,
+            "at_furnace": model.station_near(items.FURNACE) is not None,
+            "at_anvil": model.station_near(items.ANVIL) is not None,
         },
+        "fatigue_facts": FATIGUE_FACTS,
+        "clock": _clock_entry(model),
         "settlement": {"dx": settlement_dx, "dy": settlement_dy},
         "travel": _travel_entry(model, travel),
         "nearby": [
@@ -187,6 +201,36 @@ WOLF_FACTS = (
     f"{items.WOLF_DAMAGE} every tick. Every settler attacking the same wolf "
     "hits it on the same tick."
 )
+
+
+# Physics only: when to sleep is the planner's brief to decide.
+FATIGUE_FACTS = (
+    f"Fatigue rises 1 every {items.FATIGUE_INTERVAL_DAY} ticks by day and every "
+    f"{items.FATIGUE_INTERVAL_NIGHT} ticks at night. From {items.TIRED_FATIGUE} "
+    "you are tired: the work a tool adds per extract action is halved and "
+    f"your attacks hit for 1 less. At {items.MAX_FATIGUE} you collapse where you "
+    f"stand and sleep until fatigue falls to {items.COLLAPSE_WAKE_FATIGUE}. "
+    f"Sleeping on a bed recovers {items.sleep_recovery_text(True, True)} at "
+    f"night and {items.sleep_recovery_text(True, False)} by day; on the ground "
+    f"{items.sleep_recovery_text(False, True)} at night and "
+    f"{items.sleep_recovery_text(False, False)} by day."
+)
+
+DAY_FACTS = (
+    f"A day is {items.DEFAULT_DAY_LENGTH} ticks: the first two thirds are light "
+    "and the rest is night."
+)
+
+
+def _clock_entry(model: WorldModel) -> dict[str, Any]:
+    """The world clock: which day it is, how far into it, and whether it is night."""
+    clock = model.clock
+    return {
+        "day": clock.day,
+        "tick_of_day": f"{clock.tick_of_day}/{clock.day_length}",
+        "night": clock.night,
+        "facts": DAY_FACTS,
+    }
 
 
 def _threat_entry(model: WorldModel) -> dict[str, Any]:

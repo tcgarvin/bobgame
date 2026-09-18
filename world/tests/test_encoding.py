@@ -129,7 +129,10 @@ class TestBase64Encoding:
 
         # Should only contain base64 characters
         assert encoded.isascii()
-        assert all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in encoded)
+        assert all(
+            c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+            for c in encoded
+        )
 
 
 class TestTerrainChanges:

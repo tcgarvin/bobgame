@@ -719,6 +719,11 @@
     "frame": 8,
     "spritesheet": "Characters/Player0.png"
   },
+  "anvil": {
+    "columns": 8,
+    "frame": 43,
+    "spritesheet": "Objects/Decor0.png"
+  },
   "axe": {
     "columns": 8,
     "frame": 24,
@@ -769,6 +774,21 @@
     "frame": 54,
     "spritesheet": "Objects/Ground0.png"
   },
+  "copper-vein": {
+    "animationFrames": [
+      {
+        "frame": 9,
+        "spritesheet": "Objects/Ore0.png"
+      },
+      {
+        "frame": 9,
+        "spritesheet": "Objects/Ore1.png"
+      }
+    ],
+    "columns": 9,
+    "frame": 9,
+    "spritesheet": "Objects/Ore0.png"
+  },
   "dirt-full": {
     "columns": 21,
     "frame": 400,
@@ -778,6 +798,11 @@
     "columns": 8,
     "frame": 0,
     "spritesheet": "Objects/Door0.png"
+  },
+  "furnace": {
+    "columns": 8,
+    "frame": 54,
+    "spritesheet": "Objects/Decor0.png"
   },
   "grass-flavor-1": {
     "columns": 8,
@@ -803,6 +828,21 @@
     "columns": 21,
     "frame": 155,
     "spritesheet": "Objects/Floor.png"
+  },
+  "iron-vein": {
+    "animationFrames": [
+      {
+        "frame": 50,
+        "spritesheet": "Objects/Ore0.png"
+      },
+      {
+        "frame": 50,
+        "spritesheet": "Objects/Ore1.png"
+      }
+    ],
+    "columns": 9,
+    "frame": 50,
+    "spritesheet": "Objects/Ore0.png"
   },
   "item-pile": {
     "animationFrames": [

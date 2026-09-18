@@ -10,7 +10,7 @@
  * through `onRequestAgentDetail` whenever the selection or the tick changes.
  */
 
-import type { TrackedObject, WorldState } from '../network';
+import type { InterpolatedEntity, TrackedObject, WorldState } from '../network';
 import type {
   AgentDetailMessage,
   AgentStint,
@@ -36,6 +36,18 @@ export interface OverlayCallbacks {
 
 /** Entity types that get a hunger bar and a player-style label. */
 const PLAYER_TYPE = 'player';
+
+/**
+ * Fatigue thresholds (docs/10_metal_and_sleep.md, section 4): under 60 fresh,
+ * 60-99 tired (halved work, weaker hits, no regen), at max exhausted.
+ */
+const TIRED_FATIGUE = 60;
+
+/** The word for a fatigue level, shown next to the number. */
+export function fatigueState(fatigue: number, maxFatigue: number): string {
+  if (maxFatigue > 0 && fatigue >= maxFatigue) return 'exhausted';
+  return fatigue >= TIRED_FATIGUE ? 'tired' : 'fresh';
+}
 
 /** How long to wait before re-requesting detail while playback runs. */
 const DETAIL_DEBOUNCE_MS = 250;
@@ -83,6 +95,7 @@ export class OverlayUI {
 
   private picker: HTMLSelectElement;
   private followIndicator: HTMLElement;
+  private clockEl: HTMLElement;
   private panel: HTMLElement;
   private nameEl: HTMLElement;
   private modeEl: HTMLElement;
@@ -110,6 +123,7 @@ export class OverlayUI {
 
     this.picker = requireElement<HTMLSelectElement>('entity-picker');
     this.followIndicator = requireElement('follow-indicator');
+    this.clockEl = requireElement('clock-readout');
     this.panel = requireElement('agent-panel');
     this.nameEl = requireElement('ap-name');
     this.modeEl = requireElement('ap-mode');
@@ -155,8 +169,28 @@ export class OverlayUI {
 
   /** Rebuild the picker options and the panel contents. */
   refresh(): void {
+    this.refreshClock();
     this.refreshPicker();
     this.refreshPanel();
+  }
+
+  /**
+   * `day 2 · 143/300 · night`, straight from the latest tick's clock so it is
+   * correct after a replay seek as well.
+   */
+  private refreshClock(): void {
+    const clock = this.worldState.getClock();
+    if (!clock) {
+      this.clockEl.textContent = '-';
+      this.clockEl.classList.add('muted');
+      this.clockEl.classList.remove('night');
+      return;
+    }
+    this.clockEl.classList.remove('muted');
+    this.clockEl.classList.toggle('night', clock.night);
+    this.clockEl.textContent = `day ${clock.day} · ${clock.tick_of_day}/${clock.day_length} · ${
+      clock.night ? 'night' : 'day'
+    }`;
   }
 
   private refreshPicker(): void {
@@ -225,8 +259,7 @@ export class OverlayUI {
     this.modeEl.textContent = mode;
     this.modeEl.className = `mode-badge ${KNOWN_MODES.includes(mode) ? mode : ''}`;
 
-    this.renderStats(entity.health, entity.maxHealth, entity.hunger, entity.maxHunger,
-      entity.entityType === PLAYER_TYPE, entity.alive, entity.wielded);
+    this.renderStats(entity, entity.entityType === PLAYER_TYPE);
 
     const stint = detail?.record ?? status?.stint ?? null;
     this.renderBrief(status?.brief ?? '', stint, detail);
@@ -317,22 +350,27 @@ export class OverlayUI {
     return null;
   }
 
-  private renderStats(
-    health: number,
-    maxHealth: number,
-    hunger: number,
-    maxHunger: number,
-    isPlayer: boolean,
-    alive: boolean,
-    wielded: string
-  ): void {
+  private renderStats(entity: InterpolatedEntity, isPlayer: boolean): void {
     const rows: HTMLElement[] = [];
-    rows.push(this.barRow('Health', health, maxHealth, '#d35f5f'));
+    rows.push(this.barRow('Health', entity.health, entity.maxHealth, '#d35f5f'));
     if (isPlayer) {
-      rows.push(this.barRow('Hunger', hunger, maxHunger, '#e0913a'));
+      rows.push(this.barRow('Hunger', entity.hunger, entity.maxHunger, '#e0913a'));
+      const state = fatigueState(entity.fatigue, entity.maxFatigue);
+      rows.push(
+        this.barRow(
+          'Fatigue',
+          entity.fatigue,
+          entity.maxFatigue,
+          state === 'fresh' ? '#5f8dd3' : '#b07fd3',
+          `${Math.round(entity.fatigue)}/${Math.round(entity.maxFatigue)} ${state}`
+        )
+      );
+      if (entity.asleep) {
+        rows.push(this.kvRow('Asleep', state === 'exhausted' ? 'collapsed' : 'yes'));
+      }
     }
-    rows.push(this.kvRow('Wielded', wielded || 'nothing'));
-    rows.push(this.kvRow('Alive', alive ? 'yes' : 'no'));
+    rows.push(this.kvRow('Wielded', entity.wielded || 'nothing'));
+    rows.push(this.kvRow('Alive', entity.alive ? 'yes' : 'no'));
     this.statsEl.replaceChildren(...rows);
   }
 

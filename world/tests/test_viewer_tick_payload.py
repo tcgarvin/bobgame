@@ -115,6 +115,11 @@ class TestTickCompleted:
                 "max_hunger": 100,
                 "wielded": "axe",
                 "alive": True,
+                "fatigue": 0,
+                "max_fatigue": 100,
+                "asleep": False,
+                "sleeping_on": "",
+                "collapsed": False,
                 "inventory": {"wood": 3},
             }
         ]

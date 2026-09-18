@@ -28,6 +28,7 @@ from helpers import (
     FakeJevClient,
     acted_event,
     converse_object,
+    damaged_event,
     make_entity,
     make_observation,
 )
@@ -597,3 +598,209 @@ async def test_a_join_during_a_stint_ends_it_and_appends_the_conversation(
     text = report.to_text()  # type: ignore[attr-defined]
     assert "CONVERSATION REPORT: conv_1" in text
     assert "mira wants planks" in text
+
+
+# -- sleep (docs/10_metal_and_sleep.md) --------------------------------------
+
+
+def sleeping_observations(
+    asleep_ticks: Sequence[int],
+    count: int,
+    *,
+    events_by_tick: Mapping[int, Sequence[pb.ObservationEvent]] | None = None,
+) -> list[pb.Observation]:
+    """`count` observations for ada, asleep on the ticks listed."""
+    return [
+        make_observation(
+            tick,
+            make_entity("ada", (10, 10), fatigue=50, asleep=tick in asleep_ticks),
+            events=list((events_by_tick or {}).get(tick, ())),
+        )
+        for tick in range(1, count + 1)
+    ]
+
+
+def stint_lines(directory: Path) -> list[dict]:
+    """Every record in the agent's stints trace."""
+    with gzip.open(directory / "stints.jsonl.gz", "rt", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+async def test_a_sleeping_agent_submits_nothing_and_asks_nobody(
+    tmp_path: Path,
+) -> None:
+    jev = FakeJevClient(default_action="wait")
+    world = FakeWorldClient(sleeping_observations([2, 3, 4], 5))
+    agent = build_agent(world, jev, tmp_path)
+    turns: list[int] = []
+
+    async def plan() -> None:
+        turns.append(1)
+        await asyncio.sleep(3600)
+
+    agent.planner.run = plan  # type: ignore[method-assign]
+    await agent.run()
+
+    assert len(world.submitted) == 2, "only the two awake ticks act"
+    assert not jev.calls
+
+
+async def test_a_stint_resumes_on_the_tick_the_settler_wakes(tmp_path: Path) -> None:
+    jev = FakeJevClient(default_action="move_E")
+    world = FakeWorldClient(sleeping_observations([2, 3], 5))
+    agent = build_agent(world, jev, tmp_path)
+
+    async def plan() -> None:
+        await agent.run_stint(
+            Brief(instruction="Walk east", success_condition="never", max_ticks=10)
+        )
+        await asyncio.sleep(3600)
+
+    agent.planner.run = plan  # type: ignore[method-assign]
+    await agent.run()
+
+    # Ticks 1, 4 and 5 act; 2 and 3 are slept through.
+    assert len(jev.calls) == 3
+    assert len(world.submitted) == 3
+    assert agent.mode == MODE_STINT
+
+
+async def test_the_sleep_and_the_wake_are_traced_with_the_reason(
+    fake_jev: FakeJevClient, tmp_path: Path
+) -> None:
+    woke = acted_event("ada", "wake", True, "woke up: damaged")
+    fell = acted_event("ada", "sleep", True, "asleep on bed_1")
+    world = FakeWorldClient(
+        sleeping_observations([2, 3], 4, events_by_tick={2: [fell], 4: [woke]})
+    )
+    agent = build_agent(world, fake_jev, tmp_path)
+
+    async def idle() -> None:
+        await asyncio.sleep(3600)
+
+    agent.planner.run = idle  # type: ignore[method-assign]
+    await agent.run()
+    agent.trace.close()
+
+    lines = stint_lines(tmp_path / "agent-ada")
+    start = next(line for line in lines if line["event"] == "sleep_start")
+    end = next(line for line in lines if line["event"] == "sleep_end")
+    assert start["where"] == "asleep on bed_1"
+    assert start["tick"] == 2
+    assert end["reason"] == "woke up: damaged"
+    assert end["ticks_slept"] == 2
+
+
+async def test_the_reflex_waits_for_the_wake_and_fires_on_that_tick(
+    tmp_path: Path,
+) -> None:
+    jev = FakeJevClient(default_action="wait")
+    bitten = damaged_event("ada", "wolf_1", 3, 17)
+    script = [
+        make_observation(
+            tick,
+            make_entity("ada", (10, 10), fatigue=50, asleep=tick in (2, 3)),
+            entities=(
+                [make_entity("wolf_1", (11, 10), entity_type="wolf")]
+                if tick >= 3
+                else []
+            ),
+            events=[bitten] if tick == 4 else [],
+        )
+        for tick in range(1, 7)
+    ]
+    world = FakeWorldClient(script)
+    agent = build_agent(world, jev, tmp_path)
+    agent.set_reflex(GUARD_REFLEX)
+    modes: list[str] = []
+
+    async def idle() -> None:
+        await asyncio.sleep(3600)
+
+    agent.planner.run = idle  # type: ignore[method-assign]
+    original = agent._handle_tick
+
+    async def spy(observation: pb.Observation) -> None:
+        await original(observation)
+        modes.append(agent.mode)
+
+    agent._handle_tick = spy  # type: ignore[method-assign]
+    await agent.run()
+
+    assert modes[1] != MODE_REFLEX and modes[2] != MODE_REFLEX, "asleep is quiet"
+    assert modes[3] == MODE_REFLEX, "the reflex runs on the tick it wakes"
+
+
+async def test_the_sleep_tool_returns_when_the_settler_wakes(tmp_path: Path) -> None:
+    fell = acted_event("ada", "sleep", True, "asleep on the ground")
+    woke = acted_event("ada", "wake", True, "woke up: rested")
+    world = FakeWorldClient(
+        sleeping_observations([2, 3, 4], 6, events_by_tick={2: [fell], 5: [woke]})
+    )
+    jev = FakeJevClient(default_action="wait")
+    agent = build_agent(world, jev, tmp_path)
+    results: list[str] = []
+
+    async def plan() -> None:
+        outcome = await agent.direct_action(
+            pb.Intent(sleep=pb.SleepIntent()), "sleep on the ground"
+        )
+        results.append(outcome)
+        results.append(await agent.await_wake(1))
+        await asyncio.sleep(3600)
+
+    agent.planner.run = plan  # type: ignore[method-assign]
+    await agent.run()
+
+    assert "sleep ok" in results[0]
+    assert "woke because woke up: rested" in results[1]
+    assert "fatigue 50 -> 50" in results[1]
+
+
+async def test_a_wake_intent_is_the_one_thing_a_sleeper_may_submit(
+    tmp_path: Path,
+) -> None:
+    world = FakeWorldClient(sleeping_observations([2, 3, 4], 5))
+    jev = FakeJevClient(default_action="wait")
+    agent = build_agent(world, jev, tmp_path)
+    outcomes: list[str] = []
+
+    async def plan() -> None:
+        await asyncio.sleep(0)
+        outcomes.append(
+            await agent.direct_action(pb.Intent(wake=pb.WakeIntent()), "wake up")
+        )
+        await asyncio.sleep(3600)
+
+    agent.planner.run = plan  # type: ignore[method-assign]
+    await agent.run()
+
+    assert any(intent.HasField("wake") for intent in world.submitted)
+
+
+async def test_a_sleeper_holds_the_wake_and_refuses_other_queued_actions(
+    tmp_path: Path,
+) -> None:
+    """Regression: the Intent oneof is `action`; reading it wrongly crashed agents."""
+    from agents.jev_agent.agent import _DirectRequest
+
+    world = FakeWorldClient(sleeping_observations([], 1))
+    agent = build_agent(world, FakeJevClient(default_action="wait"), tmp_path)
+    loop = asyncio.get_running_loop()
+    move = _DirectRequest(
+        intent=pb.Intent(move=pb.MoveIntent(direction=pb.NORTH)),
+        description="move north",
+        future=loop.create_future(),
+    )
+    wake = _DirectRequest(
+        intent=pb.Intent(wake=pb.WakeIntent()),
+        description="wake up",
+        future=loop.create_future(),
+    )
+    agent._direct_requests.put_nowait(move)
+    agent._direct_requests.put_nowait(wake)
+
+    picked = agent._wake_request_while_asleep()
+
+    assert picked is wake
+    assert move.future.result() == "move north -> failed: asleep"

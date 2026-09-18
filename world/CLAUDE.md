@@ -349,12 +349,35 @@ live server pays at startup); it is paid once per run id. Seeks are sub-ms.
 Contract: [docs/08_building.md](../docs/08_building.md); `items.py` is the same
 contract in code.
 
-### Recipes
+### Recipes and stations (docs/10_metal_and_sleep.md)
 
 `crafting.RECIPES` maps a recipe name to a frozen `Recipe(inputs, output_count,
-needs_workshop)`. A workshop recipe only succeeds while the crafter stands on
-or 8-adjacent to a placed `workshop_table` (`crafting.workshop_nearby`, which
-scans the 9 neighbouring tiles rather than every object in the world).
+station, work)`. The recipe table's source of truth is
+[docs/10_metal_and_sleep.md](../docs/10_metal_and_sleep.md), section 2.
+
+`station` is `""` for hand crafting, otherwise `workshop_table`, `furnace` or
+`anvil`: the crafter must stand on or 8-adjacent to one
+(`crafting.nearest_station` / `station_nearby`, which scan the 9 neighbouring
+tiles rather than every object in the world; the own tile first, then ties by
+smallest object id, so the choice is deterministic).
+
+`work` is the number of craft actions a recipe needs. `work == 1` completes
+instantly. A station recipe with `work > 1` keeps progress **on the station
+object** under `craft:<entity_id>` = `<recipe>:<done>`: per settler, per
+station, surviving the settler walking away and coming back. Inputs are checked
+on every action and only consumed on the action that completes the recipe;
+crafting a different recipe at that station resets the settler's progress.
+Progress actions report `"<recipe> 2/4"`, completion reports
+`"crafted <kind>"` (the prefix run analysis greps for).
+
+### Tool tiers and ore veins
+
+`items.EXTRACT_TOOLS` maps an object type to the frozenset of tools that speed
+it up and `EXTRACT_WORK_BY_TOOL` gives the work one action adds while wielding
+each (stone 3, copper 4, iron 5; bare hands `EXTRACT_WORK_BARE` = 1).
+`VEIN_REQUIRED_TOOLS` gates `copper_vein` (any pickaxe) and `iron_vein` (copper
+or iron pickaxe): without one the extract fails with
+`"<object> needs a <tools>"`. Everything else can still be worked bare-handed.
 
 ### Two placement layers
 
@@ -391,6 +414,48 @@ object's `progress` state key, `ObjectRemoved` plus one item back to whoever
 lands the last blow. `RestIntent` heals `REST_HEAL` on a bed on or next to the
 entity's tile; one rester per bed per tick (smallest entity id wins) and only
 while hunger is above zero. The rest phase sits beside eat in `process_tick`.
+
+## The Day, Fatigue and Sleep (docs/10_metal_and_sleep.md)
+
+Contract: [docs/10_metal_and_sleep.md](../docs/10_metal_and_sleep.md),
+sections 3 and 4.
+
+### The clock
+
+`World.day_length_ticks` (config `[world] day_length_ticks`, default 300)
+drives `World.clock` -> `WorldClock(day, tick_of_day, day_length, night)`;
+night starts at `night_start_tick()`, two thirds through the day. The clock
+rides along with the tick everywhere it is reported: `Observation.clock`, the
+viewer's `snapshot` and `tick_completed` messages, the recorded `tick` record
+and the replay server's copies of both. `meta.json` records
+`day_length_ticks` so a replay of an old run still has a clock.
+
+### `sleep.py`
+
+`Entity` gains `fatigue`, `max_fatigue`, `asleep`, `sleeping_on` (bed object
+id, `""` for the ground) and `collapsed`. Wolves have no body clock: they
+never tire and never sleep.
+
+Two phases, both in `sleep.py`:
+
+- `process_sleep_phase` (after movement and every action phase) applies
+  `WakeIntent` then `SleepIntent`. One sleeper per bed, smallest entity id
+  wins, as everywhere else.
+- `process_fatigue_phase` (beside `process_hunger_phase`) accumulates fatigue
+  for the awake, recovers it for sleepers at the bed/ground x night/day rate,
+  heals bed sleepers, collapses anyone at max fatigue and wakes sleepers whose
+  reason to sleep has gone.
+
+Sleep is a *state*: `TickContext.submit_intent` refuses every intent but
+`wake` from a sleeper with reason `asleep`, and `tick._living_subset` repeats
+the guard for intents the world injects itself. Waking on damage reads
+`TickEvents.damage_events` in the fatigue phase rather than hooking
+`combat.apply_damage`, which keeps combat unaware of sleep and makes
+starvation damage (applied in the hunger phase, just before) behave the same.
+
+`is_tired(entity)` (fatigue >= 60) is the one predicate other modules use:
+`stats.process_health_regen` skips the tired, and extraction and combat apply
+their penalties through it.
 
 ## Conversations and Giving (docs/09_conversation_and_reflex.md)
 
@@ -473,22 +538,40 @@ and calls anything not touching the map border a lake.
   random subset with the global numpy RNG: one-tile mountains, not reproducible).
 - Rivers: 6-9 per island, sources >= 150 tiles from open water, >= 400 apart.
 
+- **Ore veins** (docs/10, section 5): `copper_vein` and `iron_vein` in clusters
+  of 3-8 inside outcrops on high ground (`vein_suitability` = outcrop x
+  `highland_field` x a slow ore-bearing noise), so most outcrops are barren and
+  the metal sits in a few inland districts. Densities are per million tiles
+  (9.4 copper, 5.0 iron: about 150 and 80 on the island). Unlike every other
+  pass this one places whole clusters around chosen seed tiles, at least
+  `vein_cluster_spacing` apart.
+
 ### Settlement site (`settlement.py`)
 
-`find_settlement_site` tests **every tile** exactly with integral-image box
-sums (about 2.5 s on 4000x4000). Requirements are the constants at the top of
-the module (`MINIMUMS`, `CLEARING_SIZE`, `MIN_LAND_FRACTION`). Score =
-min capped supply ratio + 0.3 x mean ratio + openness of the 27 x 27 square;
-ties go to the smallest (y, x).
+`select_site` tests **every tile** exactly with integral-image box sums (about
+2.5 s on 4000x4000); `find_settlement_site` is the `World` wrapper. Requirements
+are the constants at the top of the module (`MINIMUMS`, `CLEARING_SIZE`,
+`MIN_LAND_FRACTION`, `ORE_MINIMUMS`). Score = min capped supply ratio + 0.3 x
+mean ratio + openness of the 27 x 27 square; ties go to the smallest (y, x).
+
+Ore only gates eligibility, never the score, and it is counted in the **ring**
+between `ORE_EXCLUSION_RADIUS` (60) and `ORE_SEARCH_RADIUS` (200) of the centre.
+That is what lets the generator arrange ore around a site it has already
+chosen: `objects.fit_ore_to_settlement` picks the site with `require_ore=False`,
+adds a copper and an iron cluster in the ring if the random placement left the
+site short, deletes every vein within 60 tiles, and then checks that the finder
+still picks the same tile on the saved map (it raises if it does not).
 
 ### Regenerating the island
 
 ```bash
 cd world && uv run python -m world.terrain --seed 12345 -o saves/island.npz   # ~3 min
 uv run --with pillow python ../tools/visualize_world.py ../saves/island.npz out.png \
-    --crop 1540,972,120 --scale 8 --mark 1540,972
+    --crop 1539,974,150 --scale 8 --mark 1539,974
 ```
 
-With seed 12345 the settlement centre is (1540, 972): a lakeside clearing on a
+With seed 12345 the settlement centre is (1539, 974): a lakeside clearing on a
 neck of land between two lakes, forest behind, an outcrop and a mountain to the
-north-east.
+north-east. The map carries 151 copper and 87 iron veins; the nearest copper is
+187 tiles from the centre and the nearest iron 121 (the iron is the home
+district the generator added).

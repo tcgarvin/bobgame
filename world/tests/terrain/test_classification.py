@@ -65,7 +65,9 @@ class TestClassifyTerrain:
             "land_mask": land_mask,
             "river_mask": np.zeros((height, width), dtype=bool),
             "ford_mask": np.zeros((height, width), dtype=bool),
-            "elevation": np.random.default_rng(7).random((height, width)).astype(np.float32),
+            "elevation": np.random.default_rng(7)
+            .random((height, width))
+            .astype(np.float32),
             "moisture": np.ones((height, width), dtype=np.float32) * 0.5,
             "slope": np.zeros((height, width), dtype=np.float32),
             "dist_to_water": np.zeros((height, width), dtype=np.float32),
@@ -130,7 +132,9 @@ class TestClassifyTerrain:
         simple_inputs["moisture"][5:10, 15:18] = 0.1
 
         # Make sure these cells aren't beach or mountain
-        simple_inputs["dist_to_water"][5:10, 15:18] = 100.0  # Far from water (not beach)
+        simple_inputs["dist_to_water"][
+            5:10, 15:18
+        ] = 100.0  # Far from water (not beach)
         simple_inputs["ridged_noise"][5:10, 15:18] = 0.0  # Not ridged
         simple_inputs["elevation"][5:10, 15:18] = 0.1  # Low elevation
 

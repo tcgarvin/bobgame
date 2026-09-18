@@ -79,6 +79,11 @@ Key sprite mappings:
 - Building materials and buildings (docs/08_building.md): `reeds`,
   `clay-deposit`, `road`, `wood-floor`, `stone-floor`, `wood-wall`,
   `stone-wall`, `door`, `bed`, `chair`, `table`, `workshop-table`
+- Ore and stations (docs/10_metal_and_sleep.md): `copper-vein`
+  (`Objects/Ore0.png` frame 9, two-frame sparkle with `Ore1.png`), `iron-vein`
+  (same sheet, frame 50), `furnace` (`Objects/Decor0.png` frame 54, a lit
+  hearth) and `anvil` (`Decor0.png` frame 43). The veins live in a new
+  `Objects/Ore.tsx`; the stations were added to `Objects/Decor.tsx`
 - Item icons: `axe`, `pickaxe`, `sword`
 
 Sprite keys are kebab-case; `OBJECT_SPRITE_MAP` in `GameScene` maps the
@@ -234,6 +239,37 @@ right of any entity whose latest `agent_status` has mode `planning`, in live and
 replay mode alike. It hides while a speech bubble is showing, when the entity is
 dead, and as soon as the mode changes (a stint started). Spoken utterances on
 the `shout` channel get the same speech bubble as `local` ones.
+
+## Day, night and sleep (docs/10_metal_and_sleep.md)
+
+- Every tick message (and the snapshot a replay seek sends) carries
+  `clock: {day, tick_of_day, day_length, night}`; `WorldState.getClock()` keeps
+  the latest one and everything else is derived from it, never accumulated, so
+  seeking in replay lands on exactly the right shade and reading.
+- `GameScene.nightTintAlpha` turns that clock into the alpha of a screen-space
+  rectangle (`nightOverlay`, depth 50): clear by day, a dusk ramp over the last
+  10% of the daytime (daytime is the first 2/3 of a day), full dark blue at
+  night and a dawn ramp over the first 10% of the day. It sits above the world
+  (objects at depth 4-30) but below the HUD text (depth 100), and the HTML
+  overlay is outside the canvas, so neither is tinted. The rectangle is resized
+  every frame from the camera size divided by the zoom, because a
+  scroll-factor-0 object is still scaled by the camera.
+- Entities carry `fatigue`, `max_fatigue` and `asleep`. A sleeper gets a small
+  "z" above the sprite (`GameScene.updateSleepMarker`), red when it has
+  collapsed — treated as `asleep && fatigue >= max_fatigue`, which is the state
+  the world's `collapse` event leaves behind.
+- The agent panel shows a Fatigue bar with the state word from
+  `OverlayUI.fatigueState` (fresh < 60, tired 60-99, exhausted at max) and an
+  "Asleep" row; the header carries the clock readout (`#clock-readout`,
+  `day 2 · 143/300 · night`).
+- The object inspector lists a vein's `remaining` units like any other resource
+  and, for a `workshop_table`, `furnace` or `anvil`, a "Crafting" section read
+  from the station's `craft:<entity_id>` = `<recipe>:<done>` state keys.
+- `scripts/fake_replay_server.mjs` now sends the clock, per-entity fatigue
+  (cleo sleeps at night, bram collapses from tick 40), the two veins and a
+  furnace and anvil with craft progress, so all of this can be seen without a
+  real recording. Not verified in a browser in this pass: `tsc`/`vite build`
+  and a protocol check against the fake server only.
 
 ## Conversations and reflex (docs/09_conversation_and_reflex.md)
 

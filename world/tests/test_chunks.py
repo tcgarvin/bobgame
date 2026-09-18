@@ -145,16 +145,10 @@ class TestChunkManager:
         assert (1, 2) in chunks
         assert (2, 2) in chunks
 
-    def test_initialize_from_world_indexes_entities(
-        self, large_world: World
-    ) -> None:
+    def test_initialize_from_world_indexes_entities(self, large_world: World) -> None:
         """Entities are indexed into chunks."""
-        large_world.add_entity(
-            Entity(entity_id="alice", position=Position(x=10, y=10))
-        )
-        large_world.add_entity(
-            Entity(entity_id="bob", position=Position(x=50, y=60))
-        )
+        large_world.add_entity(Entity(entity_id="alice", position=Position(x=10, y=10)))
+        large_world.add_entity(Entity(entity_id="bob", position=Position(x=50, y=60)))
 
         manager = ChunkManager(large_world)
         manager.initialize_from_world()
@@ -166,9 +160,7 @@ class TestChunkManager:
         assert chunk_0_0 is not None
         assert "alice" in chunk_0_0.entities
 
-    def test_initialize_from_world_indexes_objects(
-        self, large_world: World
-    ) -> None:
+    def test_initialize_from_world_indexes_objects(self, large_world: World) -> None:
         """Objects are indexed into chunks."""
         large_world.add_object(
             WorldObject(
@@ -191,13 +183,9 @@ class TestChunkManager:
         assert manager.get_object_chunk("bush1") == (0, 0)
         assert manager.get_object_chunk("bush2") == (2, 2)
 
-    def test_update_entity_position_same_chunk(
-        self, large_world: World
-    ) -> None:
+    def test_update_entity_position_same_chunk(self, large_world: World) -> None:
         """Moving within same chunk updates version but not membership."""
-        large_world.add_entity(
-            Entity(entity_id="alice", position=Position(x=10, y=10))
-        )
+        large_world.add_entity(Entity(entity_id="alice", position=Position(x=10, y=10)))
 
         manager = ChunkManager(large_world)
         manager.initialize_from_world()
@@ -211,13 +199,9 @@ class TestChunkManager:
         assert new_chunk is None
         assert manager.get_entity_chunk("alice") == (0, 0)
 
-    def test_update_entity_position_different_chunk(
-        self, large_world: World
-    ) -> None:
+    def test_update_entity_position_different_chunk(self, large_world: World) -> None:
         """Moving to different chunk updates membership."""
-        large_world.add_entity(
-            Entity(entity_id="alice", position=Position(x=10, y=10))
-        )
+        large_world.add_entity(Entity(entity_id="alice", position=Position(x=10, y=10)))
 
         manager = ChunkManager(large_world)
         manager.initialize_from_world()
@@ -252,12 +236,8 @@ class TestChunkManager:
 
     def test_get_entities_in_chunks(self, large_world: World) -> None:
         """Can query entities by chunk list."""
-        large_world.add_entity(
-            Entity(entity_id="alice", position=Position(x=10, y=10))
-        )
-        large_world.add_entity(
-            Entity(entity_id="bob", position=Position(x=50, y=50))
-        )
+        large_world.add_entity(Entity(entity_id="alice", position=Position(x=10, y=10)))
+        large_world.add_entity(Entity(entity_id="bob", position=Position(x=50, y=50)))
         large_world.add_entity(
             Entity(entity_id="charlie", position=Position(x=80, y=80))
         )
@@ -325,9 +305,7 @@ class TestTerrainChunkExtraction:
         world.set_floor_array(floor)
 
         # Override a tile
-        world.set_tile(
-            Tile(position=Position(x=10, y=10), floor_type="mountain")
-        )
+        world.set_tile(Tile(position=Position(x=10, y=10), floor_type="mountain"))
 
         chunk = world.get_terrain_chunk(0, 0)
 

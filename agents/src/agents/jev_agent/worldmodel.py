@@ -50,6 +50,23 @@ class TileInfo:
 
 
 @dataclass(frozen=True)
+class WorldClock:
+    """The world's day clock, as the observation reports it (docs/10 section 3)."""
+
+    day: int = 0
+    tick_of_day: int = 0
+    day_length: int = items.DEFAULT_DAY_LENGTH
+    night: bool = False
+
+    def as_text(self) -> str:
+        """`"day 2 212/300 night"`, the form every tick line uses."""
+        return (
+            f"day {self.day} {self.tick_of_day}/{self.day_length} "
+            f"{'night' if self.night else 'day'}"
+        )
+
+
+@dataclass(frozen=True)
 class ObjectInfo:
     """A world object as it was last observed."""
 
@@ -75,6 +92,18 @@ class ObjectInfo:
     def contents(self) -> dict[str, int]:
         """Parsed `contents` JSON for chests and item piles ({} when absent/bad)."""
         return _parse_counts(self.state.get("contents", ""))
+
+    def craft_progress(self, entity_id: str) -> tuple[str, int]:
+        """`(recipe, actions done)` this crafter has banked at this station.
+
+        Empty recipe and zero when the station holds no progress for them, or
+        when the state value is not the `"<recipe>:<done>"` the world writes.
+        """
+        raw = self.state.get(f"{items.CRAFT_PROGRESS_PREFIX}{entity_id}", "")
+        recipe, _, done = raw.partition(":")
+        if not recipe or not done.isdigit():
+            return ("", 0)
+        return (recipe, int(done))
 
     def notes(self) -> list[dict[str, object]]:
         """Parsed `notes` JSON for message boards, with empty slots dropped."""
@@ -105,6 +134,14 @@ class EntityInfo:
     alive: bool
     inventory: Mapping[str, int]
     last_seen: int
+    fatigue: int = 0
+    max_fatigue: int = items.MAX_FATIGUE
+    asleep: bool = False
+
+    @property
+    def fatigue_word(self) -> str:
+        """`fresh`, `tired` or `exhausted` for this entity's fatigue."""
+        return items.fatigue_word(self.fatigue)
 
 
 @dataclass(frozen=True)
@@ -317,6 +354,7 @@ class WorldModel:
         # field, so the first observed position is the best available estimate.
         self.settlement: Coord = (0, 0)
         self.settlement_known = False
+        self.clock = WorldClock()
         self.history: deque[HistoryEntry] = deque(maxlen=HISTORY_LIMIT)
         self.heard: deque[HeardUtterance] = deque(maxlen=UTTERANCE_LIMIT)
         self.damage_log: deque[DamageTaken] = deque(maxlen=DAMAGE_LOG_LIMIT)
@@ -371,6 +409,7 @@ class WorldModel:
         digest = TickDigest(tick=observation.tick_id)
 
         self.self_info = _entity_info(observation.self, observation.tick_id)
+        self.clock = _world_clock(observation.clock)
         if not self.settlement_known:
             self.settlement = self.self_info.position
             self.settlement_known = True
@@ -549,16 +588,23 @@ class WorldModel:
             if obj.object_type not in items.GROUND_LAYER_KINDS
         ]
 
-    def workshop_table_near(self) -> ObjectInfo | None:
-        """A placed workshop table on or next to the actor, if it knows of one.
+    def station_near(self, station: str) -> ObjectInfo | None:
+        """A placed station of this type on or next to the actor, if it knows of one.
 
-        Workshop recipes fail anywhere else, so this is the gate for offering
-        them at all.
+        A station recipe fails anywhere else, so this is the gate for offering
+        it at all. An empty `station` (a hand recipe) has no gate and yields
+        None, which callers read as "no station needed".
         """
+        if not station:
+            return None
         for obj in self.objects_near(1):
-            if obj.object_type == items.WORKSHOP_TABLE:
+            if obj.object_type == station:
                 return obj
         return None
+
+    def workshop_table_near(self) -> ObjectInfo | None:
+        """A placed workshop table on or next to the actor, if it knows of one."""
+        return self.station_near(items.WORKSHOP_TABLE)
 
     def objects_near(self, radius: int) -> list[ObjectInfo]:
         """Known objects within `radius` of the actor, nearest first."""
@@ -700,6 +746,21 @@ def _entity_info(entity: pb.Entity, tick: int) -> EntityInfo:
         alive=entity.alive,
         inventory=inventory_to_dict(entity.inventory),
         last_seen=tick,
+        fatigue=entity.fatigue,
+        max_fatigue=entity.max_fatigue or items.MAX_FATIGUE,
+        asleep=entity.asleep,
+    )
+
+
+def _world_clock(clock: pb.WorldClock) -> WorldClock:
+    """The observation's clock; a world that sends none leaves the defaults."""
+    if clock.day_length <= 0:
+        return WorldClock()
+    return WorldClock(
+        day=clock.day,
+        tick_of_day=clock.tick_of_day,
+        day_length=clock.day_length,
+        night=clock.night,
     )
 
 

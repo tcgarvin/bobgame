@@ -26,4 +26,14 @@
    <property name="key" value="bed"/>
   </properties>
  </tile>
+ <tile id="54" type="bobtile">
+  <properties>
+   <property name="key" value="furnace"/>
+  </properties>
+ </tile>
+ <tile id="43" type="bobtile">
+  <properties>
+   <property name="key" value="anvil"/>
+  </properties>
+ </tile>
 </tileset>

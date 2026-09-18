@@ -55,8 +55,18 @@ CRAFT_PRIORITY: tuple[str, ...] = (
     items.AXE,
     items.PICKAXE,
     items.SWORD,
+    items.IRON_SWORD,
+    items.COPPER_AXE,
+    items.COPPER_PICKAXE,
+    items.IRON_AXE,
+    items.IRON_PICKAXE,
+    items.CHARCOAL,
+    items.COPPER_INGOT,
+    items.IRON_INGOT,
     items.PLANK,
     items.WORKSHOP_TABLE,
+    items.FURNACE,
+    items.ANVIL,
     items.ROPE,
     items.WOOD_WALL,
     items.DOOR,
@@ -73,8 +83,10 @@ CRAFT_PRIORITY: tuple[str, ...] = (
 
 # One of each of these in the pack is plenty; a second is never urgent enough
 # to spend an option slot on.
-CRAFT_ONCE_KINDS: frozenset[str] = items.WIELDABLE_KINDS | frozenset(
-    {items.CHEST, items.MESSAGE_BOARD, items.WORKSHOP_TABLE}
+CRAFT_ONCE_KINDS: frozenset[str] = (
+    items.WIELDABLE_KINDS
+    | items.STATION_KINDS
+    | frozenset({items.CHEST, items.MESSAGE_BOARD})
 )
 
 # Canned phrases. Jev gets a closed set; free-text speech is the planner's job.
@@ -109,9 +121,9 @@ TRAVEL_TARGET_TYPES: frozenset[str] = (
             "chest",
             "message_board",
             "item_pile",
-            items.WORKSHOP_TABLE,
         }
     )
+    | items.STATION_KINDS
     | EXTRACTABLE_TYPES
 )
 
@@ -218,6 +230,7 @@ def _survival_options(
             )
         )
     options.extend(_rest_options(model))
+    options.extend(_sleep_options(model))
     options.extend(_shout_options(model, shouts))
     options.extend(_heard_shout_options(model, position, travel))
     for entity in model.entities_near(1):
@@ -396,6 +409,60 @@ def _rest_options(model: WorldModel) -> list[Option]:
     return []
 
 
+def _sleep_options(model: WorldModel) -> list[Option]:
+    """Sleeping on an adjacent bed or on the ground, and waking again.
+
+    While asleep the only legal action is waking, so the two sets never appear
+    together.
+    """
+    info = model.self_info
+    night = model.clock.night
+    if info.asleep:
+        return [
+            Option(
+                key="wake",
+                description=(
+                    f"stop sleeping and stand up (fatigue "
+                    f"{info.fatigue}/{info.max_fatigue})"
+                ),
+                intent=pb.Intent(wake=pb.WakeIntent()),
+            )
+        ]
+    if info.fatigue <= 0:
+        return []
+    options: list[Option] = []
+    for obj in model.objects_near(1):
+        if obj.object_type != items.BED:
+            continue
+        options.append(
+            Option(
+                key=f"sleep:{obj.object_id}",
+                description=(
+                    f"sleep on the bed {obj.object_id}: it recovers "
+                    f"{items.sleep_recovery_text(True, night)} and heals 1 health "
+                    f"every {items.REGEN_INTERVAL_TICKS} ticks while you sleep "
+                    f"(fatigue {info.fatigue}/{info.max_fatigue}). You wake at "
+                    "fatigue 0, on damage, at hunger 0, or on a wake action"
+                ),
+                intent=pb.Intent(sleep=pb.SleepIntent(object_id=obj.object_id)),
+            )
+        )
+        break
+    options.append(
+        Option(
+            key="sleep:ground",
+            description=(
+                f"sleep on the ground where you stand: it recovers "
+                f"{items.sleep_recovery_text(False, night)} while you sleep "
+                f"(fatigue {info.fatigue}/{info.max_fatigue}). You wake at "
+                "fatigue 0, on damage, at hunger 0, or on a wake action"
+            ),
+            intent=pb.Intent(sleep=pb.SleepIntent()),
+        )
+    )
+    return options
+
+
 def _travel_control_options(
     model: WorldModel, travel: TravelState | None
 ) -> list[Option]:
@@ -439,24 +506,9 @@ def _interaction_options(
         if obj.object_type in EXTRACTABLE_TYPES and same_or_adjacent(
             position, obj.position
         ):
-            tool = items.EXTRACT_TOOL.get(obj.object_type, "")
-            yields = items.EXTRACT_YIELD.get(obj.object_type, "materials")
-            if not tool:
-                speed = "no tool helps here"
-            elif wielded == tool:
-                speed = "fast"
-            else:
-                speed = f"slow, wield {tool} to speed up"
-            options.append(
-                Option(
-                    key=f"extract:{obj.object_id}",
-                    description=(
-                        f"harvest {yields} from the {_object_label(obj, position)}, "
-                        f"{obj.remaining} units left ({speed})"
-                    ),
-                    intent=pb.Intent(extract=pb.ExtractIntent(object_id=obj.object_id)),
-                )
-            )
+            option = _extract_option(obj, position, wielded)
+            if option is not None:
+                options.append(option)
         elif obj.object_type == "bush" and obj.position == position and obj.has_berry:
             options.append(
                 Option(
@@ -518,16 +570,37 @@ def _chest_options(obj: ObjectInfo, inventory: Mapping[str, int]) -> list[Option
     return options
 
 
+def _extract_option(obj: ObjectInfo, position: Coord, wielded: str) -> Option | None:
+    """Harvesting one object, or None when what is in hand cannot work it.
+
+    A vein needs a pickaxe of the right tier; everything else yields to bare
+    hands, only slower.
+    """
+    if not items.can_extract(obj.object_type, wielded):
+        return None
+    yields = items.EXTRACT_YIELD.get(obj.object_type, "materials")
+    work = items.extract_work_per_action(obj.object_type, wielded)
+    holding = f"with the {wielded}" if wielded else "bare-handed"
+    return Option(
+        key=f"extract:{obj.object_id}",
+        description=(
+            f"harvest {yields} from the {_object_label(obj, position)}, "
+            f"{obj.remaining} units left ({work} work per action {holding}, "
+            f"{items.EXTRACT_THRESHOLD} work per unit)"
+        ),
+        intent=pb.Intent(extract=pb.ExtractIntent(object_id=obj.object_id)),
+    )
+
+
 def craftable_now(model: WorldModel, inventory: Mapping[str, int]) -> list[str]:
     """Recipe names that would succeed on this tick, in priority order.
 
-    A recipe is craftable when the inputs are in the pack and, for workshop
-    recipes, a placed workshop table is on or next to the actor's tile.
+    A recipe is craftable when the inputs are in the pack and, for a station
+    recipe, a placed station of that type is on or next to the actor's tile.
     """
-    has_workshop = model.workshop_table_near() is not None
     ready: list[str] = []
     for name, recipe in RECIPES.items():
-        if recipe.needs_workshop and not has_workshop:
+        if recipe.station and model.station_near(recipe.station) is None:
             continue
         if any(
             inventory.get(kind, 0) < amount for kind, amount in recipe.inputs.items()
@@ -548,15 +621,32 @@ def _craft_rank(recipe: str) -> tuple[int, str]:
     return (len(CRAFT_PRIORITY), recipe)
 
 
+def _craft_description(model: WorldModel, recipe_name: str) -> str:
+    """One craft option's text: cost, yield, station, and work still to do."""
+    recipe = RECIPES[recipe_name]
+    yields = "" if recipe.output_count == 1 else f", {recipe.output_count} of them"
+    text = f"craft {recipe_name} using {recipe.cost_text()}{yields}"
+    if not recipe.station:
+        return text
+    text += f" at the {recipe.station} within reach"
+    if recipe.work <= 1:
+        return text
+    station = model.station_near(recipe.station)
+    done = 0
+    if station is not None:
+        started, actions = station.craft_progress(model.entity_id)
+        if started == recipe_name:
+            done = actions
+    return f"{text}; {recipe.work} craft actions, {done} done so far"
+
+
 def _crafting_options(model: WorldModel, inventory: Mapping[str, int]) -> list[Option]:
     options: list[Option] = []
     for recipe_name in craftable_now(model, inventory)[:CRAFT_OPTION_LIMIT]:
-        recipe = RECIPES[recipe_name]
-        yields = "" if recipe.output_count == 1 else f", {recipe.output_count} of them"
         options.append(
             Option(
                 key=f"craft:{recipe_name}",
-                description=(f"craft {recipe_name} using {recipe.cost_text()}{yields}"),
+                description=_craft_description(model, recipe_name),
                 intent=pb.Intent(craft=pb.CraftIntent(recipe=recipe_name)),
             )
         )

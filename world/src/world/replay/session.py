@@ -12,7 +12,7 @@ from ..exceptions import ObjectNotFoundError, PositionOccupiedError
 from ..state import World, WorldObject
 from ..terrain.persistence import load_map
 from ..types import Position
-from ..viewer_payload import entity_from_state, object_from_state
+from ..viewer_payload import clock_payload, entity_from_state, object_from_state
 from .loader import RunLoader
 
 logger = structlog.get_logger()
@@ -106,6 +106,7 @@ class ReplaySession:
         return {
             "type": "snapshot",
             "tick_id": self.tick_id,
+            "clock": clock_payload(self.world.clock),
             "world_size": {"width": self.world.width, "height": self.world.height},
             "chunk_size": CHUNK_SIZE,
             "tick_duration_ms": self.loader.tick_duration_ms,
@@ -131,6 +132,7 @@ class ReplaySession:
         return {
             "type": "tick_completed",
             "tick_id": tick_id,
+            "clock": record.get("clock") or clock_payload(self.world.clock),
             "moves": record.get("moves", []),
             "object_changes": record.get("object_changes", []),
             "actions_processed": len(record.get("moves", []))
@@ -375,6 +377,11 @@ def _fallback_entity(event: dict[str, Any]) -> dict[str, Any]:
         "max_hunger": 0,
         "wielded": "",
         "alive": False,
+        "fatigue": 0,
+        "max_fatigue": 0,
+        "asleep": False,
+        "sleeping_on": "",
+        "collapsed": False,
         "inventory": {},
     }
 
@@ -386,7 +393,11 @@ def _build_world(loader: RunLoader, project_root: Path) -> World:
         map_file = project_root / map_path
         floor, _placed, _metadata = load_map(map_file)
         height, width = floor.shape
-        world = World(width=int(width), height=int(height))
+        world = World(
+            width=int(width),
+            height=int(height),
+            day_length_ticks=loader.day_length_ticks,
+        )
         world.set_floor_array(floor)
         if not loader.map_matches(project_root):
             logger.warning(
@@ -395,7 +406,11 @@ def _build_world(loader: RunLoader, project_root: Path) -> World:
                 path=str(map_file),
             )
     else:
-        world = World(width=loader.world_width, height=loader.world_height)
+        world = World(
+            width=loader.world_width,
+            height=loader.world_height,
+            day_length_ticks=loader.day_length_ticks,
+        )
 
     for state in loader.iter_objects():
         world.add_object(object_from_state(state))

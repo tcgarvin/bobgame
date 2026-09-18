@@ -1,9 +1,11 @@
 """Tests for attacks, damage, death and respawn."""
 
+import pytest
+
 from world.combat import kill_entity, process_attack_phase
 from world.containers import read_contents
 from world.events import TickEvents
-from world.items import attack_damage
+from world.items import WIELD_DAMAGE_BONUS, attack_damage
 from world.state import Entity, Inventory, World
 from world.stats import (
     RESPAWN_DELAY_TICKS,
@@ -278,4 +280,33 @@ class TestWolfBalanceRewardsCooperation:
     def test_three_unarmed_settlers_beat_a_wolf_comfortably(self) -> None:
         unarmed = attack_damage("player", "")
         taken = _damage_taken_killing_a_wolf([unarmed] * 3)
+        assert taken < self.PLAYER_HEALTH // 2
+
+
+class TestMetalWeaponDamage:
+    """docs/10_metal_and_sleep.md section 2: the tier's damage bonuses."""
+
+    PLAYER_HEALTH = Entity(entity_id="probe", position=Position(x=0, y=0)).max_health
+
+    @pytest.mark.parametrize(
+        "wielded,damage",
+        [
+            ("iron_sword", 7),
+            ("copper_axe", 4),
+            ("iron_axe", 5),
+            ("copper_pickaxe", 3),
+            ("iron_pickaxe", 4),
+        ],
+    )
+    def test_metal_tool_damage(self, wielded: str, damage: int) -> None:
+        assert attack_damage("player", wielded) == damage
+
+    def test_there_is_no_copper_sword(self) -> None:
+        assert "copper_sword" not in WIELD_DAMAGE_BONUS
+
+    def test_a_lone_iron_swordsman_kills_a_wolf_in_three_hits_taking_nine(self) -> None:
+        iron = attack_damage("player", "iron_sword")
+        assert -(-WOLF_MAX_HEALTH // iron) == 3
+        taken = _damage_taken_killing_a_wolf([iron])
+        assert taken == 9
         assert taken < self.PLAYER_HEALTH // 2

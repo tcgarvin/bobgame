@@ -13,6 +13,7 @@ from world.terrain.objects import (
     PlacedObject,
     PlacementFields,
     canopy_field,
+    highland_field,
     outcrop_field,
     place_objects,
     uniformise,
@@ -174,6 +175,147 @@ class TestTreesAndRocks:
         placed = place_objects(fields, np.random.default_rng(SEED), SEED, config)
         for rock in _of(placed, ObjectType.BOULDER, ObjectType.ROCK_LARGE):
             assert outcrop[rock.y, rock.x] > 0.5
+
+
+# A map big enough to hold a few vein clusters, with hills in the east.
+VEIN_CONFIG = ObjectPlacementConfig(
+    copper_vein_density=600.0, iron_vein_density=300.0, vein_cluster_spacing=20
+)
+
+
+def _hilly_fields() -> PlacementFields:
+    """Grass with an ocean strip west, a mountain block north-east, and a
+    ridge running down the eastern half (high ridged noise and real slope)."""
+    floor = np.full((SIZE, SIZE), GRASS, dtype=np.uint8)
+    floor[:, :20] = DEEP
+    floor[:40, 200:] = MOUNTAIN
+
+    xs = np.arange(SIZE, dtype=np.float32)[None, :].repeat(SIZE, axis=0)
+    ys = np.arange(SIZE, dtype=np.float32)[:, None].repeat(SIZE, axis=1)
+    ridge = np.exp(-(((xs - 170) / 40.0) ** 2)) * (
+        0.6 + 0.4 * np.sin(ys / 30.0).astype(np.float32)
+    )
+    elevation = ridge.astype(np.float32)
+    slope = np.abs(np.gradient(elevation, axis=1)).astype(np.float32)
+
+    ocean = np.zeros((SIZE, SIZE), dtype=bool)
+    ocean[:, :20] = True
+    return PlacementFields(
+        floor=floor,
+        forest_density=np.zeros((SIZE, SIZE), dtype=np.float32),
+        ridged_noise=elevation,
+        slope=slope,
+        dist_to_water=_distance_to(ocean),
+        dist_to_coast=_distance_to(ocean),
+        dist_to_fresh=np.full((SIZE, SIZE), 1000.0, dtype=np.float32),
+        dist_to_mountain=_distance_to(floor == MOUNTAIN),
+    )
+
+
+@pytest.fixture(scope="module")
+def hilly() -> PlacementFields:
+    return _hilly_fields()
+
+
+@pytest.fixture(scope="module")
+def hilly_placed(hilly: PlacementFields) -> list[PlacedObject]:
+    return place_objects(hilly, np.random.default_rng(SEED), SEED, VEIN_CONFIG)
+
+
+def _veins(placed: list[PlacedObject], object_type: ObjectType) -> list[PlacedObject]:
+    return _of(placed, object_type)
+
+
+def _cluster_sizes(veins: list[PlacedObject], reach: int) -> list[int]:
+    """Group veins into clusters by single-linkage within `reach` tiles."""
+    remaining = {(v.x, v.y) for v in veins}
+    sizes: list[int] = []
+    while remaining:
+        frontier = [remaining.pop()]
+        size = 0
+        while frontier:
+            x, y = frontier.pop()
+            size += 1
+            near = [
+                (nx, ny)
+                for (nx, ny) in remaining
+                if max(abs(nx - x), abs(ny - y)) <= reach
+            ]
+            for tile in near:
+                remaining.discard(tile)
+                frontier.append(tile)
+        sizes.append(size)
+    return sizes
+
+
+class TestOreVeins:
+    def test_places_both_metals_near_the_target_count(
+        self, hilly_placed: list[PlacedObject]
+    ) -> None:
+        target_copper = round(VEIN_CONFIG.copper_vein_density * SIZE**2 / 1_000_000)
+        target_iron = round(VEIN_CONFIG.iron_vein_density * SIZE**2 / 1_000_000)
+        copper = len(_veins(hilly_placed, ObjectType.COPPER_VEIN))
+        iron = len(_veins(hilly_placed, ObjectType.IRON_VEIN))
+        assert target_copper <= copper <= target_copper + VEIN_CONFIG.vein_cluster_max
+        assert target_iron <= iron <= target_iron + VEIN_CONFIG.vein_cluster_max
+        assert iron < copper
+
+    def test_veins_only_on_walkable_ground(
+        self, hilly: PlacementFields, hilly_placed: list[PlacedObject]
+    ) -> None:
+        for vein in _veins(hilly_placed, ObjectType.COPPER_VEIN) + _veins(
+            hilly_placed, ObjectType.IRON_VEIN
+        ):
+            assert hilly.floor[vein.y, vein.x] in (GRASS, DIRT)
+
+    def test_veins_sit_in_outcrops_on_high_ground(
+        self, hilly: PlacementFields, hilly_placed: list[PlacedObject]
+    ) -> None:
+        outcrop = outcrop_field(hilly, SEED, VEIN_CONFIG)
+        highland = highland_field(hilly, VEIN_CONFIG)
+        veins = _veins(hilly_placed, ObjectType.COPPER_VEIN) + _veins(
+            hilly_placed, ObjectType.IRON_VEIN
+        )
+        assert veins
+        for vein in veins:
+            assert outcrop[vein.y, vein.x] > 0.2
+            assert highland[vein.y, vein.x] > 0.2
+
+    def test_veins_keep_away_from_the_coast(
+        self, hilly: PlacementFields, hilly_placed: list[PlacedObject]
+    ) -> None:
+        veins = _veins(hilly_placed, ObjectType.COPPER_VEIN) + _veins(
+            hilly_placed, ObjectType.IRON_VEIN
+        )
+        assert min(hilly.dist_to_coast[v.y, v.x] for v in veins) > 40
+
+    def test_veins_come_in_clusters(self, hilly_placed: list[PlacedObject]) -> None:
+        for object_type in (ObjectType.COPPER_VEIN, ObjectType.IRON_VEIN):
+            sizes = _cluster_sizes(
+                _veins(hilly_placed, object_type), 2 * VEIN_CONFIG.vein_cluster_radius
+            )
+            assert sizes
+            for size in sizes:
+                assert (
+                    VEIN_CONFIG.vein_cluster_min
+                    <= size
+                    <= (VEIN_CONFIG.vein_cluster_max)
+                )
+
+    def test_clusters_of_the_two_metals_stay_apart(
+        self, hilly_placed: list[PlacedObject]
+    ) -> None:
+        copper = {(v.x, v.y) for v in _veins(hilly_placed, ObjectType.COPPER_VEIN)}
+        iron = {(v.x, v.y) for v in _veins(hilly_placed, ObjectType.IRON_VEIN)}
+        assert not (copper & iron)
+
+    def test_same_seed_gives_the_same_veins(
+        self, hilly: PlacementFields, hilly_placed: list[PlacedObject]
+    ) -> None:
+        again = place_objects(hilly, np.random.default_rng(SEED), SEED, VEIN_CONFIG)
+        assert _veins(again, ObjectType.COPPER_VEIN) == _veins(
+            hilly_placed, ObjectType.COPPER_VEIN
+        )
 
 
 class TestHelpers:

@@ -37,7 +37,7 @@ class Position(_message.Message):
     def __init__(self, x: _Optional[int] = ..., y: _Optional[int] = ...) -> None: ...
 
 class Entity(_message.Message):
-    __slots__ = ("entity_id", "position", "entity_type", "tags", "status_bits", "inventory", "health", "max_health", "hunger", "max_hunger", "wielded", "alive")
+    __slots__ = ("entity_id", "position", "entity_type", "tags", "status_bits", "inventory", "health", "max_health", "hunger", "max_hunger", "wielded", "alive", "fatigue", "max_fatigue", "asleep")
     ENTITY_ID_FIELD_NUMBER: _ClassVar[int]
     POSITION_FIELD_NUMBER: _ClassVar[int]
     ENTITY_TYPE_FIELD_NUMBER: _ClassVar[int]
@@ -50,6 +50,9 @@ class Entity(_message.Message):
     MAX_HUNGER_FIELD_NUMBER: _ClassVar[int]
     WIELDED_FIELD_NUMBER: _ClassVar[int]
     ALIVE_FIELD_NUMBER: _ClassVar[int]
+    FATIGUE_FIELD_NUMBER: _ClassVar[int]
+    MAX_FATIGUE_FIELD_NUMBER: _ClassVar[int]
+    ASLEEP_FIELD_NUMBER: _ClassVar[int]
     entity_id: str
     position: Position
     entity_type: str
@@ -62,7 +65,22 @@ class Entity(_message.Message):
     max_hunger: int
     wielded: str
     alive: bool
-    def __init__(self, entity_id: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ..., entity_type: _Optional[str] = ..., tags: _Optional[_Iterable[str]] = ..., status_bits: _Optional[int] = ..., inventory: _Optional[_Union[Inventory, _Mapping]] = ..., health: _Optional[int] = ..., max_health: _Optional[int] = ..., hunger: _Optional[int] = ..., max_hunger: _Optional[int] = ..., wielded: _Optional[str] = ..., alive: bool = ...) -> None: ...
+    fatigue: int
+    max_fatigue: int
+    asleep: bool
+    def __init__(self, entity_id: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ..., entity_type: _Optional[str] = ..., tags: _Optional[_Iterable[str]] = ..., status_bits: _Optional[int] = ..., inventory: _Optional[_Union[Inventory, _Mapping]] = ..., health: _Optional[int] = ..., max_health: _Optional[int] = ..., hunger: _Optional[int] = ..., max_hunger: _Optional[int] = ..., wielded: _Optional[str] = ..., alive: bool = ..., fatigue: _Optional[int] = ..., max_fatigue: _Optional[int] = ..., asleep: bool = ...) -> None: ...
+
+class WorldClock(_message.Message):
+    __slots__ = ("day", "tick_of_day", "day_length", "night")
+    DAY_FIELD_NUMBER: _ClassVar[int]
+    TICK_OF_DAY_FIELD_NUMBER: _ClassVar[int]
+    DAY_LENGTH_FIELD_NUMBER: _ClassVar[int]
+    NIGHT_FIELD_NUMBER: _ClassVar[int]
+    day: int
+    tick_of_day: int
+    day_length: int
+    night: bool
+    def __init__(self, day: _Optional[int] = ..., tick_of_day: _Optional[int] = ..., day_length: _Optional[int] = ..., night: bool = ...) -> None: ...
 
 class Inventory(_message.Message):
     __slots__ = ("items",)
@@ -198,7 +216,7 @@ class StreamObservationsRequest(_message.Message):
     def __init__(self, lease_id: _Optional[str] = ..., entity_id: _Optional[str] = ...) -> None: ...
 
 class Observation(_message.Message):
-    __slots__ = ("tick_id", "deadline_ms", "self", "visible_tiles", "visible_entities", "visible_objects", "events")
+    __slots__ = ("tick_id", "deadline_ms", "self", "visible_tiles", "visible_entities", "visible_objects", "events", "clock")
     TICK_ID_FIELD_NUMBER: _ClassVar[int]
     DEADLINE_MS_FIELD_NUMBER: _ClassVar[int]
     SELF_FIELD_NUMBER: _ClassVar[int]
@@ -206,6 +224,7 @@ class Observation(_message.Message):
     VISIBLE_ENTITIES_FIELD_NUMBER: _ClassVar[int]
     VISIBLE_OBJECTS_FIELD_NUMBER: _ClassVar[int]
     EVENTS_FIELD_NUMBER: _ClassVar[int]
+    CLOCK_FIELD_NUMBER: _ClassVar[int]
     tick_id: int
     deadline_ms: int
     self: Entity
@@ -213,7 +232,8 @@ class Observation(_message.Message):
     visible_entities: _containers.RepeatedCompositeFieldContainer[Entity]
     visible_objects: _containers.RepeatedCompositeFieldContainer[WorldObject]
     events: _containers.RepeatedCompositeFieldContainer[ObservationEvent]
-    def __init__(self_, tick_id: _Optional[int] = ..., deadline_ms: _Optional[int] = ..., self: _Optional[_Union[Entity, _Mapping]] = ..., visible_tiles: _Optional[_Iterable[_Union[Tile, _Mapping]]] = ..., visible_entities: _Optional[_Iterable[_Union[Entity, _Mapping]]] = ..., visible_objects: _Optional[_Iterable[_Union[WorldObject, _Mapping]]] = ..., events: _Optional[_Iterable[_Union[ObservationEvent, _Mapping]]] = ...) -> None: ...
+    clock: WorldClock
+    def __init__(self_, tick_id: _Optional[int] = ..., deadline_ms: _Optional[int] = ..., self: _Optional[_Union[Entity, _Mapping]] = ..., visible_tiles: _Optional[_Iterable[_Union[Tile, _Mapping]]] = ..., visible_entities: _Optional[_Iterable[_Union[Entity, _Mapping]]] = ..., visible_objects: _Optional[_Iterable[_Union[WorldObject, _Mapping]]] = ..., events: _Optional[_Iterable[_Union[ObservationEvent, _Mapping]]] = ..., clock: _Optional[_Union[WorldClock, _Mapping]] = ...) -> None: ...
 
 class ObservationEvent(_message.Message):
     __slots__ = ("entity_entered", "entity_left", "entity_moved", "entity_acted", "utterance", "object_changed", "entity_damaged", "entity_died", "entity_respawned", "object_added", "object_removed")
@@ -359,7 +379,7 @@ class SubmitIntentRequest(_message.Message):
     def __init__(self, lease_id: _Optional[str] = ..., entity_id: _Optional[str] = ..., tick_id: _Optional[int] = ..., intent: _Optional[_Union[Intent, _Mapping]] = ...) -> None: ...
 
 class Intent(_message.Message):
-    __slots__ = ("move", "pickup", "use", "say", "wait", "collect", "eat", "attack", "extract", "craft", "equip", "place", "drop", "deposit", "withdraw", "write_note", "rest", "converse", "give")
+    __slots__ = ("move", "pickup", "use", "say", "wait", "collect", "eat", "attack", "extract", "craft", "equip", "place", "drop", "deposit", "withdraw", "write_note", "rest", "converse", "give", "sleep", "wake")
     MOVE_FIELD_NUMBER: _ClassVar[int]
     PICKUP_FIELD_NUMBER: _ClassVar[int]
     USE_FIELD_NUMBER: _ClassVar[int]
@@ -379,6 +399,8 @@ class Intent(_message.Message):
     REST_FIELD_NUMBER: _ClassVar[int]
     CONVERSE_FIELD_NUMBER: _ClassVar[int]
     GIVE_FIELD_NUMBER: _ClassVar[int]
+    SLEEP_FIELD_NUMBER: _ClassVar[int]
+    WAKE_FIELD_NUMBER: _ClassVar[int]
     move: MoveIntent
     pickup: PickupIntent
     use: UseIntent
@@ -398,7 +420,9 @@ class Intent(_message.Message):
     rest: RestIntent
     converse: ConverseIntent
     give: GiveIntent
-    def __init__(self, move: _Optional[_Union[MoveIntent, _Mapping]] = ..., pickup: _Optional[_Union[PickupIntent, _Mapping]] = ..., use: _Optional[_Union[UseIntent, _Mapping]] = ..., say: _Optional[_Union[SayIntent, _Mapping]] = ..., wait: _Optional[_Union[WaitIntent, _Mapping]] = ..., collect: _Optional[_Union[CollectIntent, _Mapping]] = ..., eat: _Optional[_Union[EatIntent, _Mapping]] = ..., attack: _Optional[_Union[AttackIntent, _Mapping]] = ..., extract: _Optional[_Union[ExtractIntent, _Mapping]] = ..., craft: _Optional[_Union[CraftIntent, _Mapping]] = ..., equip: _Optional[_Union[EquipIntent, _Mapping]] = ..., place: _Optional[_Union[PlaceIntent, _Mapping]] = ..., drop: _Optional[_Union[DropIntent, _Mapping]] = ..., deposit: _Optional[_Union[DepositIntent, _Mapping]] = ..., withdraw: _Optional[_Union[WithdrawIntent, _Mapping]] = ..., write_note: _Optional[_Union[WriteNoteIntent, _Mapping]] = ..., rest: _Optional[_Union[RestIntent, _Mapping]] = ..., converse: _Optional[_Union[ConverseIntent, _Mapping]] = ..., give: _Optional[_Union[GiveIntent, _Mapping]] = ...) -> None: ...
+    sleep: SleepIntent
+    wake: WakeIntent
+    def __init__(self, move: _Optional[_Union[MoveIntent, _Mapping]] = ..., pickup: _Optional[_Union[PickupIntent, _Mapping]] = ..., use: _Optional[_Union[UseIntent, _Mapping]] = ..., say: _Optional[_Union[SayIntent, _Mapping]] = ..., wait: _Optional[_Union[WaitIntent, _Mapping]] = ..., collect: _Optional[_Union[CollectIntent, _Mapping]] = ..., eat: _Optional[_Union[EatIntent, _Mapping]] = ..., attack: _Optional[_Union[AttackIntent, _Mapping]] = ..., extract: _Optional[_Union[ExtractIntent, _Mapping]] = ..., craft: _Optional[_Union[CraftIntent, _Mapping]] = ..., equip: _Optional[_Union[EquipIntent, _Mapping]] = ..., place: _Optional[_Union[PlaceIntent, _Mapping]] = ..., drop: _Optional[_Union[DropIntent, _Mapping]] = ..., deposit: _Optional[_Union[DepositIntent, _Mapping]] = ..., withdraw: _Optional[_Union[WithdrawIntent, _Mapping]] = ..., write_note: _Optional[_Union[WriteNoteIntent, _Mapping]] = ..., rest: _Optional[_Union[RestIntent, _Mapping]] = ..., converse: _Optional[_Union[ConverseIntent, _Mapping]] = ..., give: _Optional[_Union[GiveIntent, _Mapping]] = ..., sleep: _Optional[_Union[SleepIntent, _Mapping]] = ..., wake: _Optional[_Union[WakeIntent, _Mapping]] = ...) -> None: ...
 
 class AttackIntent(_message.Message):
     __slots__ = ("target_entity_id",)
@@ -477,6 +501,16 @@ class RestIntent(_message.Message):
     OBJECT_ID_FIELD_NUMBER: _ClassVar[int]
     object_id: str
     def __init__(self, object_id: _Optional[str] = ...) -> None: ...
+
+class SleepIntent(_message.Message):
+    __slots__ = ("object_id",)
+    OBJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    object_id: str
+    def __init__(self, object_id: _Optional[str] = ...) -> None: ...
+
+class WakeIntent(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
 
 class MoveIntent(_message.Message):
     __slots__ = ("direction",)

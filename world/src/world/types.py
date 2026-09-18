@@ -176,6 +176,16 @@ class RestIntent(EntityIntent, frozen=True):
     object_id: str
 
 
+class SleepIntent(EntityIntent, frozen=True):
+    """Intent to fall asleep on a bed (`object_id`) or the ground ("")."""
+
+    object_id: str = ""
+
+
+class WakeIntent(EntityIntent, frozen=True):
+    """Intent to wake up from a voluntary sleep."""
+
+
 # Channels other entities can hear; "thought" only reaches the viewer.
 LOCAL_CHANNEL = "local"
 SHOUT_CHANNEL = "shout"

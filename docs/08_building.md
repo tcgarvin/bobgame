@@ -23,6 +23,12 @@ work/threshold rules as trees and rocks. Nothing regrows (berries still do).
 
 ## Recipes
 
+> **Superseded:** the full recipe table now lives in
+> [docs/10_metal_and_sleep.md](10_metal_and_sleep.md) (section 2, "Recipes"),
+> which adds a `station` and a `work` count to every recipe and replaces
+> `needs_workshop` with `station == "workshop_table"`. The table below is kept
+> for the history of this milestone; docs/10 is the source of truth.
+
 A recipe consumes inputs and yields `output_count` units of its item. Recipes
 marked **workshop** only succeed while the crafter stands on or next to
 (8-neighbourhood) a placed `workshop_table`; otherwise the craft fails with

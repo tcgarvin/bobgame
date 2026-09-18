@@ -10,7 +10,12 @@ import structlog
 
 from .. import world_pb2 as pb
 from .. import world_pb2_grpc
-from ..conversion import entity_to_proto, object_to_proto, tile_to_proto
+from ..conversion import (
+    clock_to_proto,
+    entity_to_proto,
+    object_to_proto,
+    tile_to_proto,
+)
 from ..events import ActionResult
 from ..lease import LeaseManager
 from ..state import Entity, World
@@ -170,6 +175,7 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
             visible_tiles=visible_tiles,
             visible_objects=visible_objects,
             events=events,
+            clock=clock_to_proto(self.world.clock),
         )
         # 'self' is a Python keyword, so the field is set via CopyFrom.
         observation.self.CopyFrom(self_proto)

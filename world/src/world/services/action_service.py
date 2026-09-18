@@ -26,7 +26,9 @@ from ..types import (
     PlaceIntent,
     RestIntent,
     SayIntent,
+    SleepIntent,
     WaitIntent,
+    WakeIntent,
     WithdrawIntent,
     WriteNoteIntent,
 )
@@ -187,6 +189,12 @@ def intent_from_proto(entity_id: str, intent: pb.Intent) -> EntityIntent:
             kind=intent.give.kind,
             amount=intent.give.amount or 1,
         )
+
+    if action == "sleep":
+        return SleepIntent(entity_id=entity_id, object_id=intent.sleep.object_id)
+
+    if action == "wake":
+        return WakeIntent(entity_id=entity_id)
 
     if action == "wait":
         return WaitIntent(entity_id=entity_id)

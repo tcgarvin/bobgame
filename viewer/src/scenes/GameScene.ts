@@ -5,6 +5,7 @@ import type {
   InterpolatedEntity,
   TrackedObject,
   UtteranceEvent,
+  WorldClock,
 } from '../network';
 import type { SpriteIndex } from '../sprites';
 import { getSpriteFrame } from '../sprites';
@@ -75,6 +76,9 @@ const OBJECT_SPRITE_MAP: Record<string, string> = {
   // Natural building materials (docs/08_building.md).
   reeds: 'reeds',
   clay_deposit: 'clay-deposit',
+  // Ore veins (docs/10_metal_and_sleep.md, section 2).
+  copper_vein: 'copper-vein',
+  iron_vein: 'iron-vein',
   // Ground layer.
   road: 'road',
   wood_floor: 'wood-floor',
@@ -87,6 +91,9 @@ const OBJECT_SPRITE_MAP: Record<string, string> = {
   chair: 'chair',
   table: 'table',
   workshop_table: 'workshop-table',
+  // Crafting stations (docs/10_metal_and_sleep.md, section 1).
+  furnace: 'furnace',
+  anvil: 'anvil',
 };
 
 /**
@@ -124,6 +131,27 @@ const SPEECH_BUBBLE_MS = 3000;
 const THOUGHT_DOT_MS = 500;
 const DAMAGE_FLASH_MS = 350;
 
+/**
+ * Day/night tint (docs/10_metal_and_sleep.md, sections 3 and 4). The overlay is
+ * a screen-space rectangle above the world but below the HUD text (depth 100)
+ * and below the HTML overlay entirely, so only the map darkens. Everything is
+ * derived from the latest tick's clock, never accumulated, so a replay seek
+ * lands on exactly the right shade.
+ */
+const NIGHT_OVERLAY_DEPTH = 50;
+const NIGHT_TINT_COLOR = 0x0a1436;
+const NIGHT_TINT_ALPHA = 0.55;
+/** Daytime is the first two thirds of a day (`NIGHT_START_FRACTION`). */
+const NIGHT_START_FRACTION = 2 / 3;
+/** Dusk ramps over the last tenth of the daytime. */
+const DUSK_FRACTION = 0.1;
+/** Dawn ramps over the first tenth of the whole day. */
+const DAWN_FRACTION = 0.1;
+
+/** Marker drawn above a sleeping entity, red once it has collapsed. */
+const SLEEP_MARKER_COLOR = '#cfe3ff';
+const COLLAPSE_MARKER_COLOR = '#ff6b6b';
+
 /** How often the address bar is rewritten (about 4 Hz). */
 const URL_SYNC_MS = 250;
 
@@ -134,6 +162,38 @@ function hashToActorSprite(entityId: string): string {
     hash = (hash * 31 + entityId.charCodeAt(i)) >>> 0;
   }
   return ACTOR_SPRITES[hash % ACTOR_SPRITES.length];
+}
+
+/**
+ * Tint strength for a moment in the day: 0 in broad daylight, full at night,
+ * with a dusk ramp at the end of the daytime and a dawn ramp at the start of
+ * the day. Pure function of the clock, so seeking is exact.
+ */
+export function nightTintAlpha(clock: WorldClock): number {
+  const dayLength = clock.day_length;
+  if (dayLength <= 0) return clock.night ? NIGHT_TINT_ALPHA : 0;
+
+  const t = Math.max(0, Math.min(dayLength, clock.tick_of_day));
+  const dayEnd = dayLength * NIGHT_START_FRACTION;
+  if (t >= dayEnd) return NIGHT_TINT_ALPHA;
+
+  const dawnEnd = dayLength * DAWN_FRACTION;
+  if (t < dawnEnd) {
+    return NIGHT_TINT_ALPHA * (1 - t / dawnEnd);
+  }
+
+  const duskStart = dayEnd * (1 - DUSK_FRACTION);
+  if (t >= duskStart) {
+    return NIGHT_TINT_ALPHA * ((t - duskStart) / (dayEnd - duskStart));
+  }
+  return 0;
+}
+
+/** `day 2 · 143/300 · night`, for the overlay clock readout. */
+export function formatClock(clock: WorldClock): string {
+  return `day ${clock.day} · ${clock.tick_of_day}/${clock.day_length} · ${
+    clock.night ? 'night' : 'day'
+  }`;
 }
 
 function spriteKeyForEntity(entity: InterpolatedEntity): string {
@@ -160,6 +220,10 @@ export class GameScene extends Phaser.Scene {
   /** Small "..." bubbles over agents whose planner is thinking. */
   private thoughtBubbles: Map<string, Phaser.GameObjects.Text> = new Map();
   private damageFlashUntil: Map<string, number> = new Map();
+  /** "z" markers above sleeping entities, keyed by entity id. */
+  private sleepMarkers: Map<string, Phaser.GameObjects.Text> = new Map();
+  /** Screen-space day/night tint over the map. */
+  private nightOverlay?: Phaser.GameObjects.Rectangle;
   private connectionText?: Phaser.GameObjects.Text;
   private statusBars?: Phaser.GameObjects.Graphics;
   /** Marker on each conversation's anchor tile, keyed by object id. */
@@ -247,6 +311,13 @@ export class GameScene extends Phaser.Scene {
     // Graphics layer for health/hunger bars and the selection ring
     this.statusBars = this.add.graphics();
     this.statusBars.setDepth(15);
+
+    // Day/night tint: screen-space, above the world, below the HUD text
+    this.nightOverlay = this.add
+      .rectangle(0, 0, 10, 10, NIGHT_TINT_COLOR, 0)
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(NIGHT_OVERLAY_DEPTH);
 
     // Graphics layer for conversation anchor-to-participant lines
     this.conversationLines = this.add.graphics();
@@ -703,6 +774,8 @@ export class GameScene extends Phaser.Scene {
     this.speechBubbles.delete(entityId);
     this.thoughtBubbles.get(entityId)?.destroy();
     this.thoughtBubbles.delete(entityId);
+    this.sleepMarkers.get(entityId)?.destroy();
+    this.sleepMarkers.delete(entityId);
     this.damageFlashUntil.delete(entityId);
   }
 
@@ -1101,6 +1174,7 @@ export class GameScene extends Phaser.Scene {
       }
       // Speech wins the space above the head; the thought bubble yields to it.
       this.updateThoughtBubble(entity.entityId, x, y, entity.alive && !bubble);
+      this.updateSleepMarker(entity, x, y);
 
       if (entity.alive) {
         this.drawEntityBars(entity, x, y, entity.entityId === selectedId);
@@ -1109,6 +1183,9 @@ export class GameScene extends Phaser.Scene {
 
     // Redraw conversation anchor-to-participant lines
     this.updateConversationLines();
+
+    // Day/night tint from the latest tick's clock
+    this.updateNightOverlay();
 
     // Update viewport tracker (requests new chunks when camera moves)
     this.viewportTracker?.update();
@@ -1162,6 +1239,62 @@ export class GameScene extends Phaser.Scene {
         this.cameras.main.scrollY += camSpeed;
       }
     }
+  }
+
+  /**
+   * Resize and re-tint the day/night overlay. The rectangle has no scroll
+   * factor, so it is positioned in screen space and enlarged by the camera
+   * zoom (which scales screen-space objects about the camera centre).
+   */
+  private updateNightOverlay(): void {
+    const overlay = this.nightOverlay;
+    if (!overlay) return;
+
+    const clock = this.worldState.getClock();
+    if (!clock) {
+      overlay.setAlpha(0);
+      return;
+    }
+
+    const cam = this.cameras.main;
+    const zoom = cam.zoom > 0 ? cam.zoom : 1;
+    overlay.setPosition(cam.width / 2, cam.height / 2);
+    overlay.setSize((cam.width / zoom) * 1.1, (cam.height / zoom) * 1.1);
+    overlay.setAlpha(nightTintAlpha(clock));
+  }
+
+  /**
+   * Show a small "z" above a sleeping entity: red once it has collapsed from
+   * exhaustion (asleep at full fatigue, docs/10_metal_and_sleep.md).
+   */
+  private updateSleepMarker(entity: InterpolatedEntity, x: number, y: number): void {
+    const asleep = entity.asleep && entity.alive;
+    let marker = this.sleepMarkers.get(entity.entityId);
+
+    if (!asleep) {
+      marker?.setVisible(false);
+      return;
+    }
+
+    if (!marker) {
+      marker = this.add.text(0, 0, 'z', {
+        fontFamily: 'monospace',
+        fontSize: '14px',
+        fontStyle: 'bold',
+        color: SLEEP_MARKER_COLOR,
+        backgroundColor: '#00000099',
+        padding: { x: 3, y: 0 },
+      });
+      marker.setOrigin(0.5, 1);
+      marker.setDepth(28);
+      this.sleepMarkers.set(entity.entityId, marker);
+    }
+
+    const collapsed = entity.maxFatigue > 0 && entity.fatigue >= entity.maxFatigue;
+    marker.setColor(collapsed ? COLLAPSE_MARKER_COLOR : SLEEP_MARKER_COLOR);
+    marker.setVisible(true);
+    marker.x = x - (TILE_SIZE * SCALE) / 3;
+    marker.y = y - (TILE_SIZE * SCALE) / 2 - 2;
   }
 
   /**
@@ -1223,5 +1356,9 @@ export class GameScene extends Phaser.Scene {
       marker.destroy();
     }
     this.conversationMarkers.clear();
+    for (const marker of this.sleepMarkers.values()) {
+      marker.destroy();
+    }
+    this.sleepMarkers.clear();
   }
 }

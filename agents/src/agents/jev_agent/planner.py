@@ -58,7 +58,6 @@ from .build import (
 )
 from .geometry import NAME_TO_DIRECTION, NO_DIRECTION, Coord, chebyshev
 from .options import (
-    CRAFT_RECIPES,
     MAX_BRIEF_SHOUTS,
     MAX_SHOUT_LENGTH,
     WOLF_ALERT_RADIUS,
@@ -86,6 +85,13 @@ STINT_REPORTS_KEPT = 10
 # A new turn opens with an alert when the actor was bitten this recently.
 RECENT_ATTACK_TICKS = 5
 TURN_RETRY_SECONDS = 5.0
+# `craft` repeats the action until the recipe completes; the margin covers a
+# tick whose event the world did not report back.
+CRAFT_ACTION_MARGIN = 2
+# The world's wording for a finished craft, in the action event's details.
+CRAFTED_DETAIL = "crafted "
+# What `sleep` calls the place when no bed was named.
+GROUND = "the ground"
 
 
 SETTLEMENT_NARRATIVE = f"""\
@@ -102,13 +108,32 @@ Bodies:
   ticks while hunger is above 50. You have {items.PLAYER_MAX_HEALTH} health.
 - Dying drops your whole inventory where you fell and costs you 10 ticks.
 - Resting on a bed heals {items.REST_HEAL} health per rest.
+- Fatigue runs from 0 to {items.MAX_FATIGUE} and rises 1 every {items.FATIGUE_INTERVAL_DAY} ticks by day and every
+  {items.FATIGUE_INTERVAL_NIGHT} ticks at night. From {items.TIRED_FATIGUE} you are tired: the work a tool adds per
+  extract action is halved (bare hands and dismantling stay at 1), your attacks
+  hit for 1 less, and health stops regenerating. At {items.MAX_FATIGUE} you collapse where you stand and sleep until fatigue
+  falls to {items.COLLAPSE_WAKE_FATIGUE}; damage does not wake a collapsed sleeper. Respawning after
+  death leaves you at {items.RESPAWN_FATIGUE} fatigue.
+
+The day and sleep:
+- A day is {items.DEFAULT_DAY_LENGTH} ticks. The first two thirds are light and the last third is
+  night. Every tool result says which day it is and how far into it you are.
+- `sleep` lies you down on a bed on or next to your tile, or on the ground
+  where you stand, and returns when you wake. A bed recovers {items.sleep_recovery_text(True, True)} at
+  night and {items.sleep_recovery_text(True, False)} by day; the ground recovers {items.sleep_recovery_text(False, True)} at night
+  and {items.sleep_recovery_text(False, False)} by day. On a bed you also heal 1 health every
+  {items.REGEN_INTERVAL_TICKS} ticks while you sleep.
+- One sleeper per bed. Falling asleep needs hunger above 0 and fatigue above 0.
+  While you are asleep nothing you or Jev does reaches the world, hunger keeps
+  dropping, and you wake at fatigue 0, when something damages you, when your
+  hunger reaches 0, when the bed under you is removed, or on `wake`.
 
 Wolves and fighting:
 - Wolves roam the island and keep coming for the whole game, a few at a time.
   A wolf hunts whoever is nearest, has {items.WOLF_HEALTH} health, moves as fast as you do and
   bites an adjacent settler for {items.WOLF_DAMAGE} every tick.
-- You hit for {items.UNARMED_DAMAGE} unarmed. A wielded sword adds +{items.WIELD_DAMAGE_BONUS[items.SWORD]}, an axe +{items.WIELD_DAMAGE_BONUS[items.AXE]}, a pickaxe +{items.WIELD_DAMAGE_BONUS[items.PICKAXE]}.
-  A weapon only counts while it is equipped.
+- You hit for {items.UNARMED_DAMAGE} unarmed. Wielded, these add damage:
+  {items.wield_damage_text()}. A weapon only counts while it is equipped.
 - All damage in a tick lands at once: everyone attacking the same wolf hits it
   on the same tick, and it bites back on that tick too.
 
@@ -169,16 +194,35 @@ Materials:
 - fiber comes from reeds (3 units) at the water's edge; no tool helps.
 - clay comes from a clay deposit (6 units) on river banks and lake shores,
   faster with a pickaxe.
+- copper_ore comes from a copper_vein (4 units) and iron_ore from an iron_vein
+  (4 units). Veins sit in the rock on high ground, never within 60 tiles of the
+  settlement site. A copper_vein needs a wielded pickaxe, copper_pickaxe or
+  iron_pickaxe; an iron_vein needs a copper_pickaxe or an iron_pickaxe. Without
+  one in your hand the extraction fails.
+- Extracting is work: {items.EXTRACT_THRESHOLD} work makes one unit, and dismantling a placed piece
+  takes {items.DISMANTLE_WORK} extract actions. One action adds 1 work bare-handed, 3 with an
+  axe or pickaxe, 4 with a copper one, 5 with an iron one. An axe only counts
+  on trees; a pickaxe on rocks, clay and veins.
 
-Recipes ([workshop table] ones only work while you stand on or next to a
-placed workshop table):
+Stations and work:
+- A recipe with a station only works while you stand on or next to a placed one
+  of that type: workshop_table, furnace or anvil. All three are crafted items
+  you place like any other structure.
+- A recipe's action count is how many craft actions it takes, one per tick. The
+  progress of a multi-action recipe is kept in the station itself under your
+  name, so you can walk away and come back to it; each station and each settler
+  keeps its own, and starting a different recipe there discards what you had.
+  The inputs are checked on every action and consumed on the last one.
+
+Recipes (each line ends with where it is made and how many craft actions it
+takes):
 {items.recipe_table_text()}
 
 Placed objects:
 - Every crafted building item is placed as an object. Roads and floors are
   ground pieces: you place them on the tile you are standing on. Walls, doors,
-  beds, chairs, tables, chests, boards and workshop tables are structures: you
-  stand next to the tile and place toward it.
+  beds, chairs, tables, chests, boards, workshop tables, furnaces and anvils
+  are structures: you stand next to the tile and place toward it.
 - Walls block everyone. A door blocks wolves but lets settlers through.
 - Anything built can be dismantled: {items.DISMANTLE_WORK} extract actions
   return one item to the dismantler.
@@ -251,6 +295,9 @@ class AgentBridge(Protocol):
     async def await_conversation(self) -> ConversationReport | None:
         """Block until the conversation just opened or joined has ended."""
 
+    async def await_wake(self, since_tick: int) -> str:
+        """Block until the actor, asleep since `since_tick`, has woken."""
+
     @property
     def reflex(self) -> ReflexBrief:
         """The brief code runs when a wolf is close or the actor is bitten."""
@@ -305,9 +352,12 @@ class ToolBudget:
 
 
 def turn_clock_line(model: WorldModel, turn_start_tick: int) -> str:
-    """How much world time the current planner turn has already cost."""
+    """The tick, the world clock, and how much time this planner turn has cost."""
     elapsed = max(0, model.tick - turn_start_tick)
-    return f"[tick {model.tick}; this turn has cost {elapsed} ticks so far]"
+    return (
+        f"[tick {model.tick} · {model.clock.as_text()}; "
+        f"this turn has cost {elapsed} ticks so far]"
+    )
 
 
 def alert_window_start(tick: int, turn_start_tick: int) -> int:
@@ -438,10 +488,14 @@ BULK_OBJECT_TYPES: frozenset[str] = items.GROUND_LAYER_KINDS | frozenset(
 # and where is the raw material for planks, rope and stone walls.
 BUILD_SITE_TYPES: tuple[str, ...] = (
     items.WORKSHOP_TABLE,
+    items.FURNACE,
+    items.ANVIL,
     items.BED,
     items.DOOR,
     items.REEDS,
     items.CLAY_DEPOSIT,
+    items.COPPER_VEIN,
+    items.IRON_VEIN,
 )
 
 
@@ -541,9 +595,12 @@ def describe_world(model: WorldModel) -> str:
         or "empty"
     )
     lines = [
-        f"tick {model.tick}, you are {model.entity_id} at {info.position}",
+        f"tick {model.tick} · {model.clock.as_text()}, you are "
+        f"{model.entity_id} at {info.position}",
         f"health {info.health}/{info.max_health}, hunger {info.hunger}/{info.max_hunger}"
-        f", wielded: {info.wielded or 'nothing'}, alive: {info.alive}",
+        f", fatigue {info.fatigue}/{info.max_fatigue} ({info.fatigue_word})"
+        f", wielded: {info.wielded or 'nothing'}, alive: {info.alive}"
+        f"{', asleep' if info.asleep else ''}",
         f"inventory: {inventory}",
         f"settlement centre is dx {dx}, dy {dy} (distance "
         f"{chebyshev(info.position, model.settlement)})",
@@ -998,15 +1055,55 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
 
     @tools.tool
     async def craft(ctx: RunContext[PlannerDeps], recipe: str) -> str:
-        """Craft one recipe once. Workshop recipes need a workshop table nearby.
+        """Craft one recipe, repeating the craft action until the item is made.
+
+        A station recipe needs that station on or next to your tile. A recipe of
+        N actions costs N ticks here, and the call stops early on the first
+        action that fails.
 
         Args:
             recipe: one of the names in the recipe table in your instructions.
         """
-        if recipe not in CRAFT_RECIPES:
-            return f"no such recipe {recipe!r}; known: {sorted(CRAFT_RECIPES)}"
+        known = items.RECIPES.get(recipe)
+        if known is None:
+            return f"no such recipe {recipe!r}; known: {sorted(items.RECIPES)}"
+        lines: list[str] = []
+        for _ in range(known.work + CRAFT_ACTION_MARGIN):
+            outcome = await ctx.deps.bridge.direct_action(
+                pb.Intent(craft=pb.CraftIntent(recipe=recipe)), f"craft {recipe}"
+            )
+            lines.append(outcome)
+            if not action_succeeded(outcome) or CRAFTED_DETAIL in outcome:
+                break
+        return "\n".join(lines)
+
+    @tools.tool
+    async def sleep(ctx: RunContext[PlannerDeps], bed_object_id: str = "") -> str:
+        """Lie down and sleep; the call returns when you wake, and says why.
+
+        Args:
+            bed_object_id: the id of a bed on or next to your tile. Leave it
+                empty to sleep on the ground where you stand.
+        """
+        bridge = ctx.deps.bridge
+        since_tick = bridge.model.tick
+        where = bed_object_id or GROUND
+        outcome = await bridge.direct_action(
+            pb.Intent(sleep=pb.SleepIntent(object_id=bed_object_id)),
+            f"sleep on {where}",
+        )
+        if not action_succeeded(outcome):
+            return outcome
+        slept = await bridge.await_wake(since_tick)
+        return f"{outcome}\n{slept}" if slept else f"{outcome}\nyou did not stay asleep"
+
+    @tools.tool
+    async def wake(ctx: RunContext[PlannerDeps]) -> str:
+        """Stop sleeping. While you are asleep this is the only thing you can do."""
+        if not ctx.deps.bridge.model.self_info.asleep:
+            return "you are not asleep"
         return await ctx.deps.bridge.direct_action(
-            pb.Intent(craft=pb.CraftIntent(recipe=recipe)), f"craft {recipe}"
+            pb.Intent(wake=pb.WakeIntent()), "wake up"
         )
 
     @tools.tool

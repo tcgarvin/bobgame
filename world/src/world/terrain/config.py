@@ -164,6 +164,33 @@ class ObjectPlacementConfig(BaseModel):
         default=14, description="How far scree spreads from mountain feet"
     )
 
+    # Ore veins: clusters inside outcrops on high ground. Densities are per
+    # million tiles of map area, so the 4000x4000 island gets about 150 copper
+    # and 80 iron veins.
+    copper_vein_density: float = Field(
+        default=9.4, description="Target copper veins per million tiles"
+    )
+    iron_vein_density: float = Field(
+        default=5.0, description="Target iron veins per million tiles"
+    )
+    vein_cluster_min: int = Field(default=3, description="Smallest vein cluster")
+    vein_cluster_max: int = Field(default=8, description="Largest vein cluster")
+    vein_cluster_radius: int = Field(
+        default=5, description="How far a cluster spreads from its seed tile"
+    )
+    vein_cluster_spacing: int = Field(
+        default=60, description="Min distance between two vein cluster seeds"
+    )
+    vein_wavelength: int = Field(
+        default=150, description="Wavelength of the ore-bearing noise"
+    )
+    vein_slope_min: float = Field(
+        default=0.06, description="Slope above which ground counts as a hillside"
+    )
+    vein_mountain_reach: int = Field(
+        default=30, description="How far mountain feet count as high ground"
+    )
+
     # Reeds: fresh-water banks and ford shallows.
     reed_base_density: float = Field(
         default=0.45, description="Reed probability inside a reed bed"

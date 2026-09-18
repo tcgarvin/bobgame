@@ -42,6 +42,7 @@ from .foraging import (
     process_regeneration,
 )
 from .movement import MoveResult, process_movement_phase
+from .sleep import process_fatigue_phase, process_sleep_phase
 from .stats import (
     process_health_regen,
     process_hunger_phase,
@@ -66,7 +67,9 @@ from .types import (
     RestIntent,
     SAY_CHANNELS,
     SayIntent,
+    SleepIntent,
     WaitIntent,
+    WakeIntent,
     WithdrawIntent,
     WriteNoteIntent,
 )
@@ -133,7 +136,11 @@ def _living_subset(
     action_type: str,
     events: TickEvents,
 ) -> dict[str, T]:
-    """Drop intents from missing or dead entities, recording the failure."""
+    """Drop intents from missing, dead or sleeping entities, recording why.
+
+    `TickContext` already refuses a sleeper's intents; this is the same guard
+    applied to intents the world itself injected (docs/10).
+    """
     kept: dict[str, T] = {}
     for entity_id, intent in intents.items():
         entity = world.all_entities().get(entity_id)
@@ -142,6 +149,9 @@ def _living_subset(
             continue
         if not entity.alive:
             events.acted(entity_id, action_type, False, "dead")
+            continue
+        if entity.asleep:
+            events.acted(entity_id, action_type, False, "asleep")
             continue
         kept[entity_id] = intent
     return kept
@@ -217,7 +227,9 @@ def process_tick(
     move_intents = {
         entity_id: direction
         for entity_id, direction in ctx.move_intents.items()
-        if (entity := world.all_entities().get(entity_id)) is not None and entity.alive
+        if (entity := world.all_entities().get(entity_id)) is not None
+        and entity.alive
+        and not entity.asleep
     }
     move_results = process_movement_phase(world, move_intents)
 
@@ -329,8 +341,17 @@ def process_tick(
     ):
         events.acted(entity_id, "wait", True, "")
 
-    # Phase 13: Bookkeeping
+    # Phase 13: Sleep and wake, after movement and every action phase.
+    process_sleep_phase(
+        world,
+        _living_subset(world, ctx.intents_of(SleepIntent), "sleep", events),
+        ctx.intents_of(WakeIntent),
+        events,
+    )
+
+    # Phase 14: Bookkeeping
     process_hunger_phase(world, events)
+    process_fatigue_phase(world, events)
     process_health_regen(world)
     events.object_changes.extend(process_regeneration(world, regen_rate=regen_rate))
     process_respawns(world, events)

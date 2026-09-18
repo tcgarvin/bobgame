@@ -3,7 +3,7 @@
 import pytest
 
 from world.events import TickEvents
-from world.foraging import process_extract_phase
+from world.foraging import extract_work, process_extract_phase
 from world.items import default_remaining
 from world.state import Entity, Inventory, World, WorldObject
 from world.types import ExtractIntent, Position
@@ -234,3 +234,124 @@ class TestExtractConflicts:
         _extract(world, "bob", "alice")
 
         assert world.get_object("tree_1").get_state("progress") == "2"
+
+
+class TestOreVeins:
+    """docs/10_metal_and_sleep.md section 2: veins, tool gating and tiers."""
+
+    def _vein_world(self, object_type: str, wielded: str) -> World:
+        world = World(width=10, height=10)
+        world.add_entity(
+            Entity(
+                entity_id="bob",
+                position=Position(x=5, y=5),
+                inventory=Inventory().add(wielded, 1) if wielded else Inventory(),
+                wielded=wielded,
+            )
+        )
+        world.add_object(
+            WorldObject(
+                object_id="vein_1", position=Position(x=6, y=5), object_type=object_type
+            )
+        )
+        return world
+
+    def _work(self, world: World) -> TickEvents:
+        events = TickEvents()
+        process_extract_phase(
+            world,
+            {"bob": ExtractIntent(entity_id="bob", object_id="vein_1")},
+            events,
+        )
+        return events
+
+    def test_vein_defaults_hold_four_units(self) -> None:
+        assert default_remaining("copper_vein") == 4
+        assert default_remaining("iron_vein") == 4
+
+    @pytest.mark.parametrize(
+        "object_type,tools",
+        [
+            ("copper_vein", "copper_pickaxe or iron_pickaxe or pickaxe"),
+            ("iron_vein", "copper_pickaxe or iron_pickaxe"),
+        ],
+    )
+    def test_bare_hands_fail_with_the_tool_list(
+        self, object_type: str, tools: str
+    ) -> None:
+        world = self._vein_world(object_type, "")
+
+        events = self._work(world)
+
+        assert not events.action_results[0].success
+        assert events.action_results[0].details == f"vein_1 needs a {tools}"
+
+    def test_a_plain_pickaxe_cannot_work_an_iron_vein(self) -> None:
+        world = self._vein_world("iron_vein", "pickaxe")
+
+        events = self._work(world)
+
+        assert not events.action_results[0].success
+        assert world.get_entity("bob").inventory.count("iron_ore") == 0
+
+    @pytest.mark.parametrize(
+        "object_type,tool,yielded",
+        [
+            ("copper_vein", "pickaxe", "copper_ore"),
+            ("copper_vein", "copper_pickaxe", "copper_ore"),
+            ("iron_vein", "copper_pickaxe", "iron_ore"),
+            ("iron_vein", "iron_pickaxe", "iron_ore"),
+        ],
+    )
+    def test_an_acceptable_pickaxe_yields_ore_in_one_action(
+        self, object_type: str, tool: str, yielded: str
+    ) -> None:
+        world = self._vein_world(object_type, tool)
+
+        events = self._work(world)
+
+        assert events.action_results[0].success
+        assert world.get_entity("bob").inventory.count(yielded) == 1
+
+    def test_an_axe_does_not_open_a_vein(self) -> None:
+        world = self._vein_world("copper_vein", "iron_axe")
+
+        events = self._work(world)
+
+        assert not events.action_results[0].success
+
+
+class TestToolTiers:
+    @pytest.mark.parametrize(
+        "tool,work",
+        [
+            ("", 1),
+            ("axe", 3),
+            ("copper_axe", 4),
+            ("iron_axe", 5),
+            ("pickaxe", 1),
+            ("sword", 1),
+        ],
+    )
+    def test_work_per_action_on_a_tree(self, tool: str, work: int) -> None:
+        assert extract_work(tool, "tree") == work
+
+    @pytest.mark.parametrize(
+        "tool,work",
+        [
+            ("", 1),
+            ("pickaxe", 3),
+            ("copper_pickaxe", 4),
+            ("iron_pickaxe", 5),
+            ("axe", 1),
+        ],
+    )
+    def test_work_per_action_on_a_boulder(self, tool: str, work: int) -> None:
+        assert extract_work(tool, "boulder") == work
+
+    def test_an_iron_axe_takes_a_tree_unit_every_action(self) -> None:
+        world = _world_with_tree("iron_axe")
+
+        _extract(world, "bob")
+
+        assert world.get_entity("bob").inventory.count("wood") == 1

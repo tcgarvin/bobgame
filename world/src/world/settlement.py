@@ -30,6 +30,24 @@ MIN_BUSHES = 12
 MIN_REEDS = 25
 MIN_CLAY = 12
 
+# Ore (docs/10_metal_and_sleep.md, section 5). A site needs metal within reach
+# but none on its doorstep, so ore stays a trip: the requirement counts veins in
+# the ring between ORE_EXCLUSION_RADIUS and ORE_SEARCH_RADIUS of the centre
+# (Chebyshev), and the generator deletes every vein inside the exclusion radius
+# of the chosen site. Counting the ring rather than the whole disc is what makes
+# that safe: deleting the inner veins cannot make the winning tile ineligible or
+# change its score, so the site found on the pruned map is the site the pruning
+# was built around.
+ORE_SEARCH_RADIUS = 200
+ORE_EXCLUSION_RADIUS = 60
+MIN_COPPER_VEINS = 3
+MIN_IRON_VEINS = 2
+
+ORE_MINIMUMS: Mapping[str, int] = {
+    "copper_vein": MIN_COPPER_VEINS,
+    "iron_vein": MIN_IRON_VEINS,
+}
+
 MINIMUMS: Mapping[str, int] = {
     "tree": MIN_TREES,
     "rock": MIN_ROCKS,
@@ -114,7 +132,13 @@ def floor_array_of(world: World) -> NDArray[np.uint8]:
 
 
 def _category_of(object_type: str) -> str:
-    """Map an object type to a settlement resource category, or ""."""
+    """Map an object type to a settlement resource category, or "".
+
+    Ore veins are their own categories: they are required near a site but,
+    unlike the five gathering resources, they do not feed the score.
+    """
+    if object_type in ORE_MINIMUMS:
+        return object_type
     if object_type == "tree":
         return "tree"
     if object_type == "bush":
@@ -148,18 +172,37 @@ def _box_sums(counts: NDArray[np.int32], half: int) -> NDArray[np.int32]:
 
 
 def _category_grids(
-    objects: Iterable[WorldObject], height: int, width: int
+    objects: Iterable[tuple[int, int, str]], height: int, width: int
 ) -> dict[str, NDArray[np.int32]]:
-    """Per-tile object counts for every resource category."""
+    """Per-tile counts for every resource category and both vein kinds.
+
+    Args:
+        objects: (x, y, object_type) triples.
+        height: Map height in tiles.
+        width: Map width in tiles.
+    """
     grids = {
-        category: np.zeros((height, width), dtype=np.int32) for category in MINIMUMS
+        category: np.zeros((height, width), dtype=np.int32)
+        for category in (*MINIMUMS, *ORE_MINIMUMS)
     }
-    for obj in objects:
-        category = _category_of(obj.object_type)
-        x, y = obj.position.x, obj.position.y
+    for x, y, object_type in objects:
+        category = _category_of(object_type)
         if category and 0 <= x < width and 0 <= y < height:
             grids[category][y, x] += 1
     return grids
+
+
+def ore_in_reach(
+    grids: Mapping[str, NDArray[np.int32]], vein_type: str
+) -> NDArray[np.int32]:
+    """Veins of one kind in the ring ORE_EXCLUSION_RADIUS..ORE_SEARCH_RADIUS.
+
+    The inner box is subtracted so that the count does not depend on the veins
+    the generator is about to delete around the chosen site.
+    """
+    return _box_sums(grids[vein_type], ORE_SEARCH_RADIUS) - _box_sums(
+        grids[vein_type], ORE_EXCLUSION_RADIUS
+    )
 
 
 def resource_counts(
@@ -168,13 +211,14 @@ def resource_counts(
     """Resource counts by category within the settlement radius of centre.
 
     Returns:
-        {"tree", "rock", "bush", "reeds", "clay"} -> count.
+        {"tree", "rock", "bush", "reeds", "clay"} -> count. Ore veins are not
+        counted here: they live far outside the settlement radius by design.
     """
     totals = {category: 0 for category in MINIMUMS}
     for obj in objects:
         category = _category_of(obj.object_type)
         if (
-            category
+            category in totals
             and abs(obj.position.x - centre.x) <= SETTLEMENT_RADIUS
             and abs(obj.position.y - centre.y) <= SETTLEMENT_RADIUS
         ):
@@ -185,32 +229,60 @@ def resource_counts(
 def find_settlement_site(world: World, objects: Iterable[WorldObject]) -> Position:
     """Find the settlement centre for a map.
 
-    Every tile is tested exactly (box sums over integral images), so the
-    result does not depend on a candidate grid. Among qualifying tiles the
-    finder prefers a balanced supply of all five resources and open ground to
-    grow into - in practice a clearing on a forest edge beside fresh water
-    with an outcrop in reach.
-
     Args:
         world: The world (its floor array drives terrain checks).
-        objects: All world objects (trees, rocks, bushes, reeds, clay, ...).
+        objects: All world objects (trees, rocks, bushes, reeds, clay, veins).
 
     Returns:
-        A grass or dirt Position that has, within SETTLEMENT_RADIUS, at least
-        the MINIMUMS of every resource and one water tile, enough dry land,
-        and a mostly buildable CLEARING_SIZE square around it. Deterministic:
-        the best score wins and ties go to the smallest (y, x).
+        The settlement centre; see `select_site`.
 
     Raises:
         NoSettlementSiteError: If no tile satisfies the requirements.
     """
-    floor = floor_array_of(world)
+    return select_site(
+        floor_array_of(world),
+        ((obj.position.x, obj.position.y, obj.object_type) for obj in objects),
+    )
+
+
+def select_site(
+    floor: NDArray[np.uint8],
+    objects: Iterable[tuple[int, int, str]],
+    require_ore: bool = True,
+) -> Position:
+    """Choose the settlement centre from a floor array and object triples.
+
+    Every tile is tested exactly (box sums over integral images), so the
+    result does not depend on a candidate grid. Among qualifying tiles the
+    finder prefers a balanced supply of all five resources and open ground to
+    grow into - in practice a clearing on a forest edge beside fresh water
+    with an outcrop in reach. Ore only gates eligibility (see ORE_MINIMUMS);
+    it never moves the score.
+
+    Args:
+        floor: Floor values, shape (height, width).
+        objects: (x, y, object_type) triples for every object on the map.
+        require_ore: Whether the ORE_MINIMUMS gate eligibility. The generator
+            turns it off for the first pass, when it is still deciding where to
+            put the ore (see `terrain.objects.fit_ore_to_settlement`); every
+            other caller leaves it on.
+
+    Returns:
+        A grass or dirt Position that has, within SETTLEMENT_RADIUS, at least
+        the MINIMUMS of every resource and one water tile, enough dry land, a
+        mostly buildable CLEARING_SIZE square around it, and the ORE_MINIMUMS
+        in the ore ring around it. Deterministic: the best score wins and ties
+        go to the smallest (y, x).
+
+    Raises:
+        NoSettlementSiteError: If no tile satisfies the requirements.
+    """
     height, width = floor.shape
     grids = _category_grids(objects, height, width)
 
     natural = np.zeros((height, width), dtype=np.bool_)
-    for grid in grids.values():
-        natural |= grid > 0
+    for category in MINIMUMS:
+        natural |= grids[category] > 0
     buildable = np.isin(floor, SITE_FLOOR_VALUES) & ~natural
 
     box_area = (2 * SETTLEMENT_RADIUS + 1) ** 2
@@ -224,6 +296,10 @@ def find_settlement_site(world: World, objects: Iterable[WorldObject]) -> Positi
                 np.float32
             )
         )
+
+    if require_ore:
+        for vein_type, minimum in ORE_MINIMUMS.items():
+            eligible &= ore_in_reach(grids, vein_type) >= minimum
 
     water = _box_sums(
         np.isin(floor, WATER_FLOOR_VALUES).astype(np.int32), SETTLEMENT_RADIUS

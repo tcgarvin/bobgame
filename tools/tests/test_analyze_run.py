@@ -73,39 +73,68 @@ def run_dir(tmp_path: Path) -> Path:
             tick_record(
                 2,
                 entities_spawned=[
-                    {"entity_id": "wolf_1", "entity_type": "wolf",
-                     "position": {"x": 5, "y": 5}}
+                    {
+                        "entity_id": "wolf_1",
+                        "entity_type": "wolf",
+                        "position": {"x": 5, "y": 5},
+                    }
                 ],
             ),
             tick_record(
                 3,
                 actions=[
-                    {"entity_id": "ada", "action_type": "craft",
-                     "success": True, "details": "crafted sword"},
-                    {"entity_id": "ada", "action_type": "craft",
-                     "success": False, "details": "unknown recipe chest"},
-                    {"entity_id": "bram", "action_type": "place",
-                     "success": True, "details": "placed chest_3 at (6, 6)"},
-                    {"entity_id": "bram", "action_type": "write_note",
-                     "success": True, "details": "wolves to the north"},
+                    {
+                        "entity_id": "ada",
+                        "action_type": "craft",
+                        "success": True,
+                        "details": "crafted sword",
+                    },
+                    {
+                        "entity_id": "ada",
+                        "action_type": "craft",
+                        "success": False,
+                        "details": "unknown recipe chest",
+                    },
+                    {
+                        "entity_id": "bram",
+                        "action_type": "place",
+                        "success": True,
+                        "details": "placed chest_3 at (6, 6)",
+                    },
+                    {
+                        "entity_id": "bram",
+                        "action_type": "write_note",
+                        "success": True,
+                        "details": "wolves to the north",
+                    },
                 ],
             ),
             tick_record(
                 4,
                 damage=[
-                    {"entity_id": "wolf_1", "attacker_id": "ada",
-                     "amount": 4, "remaining_health": 0}
+                    {
+                        "entity_id": "wolf_1",
+                        "attacker_id": "ada",
+                        "amount": 4,
+                        "remaining_health": 0,
+                    }
                 ],
                 entities_despawned=[
-                    {"entity_id": "wolf_1", "reason": "killed",
-                     "position": {"x": 5, "y": 5}}
+                    {
+                        "entity_id": "wolf_1",
+                        "reason": "killed",
+                        "position": {"x": 5, "y": 5},
+                    }
                 ],
             ),
             tick_record(
                 5,
                 deaths=[
-                    {"entity_id": "bram", "killer_id": "wolf_2",
-                     "position": {"x": 6, "y": 6}}
+                    {
+                        "entity_id": "bram",
+                        "killer_id": "wolf_2",
+                        "position": {"x": 6, "y": 6},
+                    }
                 ],
             ),
         ],
@@ -115,37 +144,88 @@ def run_dir(tmp_path: Path) -> Path:
     write_gz_jsonl(
         agents / "agent-ada" / "stints.jsonl.gz",
         [
-            {"event": "stint_start", "entity_id": "ada", "tick": 1,
-             "stint_id": "ada-1", "brief": {"instruction": "gather wood"}},
-            {"entity_id": "ada", "tick": 2, "stint_id": "ada-1",
-             "action": "extract:tree_1", "top": [["extract:tree_1", 0.8]],
-             "probabilities": {"extract:tree_1": 0.8, "wait": 0.2},
-             "confidence": 0.8, "eject": 0.1, "danger": 0.2,
-             "latency_ms": 200, "input_tokens": 2000,
-             "intent_result": "accepted"},
-            {"entity_id": "ada", "tick": 3, "stint_id": "ada-1",
-             "action": "craft:sword", "top": [["craft:sword", 0.6]],
-             "confidence": 0.6, "eject": 0.3, "danger": 0.1,
-             "latency_ms": 400, "input_tokens": 2100,
-             "intent_result": "rejected"},
-            {"event": "stint_end", "entity_id": "ada", "tick": 4,
-             "stint_id": "ada-1", "end_reason": "eject", "ticks_used": 3,
-             "max_ticks": 20, "brief": {}, "report": "done"},
+            {
+                "event": "stint_start",
+                "entity_id": "ada",
+                "tick": 1,
+                "stint_id": "ada-1",
+                "brief": {"instruction": "gather wood"},
+            },
+            {
+                "entity_id": "ada",
+                "tick": 2,
+                "stint_id": "ada-1",
+                "action": "extract:tree_1",
+                "top": [["extract:tree_1", 0.8]],
+                "probabilities": {"extract:tree_1": 0.8, "wait": 0.2},
+                "confidence": 0.8,
+                "eject": 0.1,
+                "danger": 0.2,
+                "latency_ms": 200,
+                "input_tokens": 2000,
+                "intent_result": "accepted",
+            },
+            {
+                "entity_id": "ada",
+                "tick": 3,
+                "stint_id": "ada-1",
+                "action": "craft:sword",
+                "top": [["craft:sword", 0.6]],
+                "confidence": 0.6,
+                "eject": 0.3,
+                "danger": 0.1,
+                "latency_ms": 400,
+                "input_tokens": 2100,
+                "intent_result": "rejected",
+            },
+            {
+                "event": "stint_end",
+                "entity_id": "ada",
+                "tick": 4,
+                "stint_id": "ada-1",
+                "end_reason": "eject",
+                "ticks_used": 3,
+                "max_ticks": 20,
+                "brief": {},
+                "report": "done",
+            },
         ],
     )
     write_gz_jsonl(
         agents / "agent-ada" / "planner.jsonl.gz",
         [
-            {"event": "turn_start", "entity_id": "ada", "tick": 1, "turn": 1,
-             "prompt": "…"},
-            {"event": "tool_call", "entity_id": "ada", "tick": 1, "turn": 1,
-             "tool": "look", "args": {}},
-            {"event": "turn_end", "entity_id": "ada", "tick": 4, "turn": 1,
-             "thought": "Gathered wood.", "tool_calls": 1, "duration_ms": 900},
-            {"event": "turn_failed", "entity_id": "ada", "tick": 5, "turn": 2,
-             "error": "model returned no tool call"},
-            {"event": "history_reset", "entity_id": "ada", "tick": 5,
-             "turn": 2},
+            {
+                "event": "turn_start",
+                "entity_id": "ada",
+                "tick": 1,
+                "turn": 1,
+                "prompt": "…",
+            },
+            {
+                "event": "tool_call",
+                "entity_id": "ada",
+                "tick": 1,
+                "turn": 1,
+                "tool": "look",
+                "args": {},
+            },
+            {
+                "event": "turn_end",
+                "entity_id": "ada",
+                "tick": 4,
+                "turn": 1,
+                "thought": "Gathered wood.",
+                "tool_calls": 1,
+                "duration_ms": 900,
+            },
+            {
+                "event": "turn_failed",
+                "entity_id": "ada",
+                "tick": 5,
+                "turn": 2,
+                "error": "model returned no tool call",
+            },
+            {"event": "history_reset", "entity_id": "ada", "tick": 5, "turn": 2},
         ],
     )
     (agents / "agent-ada.log").write_text(
@@ -220,8 +300,14 @@ def test_notable_moments_and_links(run_dir: Path) -> None:
     payload = analyse(run_dir)
     grouped = moments_by_kind(payload)
     assert set(grouped) == {
-        "first_wolf", "craft", "place", "write_note", "wolf_killed",
-        "death", "planner_failed", "history_reset",
+        "first_wolf",
+        "craft",
+        "place",
+        "write_note",
+        "wolf_killed",
+        "death",
+        "planner_failed",
+        "history_reset",
     }
     assert grouped["death"][0]["tick"] == 5
     assert grouped["death"][0]["entity_id"] == "bram"
@@ -264,10 +350,17 @@ def test_legacy_logs_layout(tmp_path: Path) -> None:
     agent_dir.mkdir(parents=True)
     (agent_dir / "stints.jsonl").write_text(
         json.dumps(
-            {"entity_id": "bob", "tick": 1, "action": "wait",
-             "top": [["wait", 0.9]], "eject": 0.1, "danger": 0.0,
-             "latency_ms": 100, "input_tokens": 500,
-             "intent_result": "accepted"}
+            {
+                "entity_id": "bob",
+                "tick": 1,
+                "action": "wait",
+                "top": [["wait", 0.9]],
+                "eject": 0.1,
+                "danger": 0.0,
+                "latency_ms": 100,
+                "input_tokens": 500,
+                "intent_result": "accepted",
+            }
         )
         + "\n",
         encoding="utf-8",
@@ -290,8 +383,12 @@ def test_legacy_logs_layout(tmp_path: Path) -> None:
 
 
 def _action(entity: str, action_type: str, details: str) -> dict:
-    return {"entity_id": entity, "action_type": action_type,
-            "success": True, "details": details}
+    return {
+        "entity_id": entity,
+        "action_type": action_type,
+        "success": True,
+        "details": details,
+    }
 
 
 def test_building_actions_are_counted_and_only_firsts_become_moments(
@@ -301,22 +398,31 @@ def test_building_actions_are_counted_and_only_firsts_become_moments(
     write_gz_jsonl(
         ticks,
         [
-            tick_record(1, actions=[
-                _action("ada", "craft", "crafted plank x2"),
-                _action("ada", "craft", "crafted workshop_table"),
-                _action("bram", "craft", "crafted bed"),
-            ]),
-            tick_record(2, actions=[
-                _action("ada", "place", "placed wood_wall_7 at (3, 4)"),
-                _action("bram", "place", "placed wood_wall_8 at (3, 5)"),
-                _action("bram", "place", "placed bed_9 at (4, 5)"),
-            ]),
-            tick_record(3, actions=[
-                _action("bram", "rest", "rested at bed_9 (+2 health)"),
-                _action("ada", "extract", "dismantling wood_wall_7 (1/3)"),
-                _action("ada", "extract", "dismantled wood_wall_7 (+1 wood_wall)"),
-                _action("ada", "extract", "extracted wood from tree_1"),
-            ]),
+            tick_record(
+                1,
+                actions=[
+                    _action("ada", "craft", "crafted plank x2"),
+                    _action("ada", "craft", "crafted workshop_table"),
+                    _action("bram", "craft", "crafted bed"),
+                ],
+            ),
+            tick_record(
+                2,
+                actions=[
+                    _action("ada", "place", "placed wood_wall_7 at (3, 4)"),
+                    _action("bram", "place", "placed wood_wall_8 at (3, 5)"),
+                    _action("bram", "place", "placed bed_9 at (4, 5)"),
+                ],
+            ),
+            tick_record(
+                3,
+                actions=[
+                    _action("bram", "rest", "rested at bed_9 (+2 health)"),
+                    _action("ada", "extract", "dismantling wood_wall_7 (1/3)"),
+                    _action("ada", "extract", "dismantled wood_wall_7 (+1 wood_wall)"),
+                    _action("ada", "extract", "extracted wood from tree_1"),
+                ],
+            ),
         ],
     )
 
@@ -392,8 +498,9 @@ def test_conversation_and_give_world_facts(tmp_path: Path) -> None:
     assert conv2.end_tick == -1
 
     assert giving == [
-        analyze_run.GiveEvent(tick=3, giver="theo", receiver="mira",
-                               kind="stone", amount=2)
+        analyze_run.GiveEvent(
+            tick=3, giver="theo", receiver="mira", kind="stone", amount=2
+        )
     ]
 
     kinds = {m.kind for m in moments}
@@ -422,24 +529,42 @@ def test_summarise_conversations_and_giving(tmp_path: Path) -> None:
     _facts, _moments, conversations, giving = analyze_run.scan_world_ticks(ticks)
 
     layout = analyze_run.RunLayout(
-        run_id="r", root=tmp_path, agents_dir=tmp_path / "agents",
-        ticks_path=ticks, meta={},
+        run_id="r",
+        root=tmp_path,
+        agents_dir=tmp_path / "agents",
+        ticks_path=ticks,
+        meta={},
     )
     write_gz_jsonl(
         layout.agents_dir / "agent-mira" / "conversations.jsonl.gz",
         [
-            {"event": "conversation_start", "entity_id": "mira", "tick": 10,
-             "conversation_id": "conv_9"},
-            {"event": "conversation_end", "entity_id": "mira", "tick": 20,
-             "conversation_id": "conv_9", "end_reason": "closed",
-             "note": "theo wants to trade stone"},
+            {
+                "event": "conversation_start",
+                "entity_id": "mira",
+                "tick": 10,
+                "conversation_id": "conv_9",
+            },
+            {
+                "event": "conversation_end",
+                "entity_id": "mira",
+                "tick": 20,
+                "conversation_id": "conv_9",
+                "end_reason": "closed",
+                "note": "theo wants to trade stone",
+            },
         ],
     )
     write_gz_jsonl(
         layout.agents_dir / "agent-theo" / "conversations.jsonl.gz",
         [
-            {"event": "conversation_end", "entity_id": "theo", "tick": 20,
-             "conversation_id": "conv_9", "end_reason": "left", "note": ""},
+            {
+                "event": "conversation_end",
+                "entity_id": "theo",
+                "tick": 20,
+                "conversation_id": "conv_9",
+                "end_reason": "left",
+                "note": "",
+            },
         ],
     )
 
@@ -480,8 +605,11 @@ def test_summarise_giving_aggregates_kinds_and_pairs() -> None:
 
 def _reflex_layout(tmp_path: Path) -> "analyze_run.RunLayout":
     return analyze_run.RunLayout(
-        run_id="r", root=tmp_path, agents_dir=tmp_path / "agents",
-        ticks_path=None, meta={},
+        run_id="r",
+        root=tmp_path,
+        agents_dir=tmp_path / "agents",
+        ticks_path=None,
+        meta={},
     )
 
 
@@ -492,49 +620,104 @@ def test_summarise_reflexes_reports_firings_and_health_change(
     write_gz_jsonl(
         layout.agents_dir / "agent-mira" / "planner.jsonl.gz",
         [
-            {"event": "tool_call", "entity_id": "mira", "tick": 5, "turn": 1,
-             "tool": "set_reflex",
-             "args": {"instruction": "Attack the wolf if adjacent."}},
+            {
+                "event": "tool_call",
+                "entity_id": "mira",
+                "tick": 5,
+                "turn": 1,
+                "tool": "set_reflex",
+                "args": {"instruction": "Attack the wolf if adjacent."},
+            },
         ],
     )
     write_gz_jsonl(
         layout.agents_dir / "agent-mira" / "stints.jsonl.gz",
         [
-            {"event": "stint_start", "entity_id": "mira", "tick": 10,
-             "stint_id": "mira-10", "kind": "reflex", "trigger": "wolf_near",
-             "interrupted": "planning", "brief": {}},
-            {"entity_id": "mira", "tick": 11, "stint_id": "mira-10",
-             "action": "attack:wolf_1", "top": [["attack:wolf_1", 0.9]],
-             "intent_result": "accepted"},
-            {"event": "stint_end", "entity_id": "mira", "tick": 12,
-             "stint_id": "mira-10", "end_reason": "death",
-             "report": "STINT REPORT: ...\n  stats: hp 10/20, hunger 5/10 "
-                        "-> hp 0/20, hunger 5/10"},
+            {
+                "event": "stint_start",
+                "entity_id": "mira",
+                "tick": 10,
+                "stint_id": "mira-10",
+                "kind": "reflex",
+                "trigger": "wolf_near",
+                "interrupted": "planning",
+                "brief": {},
+            },
+            {
+                "entity_id": "mira",
+                "tick": 11,
+                "stint_id": "mira-10",
+                "action": "attack:wolf_1",
+                "top": [["attack:wolf_1", 0.9]],
+                "intent_result": "accepted",
+            },
+            {
+                "event": "stint_end",
+                "entity_id": "mira",
+                "tick": 12,
+                "stint_id": "mira-10",
+                "end_reason": "death",
+                "report": "STINT REPORT: ...\n  stats: hp 10/20, hunger 5/10 "
+                "-> hp 0/20, hunger 5/10",
+            },
         ],
     )
     write_gz_jsonl(
         layout.agents_dir / "agent-theo" / "stints.jsonl.gz",
         [
-            {"event": "stint_start", "entity_id": "theo", "tick": 20,
-             "stint_id": "theo-20", "kind": "reflex", "trigger": "damage",
-             "interrupted": "conversation", "brief": {}},
-            {"entity_id": "theo", "tick": 21, "stint_id": "theo-20",
-             "action": "wait", "top": [["wait", 1.0]],
-             "intent_result": "accepted"},
-            {"entity_id": "theo", "tick": 22, "stint_id": "theo-20",
-             "action": "attack:wolf_2", "top": [["attack:wolf_2", 0.7]],
-             "intent_result": "accepted"},
-            {"event": "stint_end", "entity_id": "theo", "tick": 23,
-             "stint_id": "theo-20", "end_reason": "threat_gone",
-             "report": "STINT REPORT: ...\n  stats: hp 15/20, hunger 4/10 "
-                        "-> hp 13/20, hunger 4/10"},
+            {
+                "event": "stint_start",
+                "entity_id": "theo",
+                "tick": 20,
+                "stint_id": "theo-20",
+                "kind": "reflex",
+                "trigger": "damage",
+                "interrupted": "conversation",
+                "brief": {},
+            },
+            {
+                "entity_id": "theo",
+                "tick": 21,
+                "stint_id": "theo-20",
+                "action": "wait",
+                "top": [["wait", 1.0]],
+                "intent_result": "accepted",
+            },
+            {
+                "entity_id": "theo",
+                "tick": 22,
+                "stint_id": "theo-20",
+                "action": "attack:wolf_2",
+                "top": [["attack:wolf_2", 0.7]],
+                "intent_result": "accepted",
+            },
+            {
+                "event": "stint_end",
+                "entity_id": "theo",
+                "tick": 23,
+                "stint_id": "theo-20",
+                "end_reason": "threat_gone",
+                "report": "STINT REPORT: ...\n  stats: hp 15/20, hunger 4/10 "
+                "-> hp 13/20, hunger 4/10",
+            },
             # An ordinary stint must not be counted as a reflex.
-            {"event": "stint_start", "entity_id": "theo", "tick": 30,
-             "stint_id": "theo-30", "kind": "stint", "brief": {}},
-            {"event": "stint_end", "entity_id": "theo", "tick": 35,
-             "stint_id": "theo-30", "end_reason": "eject",
-             "report": "STINT REPORT: ...\n  stats: hp 13/20, hunger 4/10 "
-                        "-> hp 12/20, hunger 3/10"},
+            {
+                "event": "stint_start",
+                "entity_id": "theo",
+                "tick": 30,
+                "stint_id": "theo-30",
+                "kind": "stint",
+                "brief": {},
+            },
+            {
+                "event": "stint_end",
+                "entity_id": "theo",
+                "tick": 35,
+                "stint_id": "theo-30",
+                "end_reason": "eject",
+                "report": "STINT REPORT: ...\n  stats: hp 13/20, hunger 4/10 "
+                "-> hp 12/20, hunger 3/10",
+            },
         ],
     )
 
@@ -556,9 +739,7 @@ def test_summarise_reflexes_reports_firings_and_health_change(
     death_moment = next(m for m in moments if m.kind == "reflex_death")
     assert death_moment.entity_id == "mira"
     assert death_moment.tick == 12
-    mid_conv_moment = next(
-        m for m in moments if m.kind == "reflex_during_conversation"
-    )
+    mid_conv_moment = next(m for m in moments if m.kind == "reflex_during_conversation")
     assert mid_conv_moment.entity_id == "theo"
     assert mid_conv_moment.tick == 20
 
@@ -573,16 +754,219 @@ def test_pre_conversation_run_reports_cleanly(run_dir: Path) -> None:
     payload = analyse(run_dir)
 
     assert payload["conversations"] == {
-        "opened": 0, "joined": 0, "distinct_participants": 0, "utterances": 0,
-        "end_reasons": {}, "notes_written": 0, "mean_duration_ticks": 0,
-        "mean_lines": 0, "longest": [],
+        "opened": 0,
+        "joined": 0,
+        "distinct_participants": 0,
+        "utterances": 0,
+        "end_reasons": {},
+        "notes_written": 0,
+        "mean_duration_ticks": 0,
+        "mean_lines": 0,
+        "longest": [],
     }
     assert payload["giving"] == {"count": 0, "kinds": {}, "pairs": {}}
     assert payload["reflexes"] == {
-        "agents": {}, "firings_by_trigger": {}, "firings_by_interrupted": {},
-        "end_reasons": {}, "mean_health_change": 0,
+        "agents": {},
+        "firings_by_trigger": {},
+        "firings_by_interrupted": {},
+        "end_reasons": {},
+        "mean_health_change": 0,
         "mean_ticks_to_first_action": 0,
     }
     kinds = {m["kind"] for m in payload["moments"]}
     assert "reflex_death" not in kinds
     assert "conversation_joined" not in kinds
+
+
+# --------------------------------------------------------------------------
+# metal tier and sleep (docs/10_metal_and_sleep.md, section 7)
+# --------------------------------------------------------------------------
+
+
+def _clock(day: int, tick_of_day: int, day_length: int = 300) -> dict:
+    return {
+        "day": day,
+        "tick_of_day": tick_of_day,
+        "day_length": day_length,
+        "night": tick_of_day >= day_length * 2 // 3,
+    }
+
+
+def _entity_update(entity_id: str, asleep: bool = False) -> dict:
+    return {
+        "entity_id": entity_id,
+        "position": {"x": 0, "y": 0},
+        "asleep": asleep,
+        "fatigue": 0,
+        "max_fatigue": 100,
+        "sleeping_on": "",
+        "collapsed": False,
+    }
+
+
+def test_metal_tier_counts_and_moments(tmp_path: Path) -> None:
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(
+                1,
+                actions=[
+                    _action("ada", "craft", "crafted furnace"),
+                    _action("ada", "craft", "crafted charcoal x2"),
+                ],
+            ),
+            tick_record(
+                2, actions=[_action("ada", "place", "placed furnace_2 at (3, 4)")]
+            ),
+            tick_record(3, actions=[_action("ada", "craft", "crafted copper_ingot")]),
+            tick_record(4, actions=[_action("bram", "craft", "crafted iron_ingot")]),
+            tick_record(
+                5,
+                actions=[
+                    _action("ada", "craft", "crafted copper_axe"),
+                    _action("bram", "craft", "crafted iron_sword"),
+                ],
+            ),
+            tick_record(
+                6,
+                actions=[
+                    _action("ada", "extract", "worked copper_vein_1 (+1 copper_ore)"),
+                    _action("bram", "extract", "worked iron_vein_1 (+1 iron_ore)"),
+                    _action("bram", "extract", "worked iron_vein_1 (+1 iron_ore)"),
+                ],
+            ),
+            tick_record(
+                7, actions=[_action("bram", "place", "placed anvil_9 at (5, 5)")]
+            ),
+        ],
+    )
+
+    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.smelts == {"charcoal": 1, "copper_ingot": 1, "iron_ingot": 1}
+    assert facts.stations_placed == {"furnace": 1, "anvil": 1}
+    assert facts.metal_tools_crafted == {"copper_axe": 1, "iron_sword": 1}
+    assert facts.vein_yields == {"copper_ore": 1, "iron_ore": 2}
+
+    milestones = {m.text for m in moments if m.kind == "milestone"}
+    assert "first furnace: ada placed furnace_2 at (3, 4)" in milestones
+    assert "first anvil: bram placed anvil_9 at (5, 5)" in milestones
+    assert "first ingot: ada crafted copper_ingot" in milestones
+    assert "first iron tool: bram crafted iron_sword" in milestones
+
+    # Smelting products and metal tools don't spam a "craft" moment per item.
+    craft_moments = [m for m in moments if m.kind == "craft"]
+    assert craft_moments == []
+
+
+def test_sleep_wake_and_collapse_counts(tmp_path: Path) -> None:
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(1, actions=[_action("ada", "sleep", "asleep on bed_1")]),
+            tick_record(2, actions=[_action("bram", "sleep", "asleep on the ground")]),
+            tick_record(3, actions=[_action("ada", "wake", "woke up: rested")]),
+            tick_record(4, actions=[_action("bram", "wake", "woke up: hungry")]),
+            tick_record(
+                5, actions=[_action("kai", "collapse", "collapsed from exhaustion")]
+            ),
+            tick_record(
+                6, actions=[_action("theo", "collapse", "collapsed from exhaustion")]
+            ),
+        ],
+    )
+
+    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.sleeps == {"bed": 1, "ground": 1}
+    assert facts.wakes == {"rested": 1, "hungry": 1}
+    assert facts.collapses == 2
+
+    collapse_moments = [
+        m for m in moments if m.kind == "milestone" and "collapse" in m.text
+    ]
+    # Only the first collapse becomes a notable moment.
+    assert len(collapse_moments) == 1
+    assert collapse_moments[0].entity_id == "kai"
+    assert collapse_moments[0].tick == 5
+
+
+def test_first_death_while_asleep_moment(tmp_path: Path) -> None:
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(
+                1,
+                clock=_clock(0, 50),
+                entity_updates=[
+                    _entity_update("ada", asleep=True),
+                    _entity_update("bram"),
+                ],
+            ),
+            # ada dies while still asleep going into this tick; the world
+            # clears `asleep` the same tick it kills the entity, so the
+            # entity_updates in *this* record already show it False.
+            tick_record(
+                2,
+                clock=_clock(0, 51),
+                entity_updates=[
+                    _entity_update("ada", asleep=False),
+                    _entity_update("bram"),
+                ],
+                deaths=[{"entity_id": "ada", "killer_id": "wolf_1"}],
+            ),
+            # bram dies wide awake: no moment for this one.
+            tick_record(
+                3,
+                clock=_clock(0, 52),
+                deaths=[{"entity_id": "bram", "killer_id": "wolf_2"}],
+            ),
+        ],
+    )
+
+    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.sleep_data_available is True
+    asleep_death = [m for m in moments if m.kind == "milestone" and "asleep" in m.text]
+    assert len(asleep_death) == 1
+    assert asleep_death[0].entity_id == "ada"
+    assert asleep_death[0].tick == 2
+    assert "wolf_1" in asleep_death[0].text
+
+
+def test_night_midpoint_asleep_counts(tmp_path: Path) -> None:
+    ticks = tmp_path / "ticks.jsonl.gz"
+    rows = [tick_record(0, clock=_clock(0, 0))]
+    # Night is tick_of_day 200..299 for a 300-tick day; three snapshots with
+    # a rising then falling asleep count so the midpoint pick is meaningful.
+    for i, (tod, asleep_count) in enumerate([(200, 1), (250, 4), (299, 2)]):
+        entity_updates = [
+            _entity_update(f"s{n}", asleep=(n < asleep_count)) for n in range(5)
+        ]
+        rows.append(
+            tick_record(200 + i, clock=_clock(0, tod), entity_updates=entity_updates)
+        )
+    write_gz_jsonl(ticks, rows)
+
+    facts, _moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.sleep_data_available is True
+    assert facts.night_midpoints == [{"day": 0, "tick": 201, "asleep": 4}]
+
+
+def test_sleep_section_unavailable_before_docs_10(run_dir: Path) -> None:
+    """`run_dir`'s ticks have no `clock`/fatigue fields at all."""
+    payload = analyse(run_dir)
+    world = payload["world"]
+    assert world["sleep_data_available"] is False
+    assert world["night_midpoints"] == []
+    assert world["sleeps"] == {}
+    assert world["collapses"] == 0
+    assert world["wakes"] == {}
+    assert world["smelts"] == {}
+    assert world["stations_placed"] == {}
+    assert world["metal_tools_crafted"] == {}
+    assert world["vein_yields"] == {}

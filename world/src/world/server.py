@@ -23,7 +23,7 @@ from .services import (
     ViewerWebSocketService,
 )
 from .settlement import find_settlement_site, nearest_free_walkable
-from .state import Entity, World, WorldObject
+from .state import DEFAULT_DAY_LENGTH_TICKS, Entity, World, WorldObject
 from .tick import TickConfig, TickContext, TickLoop, TickResult
 from .types import Position
 
@@ -288,6 +288,7 @@ async def run_server(
     config_name: str = "default",
     config_path: str = "",
     map_path: str = "",
+    day_length_ticks: int = DEFAULT_DAY_LENGTH_TICKS,
 ) -> None:
     """Run a world server with the given configuration.
 
@@ -309,9 +310,11 @@ async def run_server(
         config_name: Config name, recorded in meta.json
         config_path: Config path relative to the project root, recorded in meta.json
         map_path: Map file path relative to the project root, "" when there is none
+        day_length_ticks: Ticks in one day/night cycle (docs/10)
     """
     if world is None:
         world = World(width=width, height=height)
+    world.day_length_ticks = day_length_ticks
     config = TickConfig(
         tick_duration_ms=tick_duration_ms,
         intent_deadline_ms=(
@@ -648,6 +651,7 @@ def main() -> None:
             config_name=config_name,
             config_path=config_rel_path,
             map_path=recorded_map_path,
+            day_length_ticks=config.world.day_length_ticks,
         )
     )
 

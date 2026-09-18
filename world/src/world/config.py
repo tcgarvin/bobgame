@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, field_validator
 
-from .state import Entity, WorldObject
+from .state import DEFAULT_DAY_LENGTH_TICKS, Entity, WorldObject
 from .types import Position
 
 
@@ -54,6 +54,15 @@ class WorldConfig(BaseModel):
     intent_deadline_ms: int | None = None
     # Whether the world simulates wolves.
     wolves: bool = False
+    # Ticks in one day/night cycle (docs/10_metal_and_sleep.md).
+    day_length_ticks: int = DEFAULT_DAY_LENGTH_TICKS
+
+    @field_validator("day_length_ticks")
+    @classmethod
+    def _check_day_length(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"day_length_ticks must be positive, got {value}")
+        return value
 
     @field_validator("spawn_mode")
     @classmethod

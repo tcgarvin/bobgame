@@ -26,6 +26,7 @@ import type {
   ChunkUnloadMessage,
   UtteranceEvent,
   ViewerMessage,
+  WorldClock,
 } from './types';
 import {
   isSnapshotMessage,
@@ -70,6 +71,10 @@ export interface InterpolatedEntity {
   maxHunger: number;
   wielded: string;
   alive: boolean;
+  /** Tiredness, 0 = fresh; `maxFatigue` is the collapse point. */
+  fatigue: number;
+  maxFatigue: number;
+  asleep: boolean;
   inventory: Record<string, number>;
 }
 
@@ -142,6 +147,7 @@ function easeOutQuad(t: number): number {
 
 const DEFAULT_MAX_HEALTH = 20;
 const DEFAULT_MAX_HUNGER = 100;
+const DEFAULT_MAX_FATIGUE = 100;
 
 export class WorldState {
   private entities: Map<string, InterpolatedEntity> = new Map();
@@ -157,6 +163,7 @@ export class WorldState {
   private runIndex: RunIndexMessage | null = null;
   private lastError: string = '';
   private settlement: Position | null = null;
+  private clock: WorldClock | null = null;
   private currentTickId: number = 0;
   private tickDurationMs: number = 1000;
   private tickStartTime: number = 0;
@@ -239,6 +246,14 @@ export class WorldState {
    */
   getCurrentTick(): number {
     return this.currentTickId;
+  }
+
+  /**
+   * The clock reported with the latest tick, or null on a server without one.
+   * Everything day/night is derived from this, so a replay seek is exact.
+   */
+  getClock(): WorldClock | null {
+    return this.clock ? { ...this.clock } : null;
   }
 
   /** Settlement centre, or null if the server never sent one. */
@@ -497,6 +512,8 @@ export class WorldState {
     this.worldSize = msg.world_size;
     this.chunkSize = msg.chunk_size;
     this.settlement = msg.settlement ? { ...msg.settlement } : null;
+    // A seek sends a snapshot: take its clock, else keep waiting for a tick.
+    this.clock = msg.clock ? { ...msg.clock } : null;
     this.tickStartTime = performance.now();
 
     // Note: Entities and objects now come via chunk_data messages
@@ -573,6 +590,7 @@ export class WorldState {
    */
   private handleTickStarted(msg: TickStartedMessage): void {
     this.currentTickId = msg.tick_id;
+    if (msg.clock) this.clock = { ...msg.clock };
     this.tickDurationMs = msg.tick_duration_ms;
     this.tickStartTime = performance.now();
 
@@ -589,6 +607,8 @@ export class WorldState {
    * and object additions/removals.
    */
   private handleTickCompleted(msg: TickCompletedMessage): void {
+    if (msg.clock) this.clock = { ...msg.clock };
+
     for (const move of msg.moves ?? []) {
       const entity = this.entities.get(move.entity_id);
       if (entity && move.success) {
@@ -689,6 +709,9 @@ export class WorldState {
     if (update.hunger !== undefined) entity.hunger = update.hunger;
     if (update.wielded !== undefined) entity.wielded = update.wielded;
     if (update.alive !== undefined) entity.alive = update.alive;
+    if (update.max_fatigue !== undefined) entity.maxFatigue = update.max_fatigue;
+    if (update.fatigue !== undefined) entity.fatigue = update.fatigue;
+    if (update.asleep !== undefined) entity.asleep = update.asleep;
     if (update.inventory !== undefined) entity.inventory = { ...update.inventory };
 
     this.entityStatsHandler?.(entity, entity.health - previousHealth);
@@ -784,6 +807,9 @@ export class WorldState {
       maxHunger,
       wielded: state.wielded ?? '',
       alive: state.alive ?? true,
+      fatigue: state.fatigue ?? 0,
+      maxFatigue: state.max_fatigue ?? DEFAULT_MAX_FATIGUE,
+      asleep: state.asleep ?? false,
       inventory: { ...(state.inventory ?? {}) },
     };
   }

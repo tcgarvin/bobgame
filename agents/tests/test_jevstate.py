@@ -298,3 +298,65 @@ def test_a_heard_shout_says_where_it_came_from() -> None:
         "bram shouted from dx 30 dy -6, 0 ticks ago: Wolf!",
         "cleo: hello",
     ]
+
+
+# --- fatigue, sleep and the clock (docs/10_metal_and_sleep.md) --------------
+
+
+def _state_for(entity: object, tick: int = 41, **kwargs: object) -> dict:
+    """The Jev state for one entity after a single observation."""
+    model = WorldModel("ada")
+    model.update(make_observation(tick, entity, **kwargs))  # type: ignore[arg-type]
+    return build_state(model, instruction="do", success_condition="done", ticks_left=5)
+
+
+def test_the_state_reports_fatigue_as_a_number_and_a_word() -> None:
+    fresh = _state_for(make_entity("ada", (10, 10), fatigue=12))
+    assert fresh["self"]["fatigue"] == "12/100 (fresh)"
+    assert fresh["self"]["asleep"] is False
+
+    tired = _state_for(make_entity("ada", (10, 10), fatigue=75))
+    assert tired["self"]["fatigue"] == "75/100 (tired)"
+
+    spent = _state_for(make_entity("ada", (10, 10), fatigue=100, asleep=True))
+    assert spent["self"]["fatigue"] == "100/100 (exhausted)"
+    assert spent["self"]["asleep"] is True
+
+
+def test_the_state_carries_the_clock_and_the_day_physics() -> None:
+    state = _state_for(make_entity("ada", (10, 10)), tick=250)
+    assert state["clock"]["day"] == 0
+    assert state["clock"]["tick_of_day"] == "250/300"
+    assert state["clock"]["night"] is True
+    assert "300 ticks" in state["clock"]["facts"]
+
+
+def test_the_state_states_the_fatigue_physics_without_advice() -> None:
+    facts = _state_for(make_entity("ada", (10, 10)))["fatigue_facts"]
+    assert "1 every 4 ticks by day" in facts
+    assert "From 60 you are tired" in facts
+    assert "At 100 you collapse" in facts
+    assert "1 fatigue per tick" in facts
+
+
+def test_the_state_says_which_stations_are_within_reach() -> None:
+    state = _state_for(
+        make_entity("ada", (10, 10)),
+        objects=[
+            make_object("fur1", "furnace", (11, 10)),
+            make_object("anv1", "anvil", (9, 10)),
+        ],
+    )
+    assert state["self"]["at_furnace"] is True
+    assert state["self"]["at_anvil"] is True
+    assert state["self"]["at_workshop_table"] is False
+
+
+def test_veins_show_their_units_and_what_they_yield() -> None:
+    state = _state_for(
+        make_entity("ada", (10, 10)),
+        objects=[make_object("v1", "iron_vein", (11, 10))],
+    )
+    entry = next(item for item in state["nearby"] if item["id"] == "v1")
+    assert entry["yields"] == "iron_ore"
+    assert entry["remaining"] == 4

@@ -23,6 +23,20 @@ CLAY = "clay"
 PLANK = "plank"
 ROPE = "rope"
 
+# Ores, fuel and metal (docs/10_metal_and_sleep.md).
+COPPER_ORE = "copper_ore"
+IRON_ORE = "iron_ore"
+CHARCOAL = "charcoal"
+COPPER_INGOT = "copper_ingot"
+IRON_INGOT = "iron_ingot"
+
+# Metal tools. Copper improves gathering, iron improves gathering and fighting.
+COPPER_AXE = "copper_axe"
+COPPER_PICKAXE = "copper_pickaxe"
+IRON_AXE = "iron_axe"
+IRON_PICKAXE = "iron_pickaxe"
+IRON_SWORD = "iron_sword"
+
 # Building items. The placed object's object_type equals the item kind.
 ROAD = "road"
 WOOD_FLOOR = "wood_floor"
@@ -34,13 +48,18 @@ BED = "bed"
 CHAIR = "chair"
 TABLE = "table"
 WORKSHOP_TABLE = "workshop_table"
+FURNACE = "furnace"
+ANVIL = "anvil"
+
+# Crafting stations: recipes with `station` set need one of these adjacent.
+STATION_KINDS: frozenset[str] = frozenset({WORKSHOP_TABLE, FURNACE, ANVIL})
 
 # Ground-layer kinds lie under structures and never block.
 GROUND_LAYER_KINDS: frozenset[str] = frozenset({ROAD, WOOD_FLOOR, STONE_FLOOR})
 
 # Everything the building update added; all of it can be dismantled.
 BUILDING_KINDS: frozenset[str] = GROUND_LAYER_KINDS | frozenset(
-    {WOOD_WALL, STONE_WALL, DOOR, BED, CHAIR, TABLE, WORKSHOP_TABLE}
+    {WOOD_WALL, STONE_WALL, DOOR, BED, CHAIR, TABLE, WORKSHOP_TABLE, FURNACE, ANVIL}
 )
 
 ITEM_KINDS: frozenset[str] = (
@@ -58,6 +77,16 @@ ITEM_KINDS: frozenset[str] = (
             CLAY,
             PLANK,
             ROPE,
+            COPPER_ORE,
+            IRON_ORE,
+            CHARCOAL,
+            COPPER_INGOT,
+            IRON_INGOT,
+            COPPER_AXE,
+            COPPER_PICKAXE,
+            IRON_AXE,
+            IRON_PICKAXE,
+            IRON_SWORD,
         }
     )
     | BUILDING_KINDS
@@ -103,7 +132,19 @@ CONVERSATION_TRANSCRIPT_KEPT = 12
 BASE_ATTACK_DAMAGE: Mapping[str, int] = {"wolf": 3}
 DEFAULT_ATTACK_DAMAGE = 2
 
-WIELD_DAMAGE_BONUS: Mapping[str, int] = {SWORD: 3, AXE: 2, PICKAXE: 1}
+WIELD_DAMAGE_BONUS: Mapping[str, int] = {
+    SWORD: 3,
+    IRON_SWORD: 5,
+    AXE: 2,
+    COPPER_AXE: 2,
+    IRON_AXE: 3,
+    PICKAXE: 1,
+    COPPER_PICKAXE: 1,
+    IRON_PICKAXE: 2,
+}
+
+# Kinds a settler can wield; everything else in hand gives no bonus.
+WIELDABLE_KINDS: frozenset[str] = frozenset(WIELD_DAMAGE_BONUS)
 
 # --- Food -----------------------------------------------------------------
 
@@ -120,11 +161,21 @@ MESSAGE_BOARD_OBJECT = "message_board"
 
 REEDS = "reeds"
 CLAY_DEPOSIT = "clay_deposit"
+COPPER_VEIN = "copper_vein"
+IRON_VEIN = "iron_vein"
+
+# Ore veins need a pickaxe of a high enough tier to work at all.
+VEIN_REQUIRED_TOOLS: Mapping[str, frozenset[str]] = {
+    COPPER_VEIN: frozenset({PICKAXE, COPPER_PICKAXE, IRON_PICKAXE}),
+    IRON_VEIN: frozenset({COPPER_PICKAXE, IRON_PICKAXE}),
+}
 
 ROCK_TYPES: frozenset[str] = frozenset(
     {"rock_small", "rock_medium", "rock_large", "boulder"}
 )
-EXTRACTABLE_TYPES: frozenset[str] = frozenset({TREE, REEDS, CLAY_DEPOSIT}) | ROCK_TYPES
+EXTRACTABLE_TYPES: frozenset[str] = (
+    frozenset({TREE, REEDS, CLAY_DEPOSIT, COPPER_VEIN, IRON_VEIN}) | ROCK_TYPES
+)
 
 # Objects the terrain generator places; ground-layer items may not cover them.
 NATURAL_OBJECT_TYPES: frozenset[str] = EXTRACTABLE_TYPES | frozenset({BUSH})
@@ -138,6 +189,8 @@ DEFAULT_REMAINING: Mapping[str, int] = {
     "boulder": 6,
     REEDS: 3,
     CLAY_DEPOSIT: 6,
+    COPPER_VEIN: 4,
+    IRON_VEIN: 4,
 }
 
 # object_type -> item kind yielded per extracted unit
@@ -149,22 +202,39 @@ EXTRACT_YIELD: Mapping[str, str] = {
     "boulder": STONE,
     REEDS: FIBER,
     CLAY_DEPOSIT: CLAY,
+    COPPER_VEIN: COPPER_ORE,
+    IRON_VEIN: IRON_ORE,
 }
 
-# object_type -> the wielded tool that speeds extraction up
-EXTRACT_TOOL: Mapping[str, str] = {
-    TREE: AXE,
-    "rock_small": PICKAXE,
-    "rock_medium": PICKAXE,
-    "rock_large": PICKAXE,
-    "boulder": PICKAXE,
-    CLAY_DEPOSIT: PICKAXE,
+# object_type -> the wielded tools that speed extraction up. Wielding any of
+# them yields EXTRACT_WORK_BY_TOOL work per action instead of EXTRACT_WORK_BARE.
+_AXES: frozenset[str] = frozenset({AXE, COPPER_AXE, IRON_AXE})
+_PICKAXES: frozenset[str] = frozenset({PICKAXE, COPPER_PICKAXE, IRON_PICKAXE})
+
+EXTRACT_TOOLS: Mapping[str, frozenset[str]] = {
+    TREE: _AXES,
+    "rock_small": _PICKAXES,
+    "rock_medium": _PICKAXES,
+    "rock_large": _PICKAXES,
+    "boulder": _PICKAXES,
+    CLAY_DEPOSIT: _PICKAXES,
+    COPPER_VEIN: _PICKAXES,
+    IRON_VEIN: frozenset({COPPER_PICKAXE, IRON_PICKAXE}),
+}
+
+# tool kind -> work units one extract action adds while wielding it.
+EXTRACT_WORK_BY_TOOL: Mapping[str, int] = {
+    AXE: 3,
+    PICKAXE: 3,
+    COPPER_AXE: 4,
+    COPPER_PICKAXE: 4,
+    IRON_AXE: 5,
+    IRON_PICKAXE: 5,
 }
 
 # Work units needed for one unit of material.
 EXTRACT_THRESHOLD = 3
 EXTRACT_WORK_BARE = 1
-EXTRACT_WORK_WITH_TOOL = 3
 
 # Item kind placed by a PlaceIntent -> object_type created.
 PLACED_OBJECT_TYPE: Mapping[str, str] = {
