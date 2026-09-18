@@ -58,9 +58,7 @@ class TestTickContext:
         now = int(time.time() * 1000)
 
         # Future deadline
-        ctx_future = TickContext(
-            tick_id=0, start_time_ms=now, deadline_ms=now + 10000
-        )
+        ctx_future = TickContext(tick_id=0, start_time_ms=now, deadline_ms=now + 10000)
         assert ctx_future.is_past_deadline() is False
 
         # Past deadline
@@ -99,7 +97,9 @@ class TestRunTicks:
         async def submit_intents(ctx: TickContext):
             ctx.submit_move_intent("entity_a", Direction.NORTH)
 
-        results = await run_ticks(two_entities, num_ticks=1, intent_callback=submit_intents)
+        results = await run_ticks(
+            two_entities, num_ticks=1, intent_callback=submit_intents
+        )
 
         assert len(results) == 1
         assert len(results[0].move_results) == 1
@@ -109,15 +109,15 @@ class TestRunTicks:
     @pytest.mark.asyncio
     async def test_multiple_ticks_with_intents(self, empty_world: World):
         """Submit intents over multiple ticks."""
-        empty_world.add_entity(
-            Entity(entity_id="walker", position=Position(x=5, y=5))
-        )
+        empty_world.add_entity(Entity(entity_id="walker", position=Position(x=5, y=5)))
 
         async def submit_intents(ctx: TickContext):
             # Move south each tick
             ctx.submit_move_intent("walker", Direction.SOUTH)
 
-        results = await run_ticks(empty_world, num_ticks=3, intent_callback=submit_intents)
+        results = await run_ticks(
+            empty_world, num_ticks=3, intent_callback=submit_intents
+        )
 
         assert len(results) == 3
         assert all(r.move_results[0].success for r in results)
@@ -183,9 +183,7 @@ class TestTickLoop:
     @pytest.mark.asyncio
     async def test_submit_intent_to_loop(self, empty_world: World):
         """Can submit intent to running tick loop."""
-        empty_world.add_entity(
-            Entity(entity_id="player1", position=Position(x=5, y=5))
-        )
+        empty_world.add_entity(Entity(entity_id="player1", position=Position(x=5, y=5)))
 
         config = TickConfig(tick_duration_ms=100, intent_deadline_ms=50)
         results_received: list = []

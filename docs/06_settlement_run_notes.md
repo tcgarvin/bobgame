@@ -112,3 +112,85 @@ Cost: Jev used roughly 14M input tokens across both runs (~7k calls at
   the world log cover analysis for now.
 - Tick rate: 2 s / 1.2 s deadline is comfortable. Jev p95 is ~0.4 s, so
   1 s ticks with a 0.6 s deadline should work on a good connection.
+
+## Building update runs (2026-09-17)
+
+Two runs after the building update (docs/08_building.md) on the regenerated
+island, site (1540, 972).
+
+| Run | Wolves | Ticks | Settler deaths | Planks | Walls crafted / placed | Other |
+|-----|--------|-------|----------------|--------|------------------------|-------|
+| `20260917-091932-settlement` | on | 739 | 22 | 45 | 0 / 0 | 2 workshop tables, 1 door crafted, 0 rests |
+| `20260917-094801-settlement_peaceful` | off | 830 | 2 (hunger) | 120 | 48 / 20 | 3 beds crafted, 1 placed, 6 rests, 4 build-tool stints |
+
+- The material chain, the workshop gate, the `build` tool and resting all work
+  live. Build stints ended `build_done` once and `build_out_of_items` three
+  times; nobody sealed themselves in.
+- With wolves on, building never starts: every death drops the inventory being
+  saved up. Wolf pressure is the bottleneck, not the building mechanics.
+- Planners first placed walls one `place` call at a time and only found `build`
+  around tick 700. The prompt now shows a worked three-call house example.
+- In 830 ticks nobody closed a full house. Longer runs are needed to see one.
+
+## Cooperation update runs (2026-09-17)
+
+Changes under test: wolves 16 health / bite 3 (nobody wins alone), a 60-tile
+`shout` channel, Jev's `shout:wolf` and `travel_to:rally:<speaker>` options
+and `threat` state block, the settler roster in `look`, and the soft 30-call
+planner tool budget. See "Implementation notes" in
+[05_jev_agents_design.md](05_jev_agents_design.md).
+
+Why the budget mattered: in `20260917-091932-settlement` the old hard 12-call
+limit ended 110 of 155 planner turns. Each of those turns lost its reflection
+and its message history, so most planners remembered nothing between turns
+except `memory.md`.
+
+Run `20260917-112432-settlement` (wolves on, 233 ticks; it was interrupted
+from outside at tick 232, a clean SIGINT shutdown, not a crash):
+
+| metric | value |
+| --- | --- |
+| planner turns | 28, 0 failures, 0 history resets |
+| tool budget | spent (soft) 7 times, hard backstop 0 times |
+| wolves | 5 spawned, 3 killed |
+| who fought | wolf_1: dov, esme, greta; wolf_2: dov, lena; wolf_3: dov, esme, greta |
+| settler deaths | 2 (versus roughly 7 by tick 232 in the previous wolves-on run, with much weaker wolves) |
+| shouts | 31 (23 planner, 10 Jev); Jev chose the rally walk 161 times |
+| crafts | 7 axes, 4 swords, 1 pickaxe, 5 planks, 1 workshop table placed |
+
+Observations:
+
+- Every wolf that died was attacked by two or three settlers. The tougher
+  wolves still dealt 21 to 48 damage per fight, so fights are costly but won.
+- Planners use `shout` for introductions and plans as well as alarms, which
+  makes nearby Jevs walk over. Worth watching: it may pull settlers off work.
+- Jev re-picked the rally walk every tick while already walking. The option is
+  now withheld while the current journey already heads to that shouter.
+- One planner introduced itself as "Jev". The prompt now says Jev is the reflex
+  layer, not a name, and each turn's prompt opens with "Your name is <id>."
+
+### Follow-up runs the same day
+
+A movement bug surfaced first: a settler could step onto a tile whose occupant
+had a move claim that then failed. Two settlers shared a tile and the position
+index raised `KeyError` a few ticks later, which silently killed the tick loop
+(this, not an outside interrupt, is what ended the 233-tick run above at tick
+232; a second run died at tick 24). Fixed in `world/movement.py` with regression
+tests; the tick loop now logs `tick_loop_crashed` with its traceback.
+
+| Run | Change under test | Ticks | Wolves killed / spawned | Settler deaths (wolf / hunger) | Time in stints | Jev attacks when a wolf is adjacent |
+| --- | --- | --- | --- | --- | --- | --- |
+| `20260917-115123-settlement` | cooperation update | 580 | 10 / 12 | 29 / 0 | 35% | 43% (23 of 54) |
+| `20260917-121935-settlement` | plus real-time planner | 631 | 13 / 14 | 8 / 4 | 58% | 72% (83 of 115) |
+
+- In the first of these, wolves were killed by groups of two to five, but most
+  settlers died with allies within 5 tiles: planners fought with single
+  `attack` calls (145) and bodies stood idle in planning mode 65% of the time.
+- A scripted `fight` tool was tried and rejected by the user: fighting belongs
+  to Jev. Instead the planner is told it is on a real-time clock, every tool
+  result shows the tick and the ticks the turn has cost, and a `!!` alert says
+  to hand back to Jev with a fighting brief. After an alert the next call was
+  `start_stint` 162 times out of 267; planner `attack` calls fell to 13.
+- Still open: building slowed down in the second run (4 walls placed versus
+  15), 27 stints ended in `repeated_failure`, four settlers starved, and
+  planners use `shout` for chatter (81 shouts), which pulls nearby Jevs over.

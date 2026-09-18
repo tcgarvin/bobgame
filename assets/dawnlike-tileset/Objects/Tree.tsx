@@ -6,4 +6,9 @@
    <property name="key" value="oak-tree"/>
   </properties>
  </tile>
+ <tile id="399" type="bobtile">
+  <properties>
+   <property name="key" value="reeds"/>
+  </properties>
+ </tile>
 </tileset>

@@ -12,9 +12,7 @@ class TestMoveValidation:
 
     def test_valid_cardinal_move(self, empty_world: World):
         """Entity can move to adjacent walkable tile."""
-        empty_world.add_entity(
-            Entity(entity_id="player1", position=Position(x=5, y=5))
-        )
+        empty_world.add_entity(Entity(entity_id="player1", position=Position(x=5, y=5)))
         resolver = MovementResolver(empty_world)
 
         claim = resolver.validate_move("player1", Direction.NORTH)
@@ -25,9 +23,7 @@ class TestMoveValidation:
 
     def test_valid_diagonal_move(self, empty_world: World):
         """Entity can make diagonal move when clear."""
-        empty_world.add_entity(
-            Entity(entity_id="player1", position=Position(x=5, y=5))
-        )
+        empty_world.add_entity(Entity(entity_id="player1", position=Position(x=5, y=5)))
         resolver = MovementResolver(empty_world)
 
         claim = resolver.validate_move("player1", Direction.NORTHEAST)
@@ -48,9 +44,7 @@ class TestMoveValidation:
 
     def test_move_out_of_bounds_rejected(self, empty_world: World):
         """Move outside world bounds is rejected."""
-        empty_world.add_entity(
-            Entity(entity_id="player1", position=Position(x=0, y=0))
-        )
+        empty_world.add_entity(Entity(entity_id="player1", position=Position(x=0, y=0)))
         resolver = MovementResolver(empty_world)
 
         claim = resolver.validate_move("player1", Direction.NORTH)
@@ -72,12 +66,8 @@ class TestMoveValidation:
 
     def test_diagonal_move_blocked_when_east_blocked(self, empty_world: World):
         """Diagonal NE move fails if E is blocked."""
-        empty_world.set_tile(
-            Tile(position=Position(x=6, y=5), walkable=False)
-        )
-        empty_world.add_entity(
-            Entity(entity_id="player1", position=Position(x=5, y=5))
-        )
+        empty_world.set_tile(Tile(position=Position(x=6, y=5), walkable=False))
+        empty_world.add_entity(Entity(entity_id="player1", position=Position(x=5, y=5)))
         resolver = MovementResolver(empty_world)
 
         claim = resolver.validate_move("player1", Direction.NORTHEAST)
@@ -86,9 +76,7 @@ class TestMoveValidation:
 
     def test_diagonal_move_allowed_when_both_cardinals_clear(self, empty_world: World):
         """Diagonal move succeeds when both adjacent cardinals are walkable."""
-        empty_world.add_entity(
-            Entity(entity_id="player1", position=Position(x=5, y=5))
-        )
+        empty_world.add_entity(Entity(entity_id="player1", position=Position(x=5, y=5)))
         resolver = MovementResolver(empty_world)
 
         # All four diagonal directions should work
@@ -107,9 +95,7 @@ class TestConflictResolution:
 
     def test_single_move_succeeds(self, empty_world: World):
         """Single move with no conflicts succeeds."""
-        empty_world.add_entity(
-            Entity(entity_id="player1", position=Position(x=5, y=5))
-        )
+        empty_world.add_entity(Entity(entity_id="player1", position=Position(x=5, y=5)))
 
         results = process_movement_phase(empty_world, {"player1": Direction.NORTH})
 
@@ -136,12 +122,8 @@ class TestConflictResolution:
     def test_same_destination_priority_winner(self, empty_world: World):
         """Lower entity_id wins when both claim same destination."""
         # Place two entities that will try to move to the same spot
-        empty_world.add_entity(
-            Entity(entity_id="alpha", position=Position(x=4, y=5))
-        )
-        empty_world.add_entity(
-            Entity(entity_id="beta", position=Position(x=6, y=5))
-        )
+        empty_world.add_entity(Entity(entity_id="alpha", position=Position(x=4, y=5)))
+        empty_world.add_entity(Entity(entity_id="beta", position=Position(x=6, y=5)))
 
         # Both try to move to (5, 5)
         results = process_movement_phase(
@@ -264,15 +246,9 @@ class TestComplexScenarios:
 
     def test_three_way_same_destination(self, empty_world: World):
         """Three entities claiming same destination: lowest ID wins."""
-        empty_world.add_entity(
-            Entity(entity_id="charlie", position=Position(x=4, y=5))
-        )
-        empty_world.add_entity(
-            Entity(entity_id="alpha", position=Position(x=5, y=4))
-        )
-        empty_world.add_entity(
-            Entity(entity_id="bravo", position=Position(x=6, y=5))
-        )
+        empty_world.add_entity(Entity(entity_id="charlie", position=Position(x=4, y=5)))
+        empty_world.add_entity(Entity(entity_id="alpha", position=Position(x=5, y=4)))
+        empty_world.add_entity(Entity(entity_id="bravo", position=Position(x=6, y=5)))
 
         # All try to move to (5, 5)
         results = process_movement_phase(
@@ -383,3 +359,46 @@ class TestComplexScenarios:
         assert len(results2) == 1
         assert results2[0].success is True
         assert empty_world.get_entity("a").position == Position(x=3, y=4)
+
+    def test_follower_fails_when_the_occupant_loses_its_own_move(
+        self, empty_world: World
+    ):
+        """A tile is only free if its occupant's move actually succeeds.
+
+        Regression test from a live run: iris followed jory onto jory's tile
+        while jory lost a same-destination conflict, two settlers shared a tile,
+        and the position index raised KeyError a few ticks later.
+        """
+        empty_world.add_entity(Entity(entity_id="iris", position=Position(x=2, y=5)))
+        empty_world.add_entity(Entity(entity_id="jory", position=Position(x=3, y=5)))
+        empty_world.add_entity(Entity(entity_id="ada", position=Position(x=5, y=5)))
+
+        results = process_movement_phase(
+            empty_world,
+            {
+                "iris": Direction.EAST,  # onto jory's tile
+                "jory": Direction.EAST,  # (4,5), loses to ada
+                "ada": Direction.WEST,  # (4,5), wins by id
+            },
+        )
+
+        by_id = {r.entity_id: r for r in results}
+        assert by_id["ada"].success
+        assert by_id["jory"].failure_reason == "same_destination_conflict"
+        assert by_id["iris"].failure_reason == "destination_occupied"
+        assert empty_world.get_entity_at(Position(x=3, y=5)).entity_id == "jory"
+        assert empty_world.get_entity_at(Position(x=2, y=5)).entity_id == "iris"
+
+    def test_a_failure_propagates_back_along_a_chain(self, empty_world: World):
+        """c is blocked by a bystander, so b cannot move, so a cannot either."""
+        for name, x in (("a", 1), ("b", 2), ("c", 3), ("wall", 4)):
+            empty_world.add_entity(Entity(entity_id=name, position=Position(x=x, y=5)))
+
+        results = process_movement_phase(
+            empty_world,
+            {"a": Direction.EAST, "b": Direction.EAST, "c": Direction.EAST},
+        )
+
+        assert not any(r.success for r in results)
+        for name, x in (("a", 1), ("b", 2), ("c", 3)):
+            assert empty_world.get_entity_at(Position(x=x, y=5)).entity_id == name

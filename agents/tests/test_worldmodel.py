@@ -228,3 +228,90 @@ def test_default_remaining_is_used_when_the_object_has_not_been_touched() -> Non
     )
     assert model.objects["tree_1"].remaining == 4
     assert model.objects["boulder_1"].remaining == 6
+
+
+# --- building (docs/08_building.md) ----------------------------------------
+
+
+def test_walkability_is_refreshed_when_a_tile_is_seen_again() -> None:
+    """A wall can be built and torn down; memory must follow the last look."""
+    model = WorldModel("ada")
+    model.update(make_observation(1, make_entity("ada", (10, 10))))
+    assert model.is_walkable((12, 10))
+
+    model.update(
+        make_observation(
+            2,
+            make_entity("ada", (10, 10)),
+            tiles=make_tiles((10, 10), blocked=[(12, 10)]),
+            objects=[make_object("w1", "wood_wall", (12, 10))],
+        )
+    )
+    assert not model.is_walkable((12, 10))
+
+    model.update(make_observation(3, make_entity("ada", (10, 10))))
+    assert model.is_walkable((12, 10))
+    assert not model.object_at((12, 10))
+
+
+def test_a_wall_blocks_even_before_the_tile_is_seen_again() -> None:
+    model = WorldModel("ada")
+    model.update(make_observation(1, make_entity("ada", (10, 10))))
+    model.update(
+        make_observation(
+            2,
+            make_entity("ada", (10, 10)),
+            objects=[make_object("w1", "stone_wall", (11, 10))],
+        )
+    )
+    assert not model.is_walkable((11, 10))
+
+
+def test_doors_stay_walkable_for_settlers() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            objects=[make_object("d1", "door", (11, 10))],
+        )
+    )
+    assert model.is_walkable((11, 10))
+
+
+def test_object_layers_are_told_apart() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object("r1", "road", (11, 10)),
+                make_object("b1", "bed", (11, 10)),
+            ],
+        )
+    )
+    assert [o.object_id for o in model.ground_objects_at((11, 10))] == ["r1"]
+    assert [o.object_id for o in model.structure_objects_at((11, 10))] == ["b1"]
+
+
+def test_a_workshop_table_is_found_only_when_it_is_within_reach() -> None:
+    near = WorldModel("ada")
+    near.update(
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            objects=[make_object("ws1", "workshop_table", (11, 11))],
+        )
+    )
+    assert near.workshop_table_near() is not None
+
+    far = WorldModel("ada")
+    far.update(
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            objects=[make_object("ws1", "workshop_table", (13, 10))],
+        )
+    )
+    assert far.workshop_table_near() is None

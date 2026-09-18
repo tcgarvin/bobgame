@@ -16,23 +16,27 @@ class TestKeepLargestComponent:
 
     def test_single_component_unchanged(self) -> None:
         """Single connected component is unchanged."""
-        land_mask = np.array([
-            [False, False, False, False],
-            [False, True,  True,  False],
-            [False, True,  True,  False],
-            [False, False, False, False],
-        ])
+        land_mask = np.array(
+            [
+                [False, False, False, False],
+                [False, True, True, False],
+                [False, True, True, False],
+                [False, False, False, False],
+            ]
+        )
         result = keep_largest_component(land_mask)
         np.testing.assert_array_equal(result, land_mask)
 
     def test_smaller_component_removed(self) -> None:
         """Smaller disconnected component is removed."""
-        land_mask = np.array([
-            [True,  False, False, False],
-            [False, False, False, False],
-            [False, False, True,  True],
-            [False, False, True,  True],
-        ])
+        land_mask = np.array(
+            [
+                [True, False, False, False],
+                [False, False, False, False],
+                [False, False, True, True],
+                [False, False, True, True],
+            ]
+        )
         result = keep_largest_component(land_mask)
 
         # Small component (top-left) should be gone
@@ -49,11 +53,13 @@ class TestKeepLargestComponent:
 
     def test_8_connected_diagonal(self) -> None:
         """8-connected components include diagonals."""
-        land_mask = np.array([
-            [True,  False, False],
-            [False, True,  False],
-            [False, False, True],
-        ])
+        land_mask = np.array(
+            [
+                [True, False, False],
+                [False, True, False],
+                [False, False, True],
+            ]
+        )
         result = keep_largest_component(land_mask, connectivity=2)
         # All should be connected via diagonal
         np.testing.assert_array_equal(result, land_mask)
@@ -64,13 +70,15 @@ class TestMajoritySmooth:
 
     def test_isolated_pixel_removed(self) -> None:
         """Single isolated land pixel is removed."""
-        land_mask = np.array([
-            [False, False, False, False, False],
-            [False, False, False, False, False],
-            [False, False, True,  False, False],
-            [False, False, False, False, False],
-            [False, False, False, False, False],
-        ])
+        land_mask = np.array(
+            [
+                [False, False, False, False, False],
+                [False, False, False, False, False],
+                [False, False, True, False, False],
+                [False, False, False, False, False],
+                [False, False, False, False, False],
+            ]
+        )
         result = majority_smooth(land_mask, iterations=1)
         # Isolated pixel has 0 land neighbors, should be removed
         assert result[2, 2] == False
@@ -102,11 +110,13 @@ class TestDistanceToWater:
 
     def test_water_cells_have_zero_distance(self) -> None:
         """Water cells (False) have distance 0."""
-        land_mask = np.array([
-            [False, False, True],
-            [False, True,  True],
-            [True,  True,  True],
-        ])
+        land_mask = np.array(
+            [
+                [False, False, True],
+                [False, True, True],
+                [True, True, True],
+            ]
+        )
         dist = compute_distance_to_water(land_mask)
         # This function computes distance on ~water, so water cells aren't 0
         # Let's verify land cells near water have low distance
@@ -129,11 +139,13 @@ class TestDistanceToLand:
 
     def test_land_cells_have_zero_distance(self) -> None:
         """Land cells have distance 0."""
-        land_mask = np.array([
-            [False, False, True],
-            [False, True,  True],
-            [True,  True,  True],
-        ])
+        land_mask = np.array(
+            [
+                [False, False, True],
+                [False, True, True],
+                [True, True, True],
+            ]
+        )
         dist = compute_distance_to_land(land_mask)
         # Water cells should have positive distance
         assert dist[0, 0] > 0

@@ -212,6 +212,28 @@ class TestEventReplay:
         speakers = [e.utterance.speaker_id for e in observation.events]
         assert speakers == ["bram"]
 
+    def test_shouts_carry_sixty_tiles_and_keep_their_channel(
+        self, service: ObservationServiceServicer
+    ) -> None:
+        service.on_tick_complete(
+            TickResult(
+                tick_id=6,
+                move_results=[],
+                utterances=[
+                    UtteranceEvent("bram", "shout", "wolf!", Position(x=90, y=30)),
+                    UtteranceEvent("cleo", "shout", "too far", Position(x=91, y=30)),
+                ],
+            )
+        )
+
+        observation = _observe(service)
+
+        heard = [
+            (e.utterance.speaker_id, e.utterance.channel) for e in observation.events
+        ]
+        assert heard == [("bram", "shout")]
+        assert observation.events[0].utterance.position.x == 90
+
     def test_thought_utterances_are_never_observed(
         self, service: ObservationServiceServicer
     ) -> None:

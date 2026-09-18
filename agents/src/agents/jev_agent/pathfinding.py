@@ -163,14 +163,22 @@ def path_length(
     goal: Coord,
     *,
     stop_adjacent: bool = False,
+    max_nodes: int = DEFAULT_MAX_NODES,
 ) -> int:
-    """Number of steps to `goal`, 0 when already there, `NO_PATH` when unreachable."""
+    """Number of steps to `goal`, 0 when already there, `NO_PATH` when unreachable.
+
+    An exhausted `max_nodes` budget reports `NO_PATH`, so a caller that uses a
+    small budget is asking "is this nearby and reachable", not "is this
+    reachable at all".
+    """
     if stop_adjacent:
         if chebyshev(start, goal) <= 1:
             return 0
     elif start == goal:
         return 0
-    path = find_path(view, start, goal, stop_adjacent=stop_adjacent)
+    path = find_path(
+        view, start, goal, stop_adjacent=stop_adjacent, max_nodes=max_nodes
+    )
     if not path:
         return NO_PATH
     return len(path)

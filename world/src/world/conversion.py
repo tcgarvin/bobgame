@@ -1,7 +1,7 @@
 """Conversion functions between internal types and proto messages."""
 
 from . import world_pb2 as pb
-from .state import Entity, Inventory, Tile, WorldObject
+from .state import Entity, Inventory, Tile, WorldClock, WorldObject
 from .types import Direction, Position
 
 
@@ -62,6 +62,9 @@ def entity_to_proto(entity: Entity) -> pb.Entity:
         max_hunger=entity.max_hunger,
         wielded=entity.wielded,
         alive=entity.alive,
+        fatigue=entity.fatigue,
+        max_fatigue=entity.max_fatigue,
+        asleep=entity.asleep,
     )
 
 
@@ -80,6 +83,29 @@ def entity_from_proto(proto_entity: pb.Entity) -> Entity:
         max_hunger=proto_entity.max_hunger,
         wielded=proto_entity.wielded,
         alive=proto_entity.alive,
+        fatigue=proto_entity.fatigue,
+        max_fatigue=proto_entity.max_fatigue,
+        asleep=proto_entity.asleep,
+    )
+
+
+def clock_to_proto(clock: WorldClock) -> pb.WorldClock:
+    """Convert the internal WorldClock to proto WorldClock."""
+    return pb.WorldClock(
+        day=clock.day,
+        tick_of_day=clock.tick_of_day,
+        day_length=clock.day_length,
+        night=clock.night,
+    )
+
+
+def clock_from_proto(proto_clock: pb.WorldClock) -> WorldClock:
+    """Convert proto WorldClock to the internal WorldClock."""
+    return WorldClock(
+        day=proto_clock.day,
+        tick_of_day=proto_clock.tick_of_day,
+        day_length=proto_clock.day_length,
+        night=proto_clock.night,
     )
 
 

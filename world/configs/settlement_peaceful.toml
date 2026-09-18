@@ -1,0 +1,90 @@
+# Settlement scenario without wolves: for watching the settlers build undisturbed.
+# See docs/05_jev_agents_design.md.
+#
+# Loads the pre-generated 4000x4000 island map and spawns every entity on the
+# free walkable tiles nearest the computed settlement centre (x/y below are
+# ignored in settlement spawn mode).
+
+[world]
+width = 4000
+height = 4000
+generation_mode = "load"
+map_save_path = "saves/island.npz"
+spawn_mode = "settlement"
+wolves = false
+tick_duration_ms = 2000
+intent_deadline_ms = 1200
+# A day is 300 ticks = 10 minutes at 2 s ticks; nights start at tick 200.
+day_length_ticks = 300
+
+[[entities]]
+id = "ada"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "bram"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "cleo"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "dov"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "esme"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "finn"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "greta"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "hale"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "iris"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "jory"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "kai"
+type = "player"
+x = 0
+y = 0
+
+[[entities]]
+id = "lena"
+type = "player"
+x = 0
+y = 0

@@ -29,7 +29,9 @@ DEFAULT_LOG_ROOT = Path("logs")
 STINTS_FILE = "stints.jsonl.gz"
 JEV_STATES_FILE = "jev_states.jsonl.gz"
 PLANNER_FILE = "planner.jsonl.gz"
+CONVERSATIONS_FILE = "conversations.jsonl.gz"
 MEMORY_FILE = "memory.md"
+REFLEX_FILE = "reflex.json"
 
 
 class TraceWriter(Protocol):
@@ -111,7 +113,7 @@ def _null_writer(path: Path) -> TraceWriter:
 
 
 class AgentTrace:
-    """The three trace files (and the memory file's home) for one entity."""
+    """The four trace files (and the memory file's home) for one entity."""
 
     def __init__(self, entity_id: str, log_root: Path, *, enabled: bool = True) -> None:
         self.entity_id = entity_id
@@ -124,6 +126,7 @@ class AgentTrace:
         self.stints: TraceWriter = make(self.directory / STINTS_FILE)
         self.jev_states: TraceWriter = make(self.directory / JEV_STATES_FILE)
         self.planner: TraceWriter = make(self.directory / PLANNER_FILE)
+        self.conversations: TraceWriter = make(self.directory / CONVERSATIONS_FILE)
 
     @classmethod
     def disabled(
@@ -133,13 +136,23 @@ class AgentTrace:
         return cls(entity_id, log_root, enabled=False)
 
     @property
+    def reflex_path(self) -> Path:
+        """Where the reflex brief is persisted between runs."""
+        return self.directory / REFLEX_FILE
+
+    @property
     def memory_path(self) -> Path:
         """Where the planner keeps its persistent notes."""
         return self.directory / MEMORY_FILE
 
     def close(self) -> None:
-        """Close all three files."""
-        for writer in (self.stints, self.jev_states, self.planner):
+        """Close every trace file."""
+        for writer in (
+            self.stints,
+            self.jev_states,
+            self.planner,
+            self.conversations,
+        ):
             writer.close()
 
 

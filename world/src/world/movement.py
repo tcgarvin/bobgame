@@ -53,14 +53,15 @@ class MovementResolver:
         entity = self.world.get_entity(entity_id)
         from_pos = entity.position
         to_pos = from_pos.offset(direction)
+        entity_type = entity.entity_type
 
         # Check bounds
         if not self.world.in_bounds(to_pos):
             logger.debug("move_rejected_oob", entity_id=entity_id, to_pos=str(to_pos))
             return None
 
-        # Check walkability
-        if not self.world.is_walkable(to_pos):
+        # Check walkability, including walls and (for wolves) doors
+        if not self.world.is_passable(to_pos, entity_type):
             logger.debug(
                 "move_rejected_not_walkable", entity_id=entity_id, to_pos=str(to_pos)
             )
@@ -71,7 +72,10 @@ class MovementResolver:
             d1, d2 = DIAGONAL_COMPONENTS[direction]
             adj1 = from_pos.offset(d1)
             adj2 = from_pos.offset(d2)
-            if not (self.world.is_walkable(adj1) and self.world.is_walkable(adj2)):
+            if not (
+                self.world.is_passable(adj1, entity_type)
+                and self.world.is_passable(adj2, entity_type)
+            ):
                 logger.debug(
                     "move_rejected_diagonal_blocked",
                     entity_id=entity_id,
@@ -94,7 +98,8 @@ class MovementResolver:
         1. Build destination -> claimants mapping
         2. Detect swaps and cycles
         3. Handle same-destination conflicts by priority
-        4. Check for occupied destinations
+        4. Check for occupied destinations, including occupants whose own
+           move failed, propagating failures along chains
         5. Return results
         """
         if not claims:
@@ -152,16 +157,23 @@ class MovementResolver:
                     losers=[c.entity_id for c in valid_claims[1:]],
                 )
 
-        # Phase 4: Check for occupied destinations (by non-moving entities)
-        for dest, winner_id in list(winners.items()):
-            occupant = self.world.get_entity_at(dest)
-            if occupant and occupant.entity_id not in entity_to_claim:
-                # Destination occupied by non-moving entity
+        # Phase 4: Check for occupied destinations. A tile only frees up when
+        # its occupant's own move succeeds, so a failure propagates back along
+        # a chain of followers: repeat until no new failure appears.
+        changed = True
+        while changed:
+            changed = False
+            for dest, winner_id in list(winners.items()):
+                occupant = self.world.get_entity_at(dest)
+                if occupant is None:
+                    continue
+                occupant_id = occupant.entity_id
+                if occupant_id in entity_to_claim and occupant_id not in failed:
+                    continue
                 failed[winner_id] = "destination_occupied"
                 del winners[dest]
-                logger.debug(
-                    "dest_occupied", entity_id=winner_id, occupant=occupant.entity_id
-                )
+                changed = True
+                logger.debug("dest_occupied", entity_id=winner_id, occupant=occupant_id)
 
         # Build results
         results: list[MoveResult] = []

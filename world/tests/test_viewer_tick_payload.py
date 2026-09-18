@@ -85,6 +85,13 @@ class TestTickCompleted:
                 utterances=[
                     UtteranceEvent("ada", "local", "hi", Position(x=10, y=10)),
                     UtteranceEvent("ada", "thought", "hmm", Position(x=10, y=10)),
+                    UtteranceEvent(
+                        "ada",
+                        "conversation",
+                        "about the wall",
+                        Position(x=10, y=10),
+                        "conv_3",
+                    ),
                 ],
                 objects_added=[ObjectAddedEvent(chest)],
                 objects_removed=[ObjectRemovedEvent("tree_9", Position(x=12, y=12))],
@@ -108,6 +115,11 @@ class TestTickCompleted:
                 "max_hunger": 100,
                 "wielded": "axe",
                 "alive": True,
+                "fatigue": 0,
+                "max_fatigue": 100,
+                "asleep": False,
+                "sleeping_on": "",
+                "collapsed": False,
                 "inventory": {"wood": 3},
             }
         ]
@@ -119,8 +131,17 @@ class TestTickCompleted:
                 "details": "made an axe",
             }
         ]
-        # Both channels reach the viewer.
-        assert [u["channel"] for u in event["utterances"]] == ["local", "thought"]
+        # Every channel reaches the viewer, each with its conversation id.
+        assert [u["channel"] for u in event["utterances"]] == [
+            "local",
+            "thought",
+            "conversation",
+        ]
+        assert [u["conversation_id"] for u in event["utterances"]] == [
+            "",
+            "",
+            "conv_3",
+        ]
         assert event["objects_added"] == [
             {
                 "object_id": "chest_1",

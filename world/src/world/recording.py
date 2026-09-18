@@ -28,6 +28,7 @@ from .state import World
 from .tick import TickConfig, TickResult
 from .viewer_payload import (
     action_payload,
+    clock_payload,
     damage_payload,
     death_payload,
     entity_despawned_payload,
@@ -158,6 +159,7 @@ def tick_record(result: TickResult, world: World, wall_ms: int) -> dict[str, Any
     return {
         "type": "tick",
         "tick_id": result.tick_id,
+        "clock": clock_payload(world.clock),
         "wall_ms": wall_ms,
         "duration_ms": result.duration_ms,
         "moves": [move_payload(move) for move in result.move_results],
@@ -349,6 +351,7 @@ class RunRecorder:
             "chunk_size": CHUNK_SIZE,
             "tick_duration_ms": self.tick_config.tick_duration_ms,
             "intent_deadline_ms": self.tick_config.intent_deadline_ms,
+            "day_length_ticks": self.world.day_length_ticks,
             "settlement": (
                 {"x": settlement.x, "y": settlement.y}
                 if settlement is not None

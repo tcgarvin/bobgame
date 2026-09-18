@@ -10,7 +10,7 @@
  * through `onRequestAgentDetail` whenever the selection or the tick changes.
  */
 
-import type { WorldState } from '../network';
+import type { InterpolatedEntity, TrackedObject, WorldState } from '../network';
 import type {
   AgentDetailMessage,
   AgentStint,
@@ -18,6 +18,14 @@ import type {
   StintBrief,
   StintOptionProbability,
 } from '../network';
+import {
+  CONVERSATION_TYPE,
+  parseConversationParticipants,
+  parseConversationTranscript,
+} from '../conversation';
+
+/** Modes with a distinct badge color (index.html `.mode-badge.*`). */
+const KNOWN_MODES = ['planning', 'stint', 'idle', 'reflex', 'conversation'];
 
 export interface OverlayCallbacks {
   /** Called when the user picks an entity (via dropdown or by clicking it). */
@@ -28,6 +36,18 @@ export interface OverlayCallbacks {
 
 /** Entity types that get a hunger bar and a player-style label. */
 const PLAYER_TYPE = 'player';
+
+/**
+ * Fatigue thresholds (docs/10_metal_and_sleep.md, section 4): under 60 fresh,
+ * 60-99 tired (halved work, weaker hits, no regen), at max exhausted.
+ */
+const TIRED_FATIGUE = 60;
+
+/** The word for a fatigue level, shown next to the number. */
+export function fatigueState(fatigue: number, maxFatigue: number): string {
+  if (maxFatigue > 0 && fatigue >= maxFatigue) return 'exhausted';
+  return fatigue >= TIRED_FATIGUE ? 'tired' : 'fresh';
+}
 
 /** How long to wait before re-requesting detail while playback runs. */
 const DETAIL_DEBOUNCE_MS = 250;
@@ -75,6 +95,7 @@ export class OverlayUI {
 
   private picker: HTMLSelectElement;
   private followIndicator: HTMLElement;
+  private clockEl: HTMLElement;
   private panel: HTMLElement;
   private nameEl: HTMLElement;
   private modeEl: HTMLElement;
@@ -89,6 +110,8 @@ export class OverlayUI {
   private jevStateEl: HTMLElement;
   private plannerEl: HTMLElement;
   private memoryEl: HTMLElement;
+  private conversationEl: HTMLElement;
+  private conversationBodyEl: HTMLElement;
 
   private pickerSignature: string = '';
   private requestedDetailKey: string = '';
@@ -100,6 +123,7 @@ export class OverlayUI {
 
     this.picker = requireElement<HTMLSelectElement>('entity-picker');
     this.followIndicator = requireElement('follow-indicator');
+    this.clockEl = requireElement('clock-readout');
     this.panel = requireElement('agent-panel');
     this.nameEl = requireElement('ap-name');
     this.modeEl = requireElement('ap-mode');
@@ -114,6 +138,8 @@ export class OverlayUI {
     this.jevStateEl = requireElement('ap-jev-state');
     this.plannerEl = requireElement('ap-planner');
     this.memoryEl = requireElement('ap-memory');
+    this.conversationEl = requireElement('ap-conversation');
+    this.conversationBodyEl = requireElement('ap-conversation-body');
 
     this.picker.addEventListener('change', () => {
       this.callbacks.onSelectEntity(this.picker.value);
@@ -143,8 +169,28 @@ export class OverlayUI {
 
   /** Rebuild the picker options and the panel contents. */
   refresh(): void {
+    this.refreshClock();
     this.refreshPicker();
     this.refreshPanel();
+  }
+
+  /**
+   * `day 2 · 143/300 · night`, straight from the latest tick's clock so it is
+   * correct after a replay seek as well.
+   */
+  private refreshClock(): void {
+    const clock = this.worldState.getClock();
+    if (!clock) {
+      this.clockEl.textContent = '-';
+      this.clockEl.classList.add('muted');
+      this.clockEl.classList.remove('night');
+      return;
+    }
+    this.clockEl.classList.remove('muted');
+    this.clockEl.classList.toggle('night', clock.night);
+    this.clockEl.textContent = `day ${clock.day} · ${clock.tick_of_day}/${clock.day_length} · ${
+      clock.night ? 'night' : 'day'
+    }`;
   }
 
   private refreshPicker(): void {
@@ -200,6 +246,7 @@ export class OverlayUI {
       this.setText(this.inventoryEl, '');
       this.logEl.replaceChildren(this.mutedItem('-'));
       this.replayEl.classList.add('hidden');
+      this.conversationEl.classList.add('hidden');
       return;
     }
 
@@ -210,18 +257,61 @@ export class OverlayUI {
 
     const mode = status?.mode ?? (entity.entityType === PLAYER_TYPE ? 'idle' : entity.entityType);
     this.modeEl.textContent = mode;
-    this.modeEl.className = `mode-badge ${['planning', 'stint', 'idle'].includes(mode) ? mode : ''}`;
+    this.modeEl.className = `mode-badge ${KNOWN_MODES.includes(mode) ? mode : ''}`;
 
-    this.renderStats(entity.health, entity.maxHealth, entity.hunger, entity.maxHunger,
-      entity.entityType === PLAYER_TYPE, entity.alive, entity.wielded);
+    this.renderStats(entity, entity.entityType === PLAYER_TYPE);
 
     const stint = detail?.record ?? status?.stint ?? null;
     this.renderBrief(status?.brief ?? '', stint, detail);
+    this.renderConversation(entityId);
     this.setText(this.thoughtEl, status?.planner_thought ?? detail?.planner_turn?.thought ?? '');
     this.renderJev(stint);
     this.renderInventory(entity.inventory);
     this.renderLog(entityId);
     this.renderReplaySections(detail);
+  }
+
+  /** Find the conversation object, if any, this entity currently sits in. */
+  private findConversation(entityId: string): TrackedObject | undefined {
+    for (const obj of this.worldState.getObjects()) {
+      if (obj.objectType !== CONVERSATION_TYPE) continue;
+      if (parseConversationParticipants(obj.state.participants).includes(entityId)) {
+        return obj;
+      }
+    }
+    return undefined;
+  }
+
+  /** Show the conversation's participants, speaker and transcript when the selected entity is seated in one. */
+  private renderConversation(entityId: string): void {
+    const conversation = this.findConversation(entityId);
+    if (!conversation) {
+      this.conversationEl.classList.add('hidden');
+      this.conversationBodyEl.replaceChildren();
+      return;
+    }
+    this.conversationEl.classList.remove('hidden');
+
+    const participants = parseConversationParticipants(conversation.state.participants);
+    const speaker = conversation.state.speaker ?? '';
+    const transcript = parseConversationTranscript(conversation.state.transcript);
+
+    const rows: HTMLElement[] = [
+      this.kvRow('Participants', participants.join(', ') || '-'),
+      this.kvRow('Speaker', speaker || '-'),
+    ];
+
+    if (transcript.length === 0) {
+      rows.push(this.mutedDiv('no lines yet'));
+    } else {
+      for (const line of transcript) {
+        const row = document.createElement('div');
+        row.className = 'text';
+        row.textContent = `t${line.tick} ${line.speaker}: ${line.text}`;
+        rows.push(row);
+      }
+    }
+    this.conversationBodyEl.replaceChildren(...rows);
   }
 
   /**
@@ -260,22 +350,27 @@ export class OverlayUI {
     return null;
   }
 
-  private renderStats(
-    health: number,
-    maxHealth: number,
-    hunger: number,
-    maxHunger: number,
-    isPlayer: boolean,
-    alive: boolean,
-    wielded: string
-  ): void {
+  private renderStats(entity: InterpolatedEntity, isPlayer: boolean): void {
     const rows: HTMLElement[] = [];
-    rows.push(this.barRow('Health', health, maxHealth, '#d35f5f'));
+    rows.push(this.barRow('Health', entity.health, entity.maxHealth, '#d35f5f'));
     if (isPlayer) {
-      rows.push(this.barRow('Hunger', hunger, maxHunger, '#e0913a'));
+      rows.push(this.barRow('Hunger', entity.hunger, entity.maxHunger, '#e0913a'));
+      const state = fatigueState(entity.fatigue, entity.maxFatigue);
+      rows.push(
+        this.barRow(
+          'Fatigue',
+          entity.fatigue,
+          entity.maxFatigue,
+          state === 'fresh' ? '#5f8dd3' : '#b07fd3',
+          `${Math.round(entity.fatigue)}/${Math.round(entity.maxFatigue)} ${state}`
+        )
+      );
+      if (entity.asleep) {
+        rows.push(this.kvRow('Asleep', state === 'exhausted' ? 'collapsed' : 'yes'));
+      }
     }
-    rows.push(this.kvRow('Wielded', wielded || 'nothing'));
-    rows.push(this.kvRow('Alive', alive ? 'yes' : 'no'));
+    rows.push(this.kvRow('Wielded', entity.wielded || 'nothing'));
+    rows.push(this.kvRow('Alive', entity.alive ? 'yes' : 'no'));
     this.statsEl.replaceChildren(...rows);
   }
 

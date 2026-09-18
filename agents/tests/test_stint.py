@@ -9,6 +9,7 @@ from typing import Iterator
 
 import pytest
 
+from agents.jev_agent.build import BUILD_OUT_OF_ITEMS, BuildExecutor, make_plan
 from agents.jev_agent.jevclient import JevDecision
 from agents.jev_agent.options import TravelState
 from agents.jev_agent.stint import (
@@ -59,11 +60,17 @@ def make_brief(**overrides: object) -> Brief:
 class StintHarness:
     """Drives a stint over a scripted sequence of observations."""
 
-    def __init__(self, jev: FakeJevClient, brief: Brief, trace: AgentTrace) -> None:
+    def __init__(
+        self,
+        jev: FakeJevClient,
+        brief: Brief,
+        trace: AgentTrace,
+        driver: object | None = None,
+    ) -> None:
         self.model = WorldModel("ada")
         self.jev = jev
         self.trace = trace
-        self.stint = Stint(brief, self.model, jev, trace=trace)
+        self.stint = Stint(brief, self.model, jev, trace=trace, driver=driver)  # type: ignore[arg-type]
 
     async def tick(self, observation) -> object:  # type: ignore[no-untyped-def]
         """Feed one observation through the model and the stint."""
@@ -315,6 +322,7 @@ async def test_every_tick_is_written_to_the_stint_trace(trace: AgentTrace) -> No
         "max_ticks": 5,
         "notes": "",
         "check_every": 1,
+        "shouts": [],
         "travel": None,
     }
     assert first["entity_id"] == "ada"
@@ -499,3 +507,49 @@ async def test_a_slow_jev_answer_falls_back_to_repeating_the_last_action(
     intent = await harness.tick(make_observation(2, make_entity("ada", (11, 10))))
     assert intent.HasField("move"), "the last action is repeated on timeout"
     assert harness.stint.records[-1].note == "jev_timeout"
+
+
+# --- code drivers (the planner's build tool) --------------------------------
+
+
+async def test_a_driver_replaces_jev_for_the_whole_stint(trace: AgentTrace) -> None:
+    jev = FakeJevClient()
+    executor = BuildExecutor(make_plan("road", "line", (10, 10), (11, 10)))
+    harness = StintHarness(jev, make_brief(max_ticks=4), trace, executor)
+    intent = await harness.tick(
+        make_observation(1, make_entity("ada", (10, 10), inventory={"road": 2}))
+    )
+    assert intent.HasField("place")
+    assert intent.place.kind == "road"
+    assert jev.calls == []
+
+
+async def test_a_driver_tick_is_traced_without_jevs_numbers(trace: AgentTrace) -> None:
+    jev = FakeJevClient()
+    executor = BuildExecutor(make_plan("road", "line", (10, 10), (11, 10)))
+    harness = StintHarness(jev, make_brief(max_ticks=4), trace, executor)
+    await harness.tick(
+        make_observation(1, make_entity("ada", (10, 10), inventory={"road": 2}))
+    )
+    trace.close()
+    records = [
+        line
+        for line in read_lines(trace.directory / "stints.jsonl.gz")
+        if "action" in line
+    ]
+    assert records[0]["driver"] == "build"
+    assert records[0]["action"].startswith("build_place:")
+    assert "latency_ms" not in records[0]
+    assert "eject" not in records[0]
+    assert records[0]["top"] == []
+    # No Jev call means no jev_states line for this tick.
+    assert not read_lines(trace.directory / "jev_states.jsonl.gz")
+
+
+async def test_a_driver_ends_the_stint_with_its_own_reason(trace: AgentTrace) -> None:
+    jev = FakeJevClient()
+    executor = BuildExecutor(make_plan("road", "line", (10, 10), (11, 10)))
+    harness = StintHarness(jev, make_brief(max_ticks=4), trace, executor)
+    await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
+    assert harness.stint.finished
+    assert harness.stint.end_reason == BUILD_OUT_OF_ITEMS

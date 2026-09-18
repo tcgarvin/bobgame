@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
 from agents import world_pb2 as pb
+from agents.jev_agent.conversation import ConverserMove
 from agents.jev_agent.jevclient import JevDecision
 
 GRASS = "grass"
@@ -24,6 +26,9 @@ def make_entity(
     wielded: str = "",
     alive: bool = True,
     inventory: Mapping[str, int] | None = None,
+    fatigue: int = 0,
+    max_fatigue: int = 100,
+    asleep: bool = False,
 ) -> pb.Entity:
     """A proto Entity with sensible player defaults."""
     items = [
@@ -41,6 +46,9 @@ def make_entity(
         wielded=wielded,
         alive=alive,
         inventory=pb.Inventory(items=items),
+        fatigue=fatigue,
+        max_fatigue=max_fatigue,
+        asleep=asleep,
     )
 
 
@@ -92,6 +100,7 @@ def make_observation(
     objects: Sequence[pb.WorldObject] = (),
     entities: Sequence[pb.Entity] = (),
     events: Sequence[pb.ObservationEvent] = (),
+    clock: pb.WorldClock | None = None,
 ) -> pb.Observation:
     """An Observation with a fully walkable view unless told otherwise."""
     position = (self_entity.position.x, self_entity.position.y)
@@ -102,6 +111,20 @@ def make_observation(
         visible_objects=list(objects),
         visible_entities=list(entities),
         events=list(events),
+        clock=clock if clock is not None else make_clock(tick),
+    )
+
+
+def make_clock(
+    tick: int, day_length: int = 300, night_start: int = 200
+) -> pb.WorldClock:
+    """The world clock for `tick`, with the settlement day length."""
+    tick_of_day = tick % day_length
+    return pb.WorldClock(
+        day=tick // day_length,
+        tick_of_day=tick_of_day,
+        day_length=day_length,
+        night=tick_of_day >= night_start,
     )
 
 
@@ -115,6 +138,37 @@ def acted_event(
             action_type=action_type,
             success=success,
             details=details,
+        )
+    )
+
+
+def utterance_event(
+    speaker_id: str,
+    text: str,
+    position: tuple[int, int],
+    channel: str = "local",
+) -> pb.ObservationEvent:
+    """An `Utterance` observation event spoken from `position`."""
+    return pb.ObservationEvent(
+        utterance=pb.Utterance(
+            speaker_id=speaker_id,
+            channel=channel,
+            text=text,
+            position=pb.Position(x=position[0], y=position[1]),
+        )
+    )
+
+
+def damaged_event(
+    entity_id: str, attacker_id: str, amount: int, remaining_health: int
+) -> pb.ObservationEvent:
+    """An `EntityDamaged` observation event."""
+    return pb.ObservationEvent(
+        entity_damaged=pb.EntityDamaged(
+            entity_id=entity_id,
+            attacker_id=attacker_id,
+            amount=amount,
+            remaining_health=remaining_health,
         )
     )
 
@@ -151,3 +205,72 @@ class FakeJevClient:
     def last_state(self) -> dict[str, Any]:
         """The state sent on the most recent call."""
         return self.calls[-1][0]
+
+
+def converse_object(
+    conversation_id: str,
+    anchor: tuple[int, int],
+    participants: Sequence[str],
+    *,
+    speaker: str = "",
+    turn_started: int = 0,
+    utterances: int = 0,
+    transcript: Sequence[Mapping[str, Any]] = (),
+) -> pb.WorldObject:
+    """A `conversation` world object with the state the world writes."""
+    return make_object(
+        conversation_id,
+        "conversation",
+        anchor,
+        {
+            "participants": json.dumps(list(participants)),
+            "speaker": speaker,
+            "turn_started": str(turn_started),
+            "opened_tick": "1",
+            "opened_by": participants[0] if participants else "",
+            "utterances": str(utterances),
+            "transcript": json.dumps(list(transcript)),
+        },
+    )
+
+
+def conversation_utterance_event(
+    speaker_id: str,
+    text: str,
+    position: tuple[int, int],
+    conversation_id: str,
+    channel: str = "conversation",
+) -> pb.ObservationEvent:
+    """An `Utterance` event that belongs to a conversation."""
+    return pb.ObservationEvent(
+        utterance=pb.Utterance(
+            speaker_id=speaker_id,
+            channel=channel,
+            text=text,
+            position=pb.Position(x=position[0], y=position[1]),
+            conversation_id=conversation_id,
+        )
+    )
+
+
+@dataclass
+class FakeConverser:
+    """A `Converser` that replays scripted moves and records its prompts."""
+
+    script: list[ConverserMove] = field(default_factory=list)
+    default_action: str = "pass"
+    note_text: str = ""
+    prompts: list[str] = field(default_factory=list)
+    note_prompts: list[str] = field(default_factory=list)
+
+    async def move(self, prompt: str) -> ConverserMove:
+        """Pop the next scripted move, falling back to `default_action`."""
+        self.prompts.append(prompt)
+        if self.script:
+            return self.script.pop(0)
+        return ConverserMove(action=self.default_action)
+
+    async def note(self, prompt: str) -> str:
+        """Return the fixed note text."""
+        self.note_prompts.append(prompt)
+        return self.note_text

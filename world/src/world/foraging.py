@@ -8,19 +8,27 @@ import structlog
 from .events import ObjectChange, ObjectRemovedEvent, TickEvents
 from .exceptions import EntityNotFoundError, ObjectNotFoundError
 from .items import (
+    BUILDING_KINDS,
+    DISMANTLE_WORK,
     EXTRACT_THRESHOLD,
-    EXTRACT_TOOL,
+    EXTRACT_TOOLS,
     EXTRACT_WORK_BARE,
-    EXTRACT_WORK_WITH_TOOL,
+    EXTRACT_WORK_BY_TOOL,
     EXTRACT_YIELD,
     EXTRACTABLE_TYPES,
+    VEIN_REQUIRED_TOOLS,
     default_remaining,
 )
-from .state import World
+from .state import World, WorldObject
+from .sleep import is_tired
 from .stats import hunger_restored
 from .types import CollectIntent, EatIntent, ExtractIntent, is_same_or_adjacent
 
 logger = structlog.get_logger()
+
+# Object types an ExtractIntent may work: natural resources plus placed
+# buildings, which come apart instead of yielding material per unit.
+WORKABLE_OBJECT_TYPES = EXTRACTABLE_TYPES | BUILDING_KINDS
 
 
 @dataclass
@@ -277,10 +285,31 @@ def object_remaining(obj_type: str, raw_remaining: str) -> int:
 
 
 def extract_work(wielded: str, object_type: str) -> int:
-    """Work units one extract action contributes."""
-    if wielded and wielded == EXTRACT_TOOL.get(object_type, ""):
-        return EXTRACT_WORK_WITH_TOOL
+    """Work units one extract action contributes when fresh.
+
+    A tool only helps on the objects it suits (axes on trees, pickaxes on rock,
+    clay and veins); the tier decides how much (docs/10, "Tools and tiers").
+    """
+    if wielded and wielded in EXTRACT_TOOLS.get(object_type, frozenset()):
+        return EXTRACT_WORK_BY_TOOL.get(wielded, EXTRACT_WORK_BARE)
     return EXTRACT_WORK_BARE
+
+
+def tired_work(work: int) -> int:
+    """Work units a tired settler gets out of `work` (docs/10, "Fatigue")."""
+    return max(1, work // 2)
+
+
+def missing_vein_tool(wielded: str, object_type: str) -> str:
+    """Failure detail when `wielded` cannot work this object, else "".
+
+    Ore veins need a pickaxe of a high enough tier; everything else in
+    EXTRACTABLE_TYPES can be worked bare-handed.
+    """
+    required = VEIN_REQUIRED_TOOLS.get(object_type, frozenset())
+    if not required or wielded in required:
+        return ""
+    return " or ".join(sorted(required))
 
 
 def process_extract_phase(
@@ -288,7 +317,7 @@ def process_extract_phase(
     intents: Mapping[str, ExtractIntent],
     events: TickEvents,
 ) -> None:
-    """Chop trees and mine rocks.
+    """Chop trees, mine rocks, cut reeds, dig clay and dismantle buildings.
 
     Several entities may work the same object in one tick; work is applied in
     lexicographic entity_id order, so that id wins a contested threshold.
@@ -303,7 +332,7 @@ def process_extract_phase(
         except ObjectNotFoundError:
             events.acted(entity_id, "extract", False, f"no object {intent.object_id}")
             continue
-        if obj.object_type not in EXTRACTABLE_TYPES:
+        if obj.object_type not in WORKABLE_OBJECT_TYPES:
             events.acted(
                 entity_id,
                 "extract",
@@ -320,68 +349,145 @@ def process_extract_phase(
 
     for object_id in sorted(by_object):
         obj = world.get_object(object_id)
-        yielded = EXTRACT_YIELD[obj.object_type]
-        old_progress = obj.get_state("progress", "0")
-        old_remaining_raw = obj.get_state("remaining", "")
-        progress = int(old_progress or "0")
-        remaining = object_remaining(obj.object_type, old_remaining_raw)
+        workers = sorted(by_object[object_id])
+        if obj.object_type in BUILDING_KINDS:
+            _dismantle_object(world, obj, workers, events)
+        else:
+            _extract_from_object(world, obj, workers, events)
 
-        for entity_id in sorted(by_object[object_id]):
-            if remaining <= 0:
-                events.acted(entity_id, "extract", False, f"{object_id} is depleted")
-                continue
-            entity = world.get_entity(entity_id)
-            progress += extract_work(entity.wielded, obj.object_type)
-            if progress >= EXTRACT_THRESHOLD:
-                progress -= EXTRACT_THRESHOLD
-                remaining -= 1
-                world.set_entity(
-                    entity.with_inventory(entity.inventory.add(yielded, 1))
-                )
-                events.acted(
-                    entity_id,
-                    "extract",
-                    True,
-                    f"worked {object_id} (+1 {yielded})",
-                )
-            else:
-                events.acted(
-                    entity_id,
-                    "extract",
-                    True,
-                    f"worked {object_id} ({progress}/{EXTRACT_THRESHOLD})",
-                )
 
-        if remaining <= 0:
-            world.remove_object(object_id)
-            events.objects_removed.append(
-                ObjectRemovedEvent(object_id=object_id, position=obj.position)
+def _dismantle_object(
+    world: World,
+    obj: WorldObject,
+    workers: list[str],
+    events: TickEvents,
+) -> None:
+    """Take a placed building apart, returning one item to whoever finishes it.
+
+    DISMANTLE_WORK work units, one per action and no tool bonus
+    (docs/08_building.md, "Dismantling").
+    """
+    old_progress = obj.get_state("progress", "0")
+    progress = int(old_progress or "0")
+    object_id = obj.object_id
+
+    for entity_id in workers:
+        # One unit per action; the tired penalty (half, minimum 1) is a no-op.
+        progress += 1
+        if progress < DISMANTLE_WORK:
+            events.acted(
+                entity_id,
+                "extract",
+                True,
+                f"dismantling {object_id} ({progress}/{DISMANTLE_WORK})",
             )
-            logger.debug("object_depleted", object_id=object_id)
             continue
 
-        updated = obj.with_state("progress", str(progress)).with_state(
-            "remaining", str(remaining)
+        entity = world.get_entity(entity_id)
+        world.set_entity(
+            entity.with_inventory(entity.inventory.add(obj.object_type, 1))
         )
-        world.update_object(updated)
-        if updated.get_state("progress") != old_progress:
-            events.object_changes.append(
-                ObjectChange(
-                    object_id=object_id,
-                    field="progress",
-                    old_value=old_progress,
-                    new_value=updated.get_state("progress"),
-                )
+        world.remove_object(object_id)
+        events.objects_removed.append(
+            ObjectRemovedEvent(object_id=object_id, position=obj.position)
+        )
+        events.acted(
+            entity_id,
+            "extract",
+            True,
+            f"dismantled {object_id} (+1 {obj.object_type})",
+        )
+        logger.debug("object_dismantled", object_id=object_id, entity_id=entity_id)
+        # The object is gone; anyone else who swung at it this tick missed.
+        for latecomer in workers[workers.index(entity_id) + 1 :]:
+            events.acted(latecomer, "extract", False, f"no object {object_id}")
+        return
+
+    updated = obj.with_state("progress", str(progress))
+    world.update_object(updated)
+    events.object_changes.append(
+        ObjectChange(
+            object_id=object_id,
+            field="progress",
+            old_value=old_progress,
+            new_value=updated.get_state("progress"),
+        )
+    )
+
+
+def _extract_from_object(
+    world: World,
+    obj: WorldObject,
+    workers: list[str],
+    events: TickEvents,
+) -> None:
+    """Work a natural object, yielding one item per EXTRACT_THRESHOLD units."""
+    object_id = obj.object_id
+    yielded = EXTRACT_YIELD[obj.object_type]
+    old_progress = obj.get_state("progress", "0")
+    old_remaining_raw = obj.get_state("remaining", "")
+    progress = int(old_progress or "0")
+    remaining = object_remaining(obj.object_type, old_remaining_raw)
+
+    for entity_id in workers:
+        if remaining <= 0:
+            events.acted(entity_id, "extract", False, f"{object_id} is depleted")
+            continue
+        entity = world.get_entity(entity_id)
+        tools = missing_vein_tool(entity.wielded, obj.object_type)
+        if tools:
+            events.acted(entity_id, "extract", False, f"{object_id} needs a {tools}")
+            continue
+        work = extract_work(entity.wielded, obj.object_type)
+        progress += tired_work(work) if is_tired(entity) else work
+        if progress >= EXTRACT_THRESHOLD:
+            progress -= EXTRACT_THRESHOLD
+            remaining -= 1
+            world.set_entity(entity.with_inventory(entity.inventory.add(yielded, 1)))
+            events.acted(
+                entity_id,
+                "extract",
+                True,
+                f"worked {object_id} (+1 {yielded})",
             )
-        if updated.get_state("remaining") != old_remaining_raw:
-            events.object_changes.append(
-                ObjectChange(
-                    object_id=object_id,
-                    field="remaining",
-                    old_value=old_remaining_raw,
-                    new_value=updated.get_state("remaining"),
-                )
+        else:
+            events.acted(
+                entity_id,
+                "extract",
+                True,
+                f"worked {object_id} ({progress}/{EXTRACT_THRESHOLD})",
             )
+
+    if remaining <= 0:
+        world.remove_object(object_id)
+        events.objects_removed.append(
+            ObjectRemovedEvent(object_id=object_id, position=obj.position)
+        )
+        logger.debug("object_depleted", object_id=object_id)
+        return
+
+    updated = obj.with_state("progress", str(progress)).with_state(
+        "remaining", str(remaining)
+    )
+    world.update_object(updated)
+    if updated.get_state("progress") != old_progress:
+        events.object_changes.append(
+            ObjectChange(
+                object_id=object_id,
+                field="progress",
+                old_value=old_progress,
+                new_value=updated.get_state("progress"),
+            )
+        )
+    if updated.get_state("remaining") != old_remaining_raw:
+        events.object_changes.append(
+            ObjectChange(
+                object_id=object_id,
+                field="remaining",
+                old_value=old_remaining_raw,
+                new_value=updated.get_state("remaining"),
+            )
+        )
 
 
 def process_regeneration(

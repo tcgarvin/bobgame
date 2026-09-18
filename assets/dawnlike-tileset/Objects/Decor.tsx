@@ -6,4 +6,34 @@
    <property name="key" value="message-board"/>
   </properties>
  </tile>
+ <tile id="39" type="bobtile">
+  <properties>
+   <property name="key" value="workshop-table"/>
+  </properties>
+ </tile>
+ <tile id="56" type="bobtile">
+  <properties>
+   <property name="key" value="chair"/>
+  </properties>
+ </tile>
+ <tile id="57" type="bobtile">
+  <properties>
+   <property name="key" value="table"/>
+  </properties>
+ </tile>
+ <tile id="72" type="bobtile">
+  <properties>
+   <property name="key" value="bed"/>
+  </properties>
+ </tile>
+ <tile id="54" type="bobtile">
+  <properties>
+   <property name="key" value="furnace"/>
+  </properties>
+ </tile>
+ <tile id="43" type="bobtile">
+  <properties>
+   <property name="key" value="anvil"/>
+  </properties>
+ </tile>
 </tileset>

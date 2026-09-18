@@ -128,11 +128,14 @@ class TestFlowAccumulation:
     def test_convergent_flow(self) -> None:
         """Multiple streams converging accumulate correctly."""
         # Simple 3x3 where all flow to center, center flows south
-        flow_dir = np.array([
-            [3, 4, 5],  # SE, S, SW
-            [2, 4, 6],  # E, S, W
-            [FLOW_NODATA, FLOW_NODATA, FLOW_NODATA],
-        ], dtype=np.uint8)
+        flow_dir = np.array(
+            [
+                [3, 4, 5],  # SE, S, SW
+                [2, 4, 6],  # E, S, W
+                [FLOW_NODATA, FLOW_NODATA, FLOW_NODATA],
+            ],
+            dtype=np.uint8,
+        )
 
         acc = compute_flow_accumulation(flow_dir)
 

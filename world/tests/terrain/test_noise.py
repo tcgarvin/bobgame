@@ -45,8 +45,12 @@ class TestFbmNoise:
 
     def test_more_octaves_more_detail(self) -> None:
         """More octaves adds higher frequency detail."""
-        result_low = fbm_noise_vectorized(64, 64, seed=42, base_wavelength=30, octaves=2)
-        result_high = fbm_noise_vectorized(64, 64, seed=42, base_wavelength=30, octaves=6)
+        result_low = fbm_noise_vectorized(
+            64, 64, seed=42, base_wavelength=30, octaves=2
+        )
+        result_high = fbm_noise_vectorized(
+            64, 64, seed=42, base_wavelength=30, octaves=6
+        )
 
         # High frequency content measured by gradient magnitude
         grad_low = np.abs(np.diff(result_low, axis=0)).mean()

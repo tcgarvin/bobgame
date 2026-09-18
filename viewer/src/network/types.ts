@@ -19,7 +19,23 @@ export interface EntityStats {
   max_hunger?: number;
   wielded?: string;
   alive?: boolean;
+  /** Tiredness, 0 = fresh (docs/10_metal_and_sleep.md, section 4). */
+  fatigue?: number;
+  max_fatigue?: number;
+  /** True while the entity sleeps; it acts on nothing until it wakes. */
+  asleep?: boolean;
   inventory?: Record<string, number>;
+}
+
+/**
+ * The world clock, sent with every tick (docs/10_metal_and_sleep.md, section 3).
+ * `tick_of_day` runs 0..day_length-1 and `night` is true for the last third.
+ */
+export interface WorldClock {
+  day: number;
+  tick_of_day: number;
+  day_length: number;
+  night: boolean;
 }
 
 export interface EntityState extends EntityStats {
@@ -109,6 +125,8 @@ export interface SnapshotMessage {
   run_id?: string | null;
   /** Present only in replay mode. */
   replay?: ReplayInfo;
+  /** The clock at the snapshot tick, when the server has one. */
+  clock?: WorldClock;
 }
 
 export interface TickStartedMessage {
@@ -117,6 +135,8 @@ export interface TickStartedMessage {
   tick_start_ms: number;
   deadline_ms: number;
   tick_duration_ms: number;
+  /** Absent on servers without the day clock. */
+  clock?: WorldClock;
 }
 
 export interface TickCompletedMessage {
@@ -131,6 +151,8 @@ export interface TickCompletedMessage {
   utterances?: UtteranceEvent[];
   objects_added?: ObjectState[];
   objects_removed?: string[];
+  /** Day, tick of day and night flag. Absent on servers without the clock. */
+  clock?: WorldClock;
 }
 
 /**

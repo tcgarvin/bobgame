@@ -9,8 +9,10 @@ from ..conversion import direction_from_proto
 from ..lease import LeaseManager
 from ..tick import TickLoop
 from ..types import (
+    CONVERSE_ACTIONS,
     AttackIntent,
     CollectIntent,
+    ConverseIntent,
     CraftIntent,
     DepositIntent,
     DropIntent,
@@ -18,11 +20,15 @@ from ..types import (
     EntityIntent,
     EquipIntent,
     ExtractIntent,
+    GiveIntent,
     MoveIntent,
     PickupIntent,
     PlaceIntent,
+    RestIntent,
     SayIntent,
+    SleepIntent,
     WaitIntent,
+    WakeIntent,
     WithdrawIntent,
     WriteNoteIntent,
 )
@@ -128,13 +134,14 @@ def intent_from_proto(entity_id: str, intent: pb.Intent) -> EntityIntent:
         return EquipIntent(entity_id=entity_id, kind=intent.equip.kind)
 
     if action == "place":
-        direction = direction_from_proto(intent.place.direction)
-        if direction is None:
-            raise IntentConversionError("invalid_direction")
         if not intent.place.kind:
             raise IntentConversionError("missing_kind")
+        # An unspecified direction means "my own tile"; only ground-layer kinds
+        # may use it, which the place phase checks.
         return PlaceIntent(
-            entity_id=entity_id, kind=intent.place.kind, direction=direction
+            entity_id=entity_id,
+            kind=intent.place.kind,
+            direction=direction_from_proto(intent.place.direction),
         )
 
     if action == "write_note":
@@ -148,12 +155,46 @@ def intent_from_proto(entity_id: str, intent: pb.Intent) -> EntityIntent:
             text=intent.write_note.text,
         )
 
+    if action == "rest":
+        if not intent.rest.object_id:
+            raise IntentConversionError("missing_object_id")
+        return RestIntent(entity_id=entity_id, object_id=intent.rest.object_id)
+
     if action == "say":
         return SayIntent(
             entity_id=entity_id,
             text=intent.say.text,
             channel=intent.say.channel or "local",
         )
+
+    if action == "converse":
+        if intent.converse.action not in CONVERSE_ACTIONS:
+            raise IntentConversionError("unknown_converse_action")
+        return ConverseIntent(
+            entity_id=entity_id,
+            action=intent.converse.action,
+            direction=direction_from_proto(intent.converse.direction),
+            conversation_id=intent.converse.conversation_id,
+            text=intent.converse.text,
+        )
+
+    if action == "give":
+        if not intent.give.target_entity_id:
+            raise IntentConversionError("missing_target")
+        if not intent.give.kind:
+            raise IntentConversionError("missing_kind")
+        return GiveIntent(
+            entity_id=entity_id,
+            target_entity_id=intent.give.target_entity_id,
+            kind=intent.give.kind,
+            amount=intent.give.amount or 1,
+        )
+
+    if action == "sleep":
+        return SleepIntent(entity_id=entity_id, object_id=intent.sleep.object_id)
+
+    if action == "wake":
+        return WakeIntent(entity_id=entity_id)
 
     if action == "wait":
         return WaitIntent(entity_id=entity_id)

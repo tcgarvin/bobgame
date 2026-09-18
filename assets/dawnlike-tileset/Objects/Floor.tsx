@@ -21,4 +21,19 @@
    <property name="key" value="wood-floor-full"/>
   </properties>
  </tile>
+ <tile id="99" type="bobtile">
+  <properties>
+   <property name="key" value="road"/>
+  </properties>
+ </tile>
+ <tile id="148" type="bobtile">
+  <properties>
+   <property name="key" value="stone-floor"/>
+  </properties>
+ </tile>
+ <tile id="652" type="bobtile">
+  <properties>
+   <property name="key" value="wood-floor"/>
+  </properties>
+ </tile>
 </tileset>

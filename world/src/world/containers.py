@@ -1,7 +1,8 @@
 """Objects that hold things: item piles, chests and message boards.
 
 Also hosts the inventory-versus-world actions that operate on them
-(pickup, withdraw, drop, deposit, place, write_note) and the equip action.
+(pickup, withdraw, drop, deposit, place, write_note), the equip action and
+`give`, which moves items straight from one inventory to another.
 """
 
 import json
@@ -9,24 +10,35 @@ from typing import Any, Mapping
 
 import structlog
 
+from .conversations import share_conversation
 from .events import ObjectAddedEvent, ObjectChange, ObjectRemovedEvent, TickEvents
-from .exceptions import InvalidObjectStateError, ObjectNotFoundError
+from .exceptions import (
+    EntityNotFoundError,
+    InvalidObjectStateError,
+    ObjectNotFoundError,
+)
 from .items import (
+    CHEST_OBJECT,
+    GROUND_LAYER_KINDS,
     ITEM_KINDS,
     ITEM_PILE,
+    MESSAGE_BOARD_OBJECT,
+    NATURAL_OBJECT_TYPES,
     PLACEABLE_KINDS,
     PLACED_OBJECT_TYPE,
 )
-from .state import World, WorldObject
+from .state import WOLF_ENTITY_TYPE, World, WorldObject
 from .types import (
     DepositIntent,
     DropIntent,
     EquipIntent,
+    GiveIntent,
     PickupIntent,
     PlaceIntent,
     Position,
     WithdrawIntent,
     WriteNoteIntent,
+    is_adjacent,
     is_same_or_adjacent,
 )
 
@@ -394,12 +406,29 @@ def process_equip_phase(
         events.acted(entity_id, "equip", True, f"wielding {intent.kind}")
 
 
+def _place_target(
+    entity_position: Position, intent: PlaceIntent, ground: bool
+) -> Position | None:
+    """Tile a place intent aims at, or None when it lacks a direction.
+
+    Ground-layer kinds may be laid on the placer's own tile by leaving the
+    direction unspecified; structures always need one.
+    """
+    if intent.direction is not None:
+        return entity_position.offset(intent.direction)
+    return entity_position if ground else None
+
+
 def process_place_phase(
     world: World,
     intents: Mapping[str, PlaceIntent],
     events: TickEvents,
 ) -> None:
-    """Place a chest or message board on the adjacent tile in `direction`."""
+    """Place a held item as a world object (docs/08_building.md, "Placement").
+
+    A tile holds at most one ground-layer object (road, floors) and at most one
+    structure-layer object; a structure may stand on a ground object.
+    """
     for entity_id in sorted(intents):
         intent = intents[entity_id]
         entity = world.get_entity(entity_id)
@@ -411,25 +440,45 @@ def process_place_phase(
             events.acted(entity_id, "place", False, f"no {intent.kind} in inventory")
             continue
 
-        target = entity.position.offset(intent.direction)
+        ground = intent.kind in GROUND_LAYER_KINDS
+        target = _place_target(entity.position, intent, ground)
+        if target is None:
+            events.acted(entity_id, "place", False, f"{intent.kind} needs a direction")
+            continue
         if not world.in_bounds(target):
             events.acted(entity_id, "place", False, "target out of bounds")
             continue
         if not world.is_walkable(target):
             events.acted(entity_id, "place", False, "target not walkable")
             continue
-        if world.is_position_occupied(target):
-            events.acted(entity_id, "place", False, "target occupied by an entity")
-            continue
-        if world.get_objects_at(target):
-            events.acted(entity_id, "place", False, "target already holds an object")
-            continue
+
+        objects_at = world.get_objects_at(target)
+        if ground:
+            if any(obj.object_type in NATURAL_OBJECT_TYPES for obj in objects_at):
+                events.acted(entity_id, "place", False, "target holds a natural object")
+                continue
+            if any(obj.object_type in GROUND_LAYER_KINDS for obj in objects_at):
+                events.acted(
+                    entity_id, "place", False, "target already holds a ground object"
+                )
+                continue
+        else:
+            # Structures need standing room: no entity, nothing else on the
+            # structure layer.
+            if world.is_position_occupied(target):
+                events.acted(entity_id, "place", False, "target occupied by an entity")
+                continue
+            if any(obj.object_type not in GROUND_LAYER_KINDS for obj in objects_at):
+                events.acted(
+                    entity_id, "place", False, "target already holds an object"
+                )
+                continue
 
         object_type = PLACED_OBJECT_TYPE[intent.kind]
         state: list[tuple[str, str]] = [(OWNER_KEY, entity_id)]
-        if object_type == "chest":
+        if object_type == CHEST_OBJECT:
             state.append((CONTENTS_KEY, encode_contents({})))
-        else:
+        elif object_type == MESSAGE_BOARD_OBJECT:
             state.append((NOTES_KEY, empty_notes_json()))
 
         obj = WorldObject(
@@ -442,6 +491,70 @@ def process_place_phase(
         events.objects_added.append(ObjectAddedEvent(obj=obj))
         world.set_entity(entity.with_inventory(entity.inventory.remove(intent.kind, 1)))
         events.acted(entity_id, "place", True, f"placed {obj.object_id} at {target}")
+
+
+def process_give_phase(
+    world: World,
+    intents: Mapping[str, GiveIntent],
+    events: TickEvents,
+) -> None:
+    """Hand items to another living player (docs/09, section 3).
+
+    The target must be adjacent (Chebyshev 1) or sit in the same conversation,
+    which lets participants trade across the anchor tile.
+    """
+    for entity_id in sorted(intents):
+        intent = intents[entity_id]
+        giver = world.get_entity(entity_id)
+
+        if intent.amount < 1:
+            events.acted(entity_id, "give", False, "amount must be positive")
+            continue
+        if intent.target_entity_id == entity_id:
+            events.acted(entity_id, "give", False, "cannot give to yourself")
+            continue
+        try:
+            target = world.get_entity(intent.target_entity_id)
+        except EntityNotFoundError:
+            events.acted(
+                entity_id, "give", False, f"no entity {intent.target_entity_id}"
+            )
+            continue
+        if not target.alive:
+            events.acted(entity_id, "give", False, f"{target.entity_id} is dead")
+            continue
+        if target.entity_type == WOLF_ENTITY_TYPE:
+            events.acted(entity_id, "give", False, "cannot give to a wolf")
+            continue
+        if not is_adjacent(giver.position, target.position) and not share_conversation(
+            world, entity_id, target.entity_id
+        ):
+            events.acted(
+                entity_id, "give", False, f"{target.entity_id} is not adjacent"
+            )
+            continue
+        if not giver.inventory.has(intent.kind, intent.amount):
+            events.acted(entity_id, "give", False, f"not enough {intent.kind} to give")
+            continue
+
+        updated_giver = giver.with_inventory(
+            giver.inventory.remove(intent.kind, intent.amount)
+        )
+        # A wielded item that runs out can no longer be held.
+        if updated_giver.wielded == intent.kind and not updated_giver.inventory.has(
+            intent.kind
+        ):
+            updated_giver = updated_giver.with_wielded("")
+        world.set_entity(updated_giver)
+        world.set_entity(
+            target.with_inventory(target.inventory.add(intent.kind, intent.amount))
+        )
+        events.acted(
+            entity_id,
+            "give",
+            True,
+            f"gave {intent.amount} {intent.kind} to {target.entity_id}",
+        )
 
 
 def process_write_note_phase(
@@ -527,6 +640,7 @@ __all__ = [
     "process_deposit_phase",
     "process_drop_phase",
     "process_equip_phase",
+    "process_give_phase",
     "process_pickup_phase",
     "process_place_phase",
     "process_withdraw_phase",

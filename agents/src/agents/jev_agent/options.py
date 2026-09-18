@@ -5,6 +5,11 @@ agent's real rulebook: every option here is legal *right now* according to the
 world model, and each carries the proto Intent it will turn into. Options are
 generated in priority order and truncated at `MAX_OPTIONS`, so the tail of the
 list is what gets dropped when a tick is unusually rich.
+
+Dismantling is deliberately absent. `ExtractIntent` on a placed building takes
+it apart, and Jev reads "extract" as "gather materials", so offering it would
+let a settler quietly eat the town wall it just built. Dismantling stays a
+planner tool, where a coordinate and a reason are available.
 """
 
 from __future__ import annotations
@@ -13,8 +18,10 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .. import world_pb2 as pb
+from . import items
 from .geometry import (
     direction_between,
+    NO_DIRECTION,
     ORDERED_DIRECTIONS,
     Coord,
     chebyshev,
@@ -23,35 +30,100 @@ from .geometry import (
     same_or_adjacent,
 )
 from .pathfinding import find_path, legal_directions
-from .worldmodel import EXTRACTABLE_TYPES, ObjectInfo, WorldModel
+from .worldmodel import EXTRACTABLE_TYPES, EntityInfo, ObjectInfo, WorldModel
 
 MAX_OPTIONS = 40
 TRAVEL_CANDIDATES = 6
 WAIT = "wait"
 
-# recipe -> {item kind: units consumed}
-CRAFT_RECIPES: Mapping[str, Mapping[str, int]] = {
-    "axe": {"wood": 2, "stone": 1},
-    "pickaxe": {"wood": 2, "stone": 2},
-    "sword": {"wood": 1, "stone": 3},
-    "chest": {"wood": 6},
-    "message_board": {"wood": 4, "stone": 1},
-}
+# Jev sees a capped list, so the rich categories get their own budget: without
+# these caps a settler carrying planks and stone would drown the move options
+# in twelve craft lines and eight place lines.
+CRAFT_OPTION_LIMIT = 6
+PLACE_OPTION_LIMIT = 4
 
-WIELDABLE_KINDS: frozenset[str] = frozenset({"axe", "pickaxe", "sword"})
-PLACEABLE_KINDS: frozenset[str] = frozenset({"chest", "message_board"})
+RECIPES = items.RECIPES
+# recipe -> {item kind: units consumed}; kept for callers that only want inputs.
+CRAFT_RECIPES: Mapping[str, Mapping[str, int]] = items.CRAFT_RECIPES
+
+WIELDABLE_KINDS: frozenset[str] = items.WIELDABLE_KINDS
+PLACEABLE_KINDS: frozenset[str] = items.PLACEABLE_KINDS
+
+# Craft options are offered in this order and then truncated, so the things a
+# settler usually needs first survive the cap.
+CRAFT_PRIORITY: tuple[str, ...] = (
+    items.AXE,
+    items.PICKAXE,
+    items.SWORD,
+    items.IRON_SWORD,
+    items.COPPER_AXE,
+    items.COPPER_PICKAXE,
+    items.IRON_AXE,
+    items.IRON_PICKAXE,
+    items.CHARCOAL,
+    items.COPPER_INGOT,
+    items.IRON_INGOT,
+    items.PLANK,
+    items.WORKSHOP_TABLE,
+    items.FURNACE,
+    items.ANVIL,
+    items.ROPE,
+    items.WOOD_WALL,
+    items.DOOR,
+    items.BED,
+    items.ROAD,
+    items.WOOD_FLOOR,
+    items.STONE_WALL,
+    items.STONE_FLOOR,
+    items.CHEST,
+    items.MESSAGE_BOARD,
+    items.TABLE,
+    items.CHAIR,
+)
+
+# One of each of these in the pack is plenty; a second is never urgent enough
+# to spend an option slot on.
+CRAFT_ONCE_KINDS: frozenset[str] = (
+    items.WIELDABLE_KINDS
+    | items.STATION_KINDS
+    | frozenset({items.CHEST, items.MESSAGE_BOARD})
+)
 
 # Canned phrases. Jev gets a closed set; free-text speech is the planner's job.
 SAY_PHRASES: Mapping[str, str] = {
-    "help": "I need help!",
-    "wolf_here": "There is a wolf here!",
     "come_here": "Come to me.",
     "all_good": "All good here.",
 }
 
+# How far away a wolf counts as "here" for the planner's alert.
+WOLF_ALERT_RADIUS = 8
+
+# Shouts. The planner writes the phrases into the brief; Jev only picks among
+# them. The cooldown keeps twelve settlers from filling every ear, and a heard
+# shout stays worth walking toward for a limited time.
+SHOUT_COOLDOWN_TICKS = 8
+MAX_BRIEF_SHOUTS = 4
+MAX_SHOUT_LENGTH = 120
+SHOUT_KEY_PREFIX = "shout:"
+HEARD_SHOUT_MAX_AGE_TICKS = 20
+HEARD_SHOUT_KEY_PREFIX = "travel_to:shout:"
+
+# Conversations. Joining one is a seat at a turn-taking table; the walk to a
+# free tile next to the anchor is code-owned, like the heard-shout walk.
+JOIN_CONVERSATION_KEY_PREFIX = "join_conversation:"
+JOIN_CONVERSATION_OPTION_LIMIT = 2
+
 # Object types worth walking across the map for.
 TRAVEL_TARGET_TYPES: frozenset[str] = (
-    frozenset({"tree", "bush", "chest", "message_board", "item_pile"})
+    frozenset(
+        {
+            "bush",
+            "chest",
+            "message_board",
+            "item_pile",
+        }
+    )
+    | items.STATION_KINDS
     | EXTRACTABLE_TYPES
 )
 
@@ -109,14 +181,20 @@ def enumerate_options(
     model: WorldModel,
     travel: TravelState | None = None,
     *,
+    shouts: Sequence[str] = (),
     max_options: int = MAX_OPTIONS,
 ) -> list[Option]:
-    """Every action that is legal for this actor on this tick, best-first."""
+    """Every action that is legal for this actor on this tick, best-first.
+
+    `shouts` are the phrases the planner put in the brief; Jev may shout those
+    and nothing else.
+    """
     options: list[Option] = [_wait_option()]
     position = model.position
     inventory = dict(model.self_info.inventory)
 
-    options.extend(_survival_options(model, inventory, position))
+    options.extend(_survival_options(model, inventory, position, travel, shouts))
+    options.extend(_conversation_options(model, position, travel))
     options.extend(_travel_control_options(model, travel))
     options.extend(_interaction_options(model, inventory, position))
     options.extend(_crafting_options(model, inventory))
@@ -135,7 +213,11 @@ def enumerate_options(
 
 
 def _survival_options(
-    model: WorldModel, inventory: Mapping[str, int], position: Coord
+    model: WorldModel,
+    inventory: Mapping[str, int],
+    position: Coord,
+    travel: TravelState | None,
+    shouts: Sequence[str],
 ) -> list[Option]:
     options: list[Option] = []
     if inventory.get("berry", 0) > 0:
@@ -147,6 +229,10 @@ def _survival_options(
                 intent=pb.Intent(eat=pb.EatIntent(item_type="berry", amount=1)),
             )
         )
+    options.extend(_rest_options(model))
+    options.extend(_sleep_options(model))
+    options.extend(_shout_options(model, shouts))
+    options.extend(_heard_shout_options(model, position, travel))
     for entity in model.entities_near(1):
         if not entity.alive or entity.entity_id == model.entity_id:
             continue
@@ -157,13 +243,223 @@ def _survival_options(
                 key=f"attack:{entity.entity_id}",
                 description=(
                     f"attack the adjacent {entity.entity_type} {entity.entity_id} "
-                    f"(health {entity.health}/{entity.max_health})"
+                    f"(health {entity.health}/{entity.max_health}"
+                    f"{_allies_in_the_fight(model, entity)})"
                 ),
                 intent=pb.Intent(
                     attack=pb.AttackIntent(target_entity_id=entity.entity_id)
                 ),
             )
         )
+    return options
+
+
+def _allies_in_the_fight(model: WorldModel, target: EntityInfo) -> str:
+    """For a wolf, how many other settlers are already next to it."""
+    if target.entity_type != "wolf":
+        return ""
+    allies = len(model.allies_near(target.position, 1))
+    return f", {allies} other settlers next to it"
+
+
+def _shout_options(model: WorldModel, shouts: Sequence[str]) -> list[Option]:
+    """One option per shout phrase the planner wrote into the brief.
+
+    When to shout is Jev's call under the brief; code only enforces a cooldown.
+    """
+    last_shout = model.last_own_shout_tick()
+    if last_shout >= 0 and model.tick - last_shout < SHOUT_COOLDOWN_TICKS:
+        return []
+    return [
+        Option(
+            key=f"{SHOUT_KEY_PREFIX}{index}",
+            description=(
+                f'shout "{phrase}" - every settler within {items.SHOUT_RADIUS} '
+                "tiles hears it and where it came from"
+            ),
+            intent=pb.Intent(
+                say=pb.SayIntent(text=phrase, channel=items.SHOUT_CHANNEL)
+            ),
+        )
+        for index, phrase in enumerate(shouts[:MAX_BRIEF_SHOUTS])
+    ]
+
+
+def _heard_shout_options(
+    model: WorldModel, position: Coord, travel: TravelState | None
+) -> list[Option]:
+    """Walking to where the most recent shout came from, whatever it was about.
+
+    Not offered again while the actor is already on its way to that spot.
+    """
+    for shout in model.recent_shouts(HEARD_SHOUT_MAX_AGE_TICKS):
+        target = shout.position
+        distance = chebyshev(target, position)
+        if distance <= 1:
+            continue
+        label = f"where {shout.speaker_id} shouted"
+        already_going = (
+            travel is not None and travel.label == label and travel.target == target
+        )
+        if already_going:
+            continue
+        path = find_path(model, position, target, stop_adjacent=True)
+        if not path:
+            continue
+        age = model.tick - shout.tick
+        return [
+            Option(
+                key=f"{HEARD_SHOUT_KEY_PREFIX}{shout.speaker_id}",
+                description=(
+                    f'go to where {shout.speaker_id} shouted "{shout.text}" '
+                    f"{age} ticks ago, {distance} tiles away"
+                ),
+                intent=_move(direction_between(position, path[0])),
+                travel_target=TravelState(
+                    target=target,
+                    label=label,
+                    stop_adjacent=True,
+                ),
+            )
+        ]
+    return []
+
+
+def _conversation_options(
+    model: WorldModel, position: Coord, travel: TravelState | None
+) -> list[Option]:
+    """Joining a conversation in view that still has a free seat.
+
+    Next to the anchor the option is the join intent itself; further away it is
+    a code-owned walk to the anchor, exactly like the heard-shout option.
+    """
+    if model.my_conversation() is not None:
+        return []
+    options: list[Option] = []
+    for conversation in model.conversations():
+        if len(options) >= JOIN_CONVERSATION_OPTION_LIMIT:
+            break
+        if conversation.free_seats <= 0:
+            continue
+        distance = chebyshev(conversation.anchor, position)
+        seated = ", ".join(conversation.participants) or "nobody"
+        key = f"{JOIN_CONVERSATION_KEY_PREFIX}{conversation.conversation_id}"
+        if distance == 1:
+            options.append(
+                Option(
+                    key=key,
+                    description=(
+                        f"join the conversation {conversation.conversation_id} "
+                        f"with {seated}; in it you speak when your turn comes "
+                        f"round, and {conversation.free_seats} seats are free"
+                    ),
+                    intent=pb.Intent(
+                        converse=pb.ConverseIntent(
+                            action="join",
+                            conversation_id=conversation.conversation_id,
+                        )
+                    ),
+                    clears_travel=True,
+                )
+            )
+            continue
+        if distance == 0:
+            # Standing on the anchor is not a seat; a move option gets off it.
+            continue
+        path = find_path(model, position, conversation.anchor, stop_adjacent=True)
+        if not path:
+            continue
+        options.append(
+            Option(
+                key=key,
+                description=(
+                    f"walk to the conversation {conversation.conversation_id} "
+                    f"with {seated}, {distance} tiles away, and take one of its "
+                    f"{conversation.free_seats} free seats"
+                ),
+                intent=_move(direction_between(position, path[0])),
+                travel_target=TravelState(
+                    target=conversation.anchor,
+                    label=f"the conversation {conversation.conversation_id}",
+                    stop_adjacent=True,
+                ),
+            )
+        )
+    return options
+
+
+def _rest_options(model: WorldModel) -> list[Option]:
+    """Resting on a bed, offered only to a wounded actor standing by one."""
+    info = model.self_info
+    if info.health >= info.max_health or info.hunger <= 0:
+        return []
+    for obj in model.objects_near(1):
+        if obj.object_type != items.BED:
+            continue
+        return [
+            Option(
+                key=f"rest:{obj.object_id}",
+                description=(
+                    f"rest on the bed {obj.object_id} to heal {items.REST_HEAL} "
+                    f"health (health now {info.health}/{info.max_health})"
+                ),
+                intent=pb.Intent(rest=pb.RestIntent(object_id=obj.object_id)),
+            )
+        ]
+    return []
+
+
+def _sleep_options(model: WorldModel) -> list[Option]:
+    """Sleeping on an adjacent bed or on the ground, and waking again.
+
+    While asleep the only legal action is waking, so the two sets never appear
+    together.
+    """
+    info = model.self_info
+    night = model.clock.night
+    if info.asleep:
+        return [
+            Option(
+                key="wake",
+                description=(
+                    f"stop sleeping and stand up (fatigue "
+                    f"{info.fatigue}/{info.max_fatigue})"
+                ),
+                intent=pb.Intent(wake=pb.WakeIntent()),
+            )
+        ]
+    if info.fatigue <= 0:
+        return []
+    options: list[Option] = []
+    for obj in model.objects_near(1):
+        if obj.object_type != items.BED:
+            continue
+        options.append(
+            Option(
+                key=f"sleep:{obj.object_id}",
+                description=(
+                    f"sleep on the bed {obj.object_id}: it recovers "
+                    f"{items.sleep_recovery_text(True, night)} and heals 1 health "
+                    f"every {items.REGEN_INTERVAL_TICKS} ticks while you sleep "
+                    f"(fatigue {info.fatigue}/{info.max_fatigue}). You wake at "
+                    "fatigue 0, on damage, at hunger 0, or on a wake action"
+                ),
+                intent=pb.Intent(sleep=pb.SleepIntent(object_id=obj.object_id)),
+            )
+        )
+        break
+    options.append(
+        Option(
+            key="sleep:ground",
+            description=(
+                f"sleep on the ground where you stand: it recovers "
+                f"{items.sleep_recovery_text(False, night)} while you sleep "
+                f"(fatigue {info.fatigue}/{info.max_fatigue}). You wake at "
+                "fatigue 0, on damage, at hunger 0, or on a wake action"
+            ),
+            intent=pb.Intent(sleep=pb.SleepIntent()),
+        )
+    )
     return options
 
 
@@ -210,18 +506,9 @@ def _interaction_options(
         if obj.object_type in EXTRACTABLE_TYPES and same_or_adjacent(
             position, obj.position
         ):
-            tool = "axe" if obj.object_type == "tree" else "pickaxe"
-            speed = "fast" if wielded == tool else f"slow, wield {tool} to speed up"
-            options.append(
-                Option(
-                    key=f"extract:{obj.object_id}",
-                    description=(
-                        f"chop/mine the {_object_label(obj, position)}, "
-                        f"{obj.remaining} units left ({speed})"
-                    ),
-                    intent=pb.Intent(extract=pb.ExtractIntent(object_id=obj.object_id)),
-                )
-            )
+            option = _extract_option(obj, position, wielded)
+            if option is not None:
+                options.append(option)
         elif obj.object_type == "bush" and obj.position == position and obj.has_berry:
             options.append(
                 Option(
@@ -283,17 +570,84 @@ def _chest_options(obj: ObjectInfo, inventory: Mapping[str, int]) -> list[Option
     return options
 
 
+def _extract_option(obj: ObjectInfo, position: Coord, wielded: str) -> Option | None:
+    """Harvesting one object, or None when what is in hand cannot work it.
+
+    A vein needs a pickaxe of the right tier; everything else yields to bare
+    hands, only slower.
+    """
+    if not items.can_extract(obj.object_type, wielded):
+        return None
+    yields = items.EXTRACT_YIELD.get(obj.object_type, "materials")
+    work = items.extract_work_per_action(obj.object_type, wielded)
+    holding = f"with the {wielded}" if wielded else "bare-handed"
+    return Option(
+        key=f"extract:{obj.object_id}",
+        description=(
+            f"harvest {yields} from the {_object_label(obj, position)}, "
+            f"{obj.remaining} units left ({work} work per action {holding}, "
+            f"{items.EXTRACT_THRESHOLD} work per unit)"
+        ),
+        intent=pb.Intent(extract=pb.ExtractIntent(object_id=obj.object_id)),
+    )
+
+
+def craftable_now(model: WorldModel, inventory: Mapping[str, int]) -> list[str]:
+    """Recipe names that would succeed on this tick, in priority order.
+
+    A recipe is craftable when the inputs are in the pack and, for a station
+    recipe, a placed station of that type is on or next to the actor's tile.
+    """
+    ready: list[str] = []
+    for name, recipe in RECIPES.items():
+        if recipe.station and model.station_near(recipe.station) is None:
+            continue
+        if any(
+            inventory.get(kind, 0) < amount for kind, amount in recipe.inputs.items()
+        ):
+            continue
+        if name in CRAFT_ONCE_KINDS and inventory.get(name, 0) > 0:
+            continue
+        if name in WIELDABLE_KINDS and model.self_info.wielded == name:
+            continue
+        ready.append(name)
+    ready.sort(key=_craft_rank)
+    return ready
+
+
+def _craft_rank(recipe: str) -> tuple[int, str]:
+    if recipe in CRAFT_PRIORITY:
+        return (CRAFT_PRIORITY.index(recipe), recipe)
+    return (len(CRAFT_PRIORITY), recipe)
+
+
+def _craft_description(model: WorldModel, recipe_name: str) -> str:
+    """One craft option's text: cost, yield, station, and work still to do."""
+    recipe = RECIPES[recipe_name]
+    yields = "" if recipe.output_count == 1 else f", {recipe.output_count} of them"
+    text = f"craft {recipe_name} using {recipe.cost_text()}{yields}"
+    if not recipe.station:
+        return text
+    text += f" at the {recipe.station} within reach"
+    if recipe.work <= 1:
+        return text
+    station = model.station_near(recipe.station)
+    done = 0
+    if station is not None:
+        started, actions = station.craft_progress(model.entity_id)
+        if started == recipe_name:
+            done = actions
+    return f"{text}; {recipe.work} craft actions, {done} done so far"
+
+
 def _crafting_options(model: WorldModel, inventory: Mapping[str, int]) -> list[Option]:
     options: list[Option] = []
-    for recipe, cost in CRAFT_RECIPES.items():
-        if any(inventory.get(kind, 0) < amount for kind, amount in cost.items()):
-            continue
-        cost_text = ", ".join(f"{amount} {kind}" for kind, amount in cost.items())
+    for recipe_name in craftable_now(model, inventory)[:CRAFT_OPTION_LIMIT]:
         options.append(
             Option(
-                key=f"craft:{recipe}",
-                description=f"craft a {recipe} using {cost_text}",
-                intent=pb.Intent(craft=pb.CraftIntent(recipe=recipe)),
+                key=f"craft:{recipe_name}",
+                description=_craft_description(model, recipe_name),
+                intent=pb.Intent(craft=pb.CraftIntent(recipe=recipe_name)),
             )
         )
 
@@ -313,17 +667,58 @@ def _crafting_options(model: WorldModel, inventory: Mapping[str, int]) -> list[O
     return options
 
 
+def can_place_ground(model: WorldModel, position: Coord) -> bool:
+    """Whether a road or floor may go on `position`.
+
+    Ground objects never block, but they may not cover a natural object and
+    only one may lie on a tile.
+    """
+    if not model.is_known(position):
+        return False
+    tile = model.tiles.get(position)
+    if tile is not None and not tile.walkable:
+        return False
+    for obj in model.object_at(position):
+        if obj.object_type in items.NATURAL_OBJECT_TYPES:
+            return False
+        if obj.object_type in items.GROUND_LAYER_KINDS:
+            return False
+    return True
+
+
+def can_place_structure(model: WorldModel, position: Coord) -> bool:
+    """Whether a wall, door, bed or other structure may go on `position`."""
+    if not model.is_known(position) or not model.is_walkable(position):
+        return False
+    return not model.structure_objects_at(position)
+
+
 def _place_options(model: WorldModel, inventory: Mapping[str, int]) -> list[Option]:
+    """One placement per carried building item: own tile for ground, one free
+    neighbour for structures."""
     options: list[Option] = []
     position = model.position
-    occupied = {obj.position for obj in model.objects_near(2)}
-    occupied |= {entity.position for entity in model.entities_near(2)}
     for kind in sorted(PLACEABLE_KINDS & set(inventory)):
+        if len(options) >= PLACE_OPTION_LIMIT:
+            break
+        if items.is_ground_kind(kind):
+            if not can_place_ground(model, position):
+                continue
+            options.append(
+                Option(
+                    key=f"place:{kind}:here",
+                    description=f"lay {kind} down on the tile you are standing on",
+                    intent=pb.Intent(
+                        place=pb.PlaceIntent(kind=kind, direction=NO_DIRECTION)
+                    ),
+                )
+            )
+            continue
         for direction in ORDERED_DIRECTIONS:
             target = offset(position, direction)
-            if target in occupied or not model.is_walkable(target):
+            if not can_place_structure(model, target):
                 continue
-            if not model.is_known(target):
+            if any(entity.position == target for entity in model.entities_near(2)):
                 continue
             name = direction_name(direction)
             options.append(

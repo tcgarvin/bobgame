@@ -2,12 +2,21 @@
 
 import structlog
 
+from typing import Mapping
+
 from .combat import WOLF_TYPE, apply_damage
 from .events import RespawnEvent, TickEvents
-from .items import FOOD_HUNGER_RESTORE
+from .exceptions import ObjectNotFoundError
+from .items import BED, FOOD_HUNGER_RESTORE, REST_HEAL
 from .settlement import NoSettlementSiteError, nearest_free_walkable
+from .sleep import GROUND, RESPAWN_FATIGUE, is_tired
 from .state import World
-from .types import Position
+from .types import (
+    Position,
+    RestIntent,
+    chebyshev_distance,
+    is_same_or_adjacent,
+)
 
 logger = structlog.get_logger()
 
@@ -25,6 +34,21 @@ RESPAWN_HUNGER = 50
 
 # Maximum ring radius searched by find_free_tile before giving up.
 FREE_TILE_SEARCH_RADIUS = 64
+# Respawning settlers keep this far from every living wolf when they can. It is
+# wider than the wolves' chase radius (8), so a wolf camping the settlement
+# does not notice them arrive.
+RESPAWN_SAFE_DISTANCE = 10
+RESPAWN_RING_DISTANCES = (12, 24)
+RESPAWN_RING_DIRECTIONS = (
+    (0, -1),
+    (1, 0),
+    (0, 1),
+    (-1, 0),
+    (1, -1),
+    (1, 1),
+    (-1, 1),
+    (-1, -1),
+)
 
 
 def hunger_restored(kind: str, amount: int) -> int:
@@ -53,7 +77,11 @@ def process_hunger_phase(world: World, events: TickEvents) -> None:
 
 
 def process_health_regen(world: World) -> None:
-    """Regenerate health for well-fed, wounded entities."""
+    """Regenerate health for well-fed, rested, wounded entities.
+
+    Tired entities do not regenerate (docs/10_metal_and_sleep.md). Bed
+    sleepers are skipped because the fatigue phase already healed them.
+    """
     if world.tick % REGEN_INTERVAL_TICKS != 0:
         return
 
@@ -62,7 +90,58 @@ def process_health_regen(world: World) -> None:
             continue
         if entity.hunger <= REGEN_HUNGER_THRESHOLD:
             continue
+        if is_tired(entity):
+            continue
+        if entity.asleep and entity.sleeping_on != GROUND:
+            continue
         world.set_entity(entity.with_health(entity.health + REGEN_AMOUNT))
+
+
+def process_rest_phase(
+    world: World,
+    intents: Mapping[str, RestIntent],
+    events: TickEvents,
+) -> None:
+    """Rest on a bed to heal REST_HEAL health (docs/08_building.md, "Resting").
+
+    One rester per bed per tick: the lexicographically smallest entity id wins,
+    the others are told the bed is taken. Resting needs hunger above zero.
+    """
+    taken: set[str] = set()
+
+    for entity_id in sorted(intents):
+        intent = intents[entity_id]
+        entity = world.get_entity(entity_id)
+        try:
+            bed = world.get_object(intent.object_id)
+        except ObjectNotFoundError:
+            events.acted(entity_id, "rest", False, f"no object {intent.object_id}")
+            continue
+
+        if bed.object_type != BED:
+            events.acted(entity_id, "rest", False, f"{bed.object_id} is not a bed")
+            continue
+        if not is_same_or_adjacent(entity.position, bed.position):
+            events.acted(entity_id, "rest", False, f"{bed.object_id} is not adjacent")
+            continue
+        if bed.object_id in taken:
+            events.acted(entity_id, "rest", False, f"{bed.object_id} is taken")
+            continue
+        if entity.hunger <= 0:
+            events.acted(entity_id, "rest", False, "too hungry to rest")
+            continue
+
+        taken.add(bed.object_id)
+        rested = entity.with_health(entity.health + REST_HEAL)
+        world.set_entity(rested)
+        healed = rested.health - entity.health
+        events.acted(
+            entity_id,
+            "rest",
+            True,
+            f"rested at {bed.object_id} (+{healed} health)",
+        )
+        logger.debug("rest_success", entity_id=entity_id, object_id=bed.object_id)
 
 
 def find_free_tile(world: World, center: Position) -> Position | None:
@@ -77,9 +156,42 @@ def find_free_tile(world: World, center: Position) -> Position | None:
         return None
 
 
+def _living_wolf_positions(world: World) -> list[Position]:
+    return [
+        entity.position
+        for entity in world.all_entities().values()
+        if entity.entity_type == WOLF_TYPE and entity.alive
+    ]
+
+
+def _respawn_centers(world: World, center: Position) -> list[Position]:
+    """Places to try, nearest first: the centre, then rings of eight around it."""
+    centers = [center]
+    for distance in RESPAWN_RING_DISTANCES:
+        for dx, dy in RESPAWN_RING_DIRECTIONS:
+            x = min(max(center.x + dx * distance, 0), world.width - 1)
+            y = min(max(center.y + dy * distance, 0), world.height - 1)
+            centers.append(Position(x=x, y=y))
+    return centers
+
+
 def respawn_position(world: World, death_position: Position) -> Position | None:
-    """Where a player respawns: near the settlement, else near where it died."""
+    """Where a player respawns: near the settlement, else near where it died.
+
+    A wolf standing at the settlement would otherwise kill each settler the
+    moment it came back, so the first candidate that is out of every wolf's
+    chase range wins. With wolves everywhere the settlement is used anyway.
+    """
     center = world.settlement if world.settlement is not None else death_position
+    wolves = _living_wolf_positions(world)
+    for candidate in _respawn_centers(world, center):
+        tile = find_free_tile(world, candidate)
+        if tile is None:
+            continue
+        if all(
+            chebyshev_distance(tile, wolf) >= RESPAWN_SAFE_DISTANCE for wolf in wolves
+        ):
+            return tile
     return find_free_tile(world, center)
 
 
@@ -98,7 +210,9 @@ def process_respawns(world: World, events: TickEvents) -> None:
             logger.warning("respawn_blocked", entity_id=entity_id)
             continue
 
-        world.set_entity(entity.as_respawned(entity.position, RESPAWN_HUNGER))
+        world.set_entity(
+            entity.as_respawned(entity.position, RESPAWN_HUNGER, RESPAWN_FATIGUE)
+        )
         world.attach_entity(entity_id, position)
         world.clear_death(entity_id)
         events.respawns.append(RespawnEvent(entity_id=entity_id, position=position))

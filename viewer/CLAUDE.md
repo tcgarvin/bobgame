@@ -76,7 +76,31 @@ Key sprite mappings:
 - Bushes: `berry-bush-full`, `berry-bush-empty`
 - Objects: `oak-tree`, `rock-small`, `rock-medium`, `rock-large`, `boulder`,
   `chest-closed`, `message-board`, `item-pile`
+- Building materials and buildings (docs/08_building.md): `reeds`,
+  `clay-deposit`, `road`, `wood-floor`, `stone-floor`, `wood-wall`,
+  `stone-wall`, `door`, `bed`, `chair`, `table`, `workshop-table`
+- Ore and stations (docs/10_metal_and_sleep.md): `copper-vein`
+  (`Objects/Ore0.png` frame 9, two-frame sparkle with `Ore1.png`), `iron-vein`
+  (same sheet, frame 50), `furnace` (`Objects/Decor0.png` frame 54, a lit
+  hearth) and `anvil` (`Decor0.png` frame 43). The veins live in a new
+  `Objects/Ore.tsx`; the stations were added to `Objects/Decor.tsx`
 - Item icons: `axe`, `pickaxe`, `sword`
+
+Sprite keys are kebab-case; `OBJECT_SPRITE_MAP` in `GameScene` maps the
+server's snake_case `object_type` onto them.
+
+### Object layers and depth
+
+A tile may hold one ground-layer object (`road`, `wood_floor`, `stone_floor`)
+and one structure-layer object, so both have to draw. Object sprites are keyed
+by `object_id`, never by position, and the two layers differ only in depth:
+ground objects at 4, structures at 5, entities at 10. Adding a building type
+means adding it to `OBJECT_SPRITE_MAP` and, if it lies flat, to
+`GROUND_LAYER_TYPES`.
+
+Walls are single sprites — a seamless full-block tile from `Wall.png`, not an
+autotile — so no neighbour lookup is needed and a wall looks the same however
+it is placed. Doors use one closed-door sprite.
 
 ## HTML Overlay UI
 
@@ -128,9 +152,12 @@ both. Example: `http://localhost:5173/?run=fake&tick=50&entity=ada`.
 - Keys (replay only): space play/pause, `,` / `.` step ±1, `[` / `]` step ±10.
   They are suppressed while a form field has focus, and focusing the tick input
   disables the Phaser keyboard so `F`/`P`/digits do not fire.
-- `src/ui/ObjectPanel.ts` — clicking a chest, item pile, message board or bush
-  opens an inspector with its contents / notes / berry state. The data comes
-  from `ObjectState.state`, where `contents` and `notes` are JSON strings.
+- `src/ui/ObjectPanel.ts` — clicking a chest, item pile, message board, bush,
+  reeds, clay deposit or any placed building opens an inspector. The data comes
+  from `ObjectState.state`, where `contents` and `notes` are JSON strings,
+  `owner` is an entity id, and `progress` is extraction or dismantle work.
+  Trees and rocks are deliberately not clickable: there are far too many of
+  them to make every one interactive.
 - `src/ui/OverlayUI.ts` — the agent panel: brief (with success condition,
   ticks used of max, notes), planner thought, the Jev decision with every
   option's probability as a bar (chosen one highlighted) plus confidence,
@@ -148,7 +175,8 @@ recentre the camera or rebuild the `ChunkManager` on it.
 ### Fake replay server
 
 `scripts/fake_replay_server.mjs` serves a synthetic 64x64 run (three settlers,
-a wolf, a chest, an item pile, a message board, a bush, 200 ticks of scripted
+a wolf, a chest, an item pile, a message board, a bush, a built hut with a
+walled workshop, a road, reeds and a clay deposit, 200 ticks of scripted
 movement, actions, chat, `agent_status`, `agent_detail` and `run_index`) so the
 replay UI can be developed without a recording. It is the only thing the `ws`
 devDependency is for.
@@ -203,3 +231,71 @@ npm run fake-replay   # Synthetic replay server for UI work (see above)
 
 Requires the world server on localhost:8765 for live entity updates, or the
 replay server on localhost:8766 (or `npm run fake-replay`) for replay mode.
+
+## Thinking bubble
+
+`GameScene.updateThoughtBubble` draws a small animated "..." bubble to the upper
+right of any entity whose latest `agent_status` has mode `planning`, in live and
+replay mode alike. It hides while a speech bubble is showing, when the entity is
+dead, and as soon as the mode changes (a stint started). Spoken utterances on
+the `shout` channel get the same speech bubble as `local` ones.
+
+## Day, night and sleep (docs/10_metal_and_sleep.md)
+
+- Every tick message (and the snapshot a replay seek sends) carries
+  `clock: {day, tick_of_day, day_length, night}`; `WorldState.getClock()` keeps
+  the latest one and everything else is derived from it, never accumulated, so
+  seeking in replay lands on exactly the right shade and reading.
+- `GameScene.nightTintAlpha` turns that clock into the alpha of a screen-space
+  rectangle (`nightOverlay`, depth 50): clear by day, a dusk ramp over the last
+  10% of the daytime (daytime is the first 2/3 of a day), full dark blue at
+  night and a dawn ramp over the first 10% of the day. It sits above the world
+  (objects at depth 4-30) but below the HUD text (depth 100), and the HTML
+  overlay is outside the canvas, so neither is tinted. The rectangle is resized
+  every frame from the camera size divided by the zoom, because a
+  scroll-factor-0 object is still scaled by the camera.
+- Entities carry `fatigue`, `max_fatigue` and `asleep`. A sleeper gets a small
+  "z" above the sprite (`GameScene.updateSleepMarker`), red when it has
+  collapsed — treated as `asleep && fatigue >= max_fatigue`, which is the state
+  the world's `collapse` event leaves behind.
+- The agent panel shows a Fatigue bar with the state word from
+  `OverlayUI.fatigueState` (fresh < 60, tired 60-99, exhausted at max) and an
+  "Asleep" row; the header carries the clock readout (`#clock-readout`,
+  `day 2 · 143/300 · night`).
+- The object inspector lists a vein's `remaining` units like any other resource
+  and, for a `workshop_table`, `furnace` or `anvil`, a "Crafting" section read
+  from the station's `craft:<entity_id>` = `<recipe>:<done>` state keys.
+- `scripts/fake_replay_server.mjs` now sends the clock, per-entity fatigue
+  (cleo sleeps at night, bram collapses from tick 40), the two veins and a
+  furnace and anvil with craft progress, so all of this can be seen without a
+  real recording. Not verified in a browser in this pass: `tsc`/`vite build`
+  and a protocol check against the fake server only.
+
+## Conversations and reflex (docs/09_conversation_and_reflex.md)
+
+- `src/conversation.ts` has the shared, defensive parsing for a `conversation`
+  object's `participants` and `transcript` state (both JSON strings); it is
+  used by `GameScene`, `OverlayUI` and `ObjectPanel` so the three don't drift.
+- A `conversation` object has no sprite: there is no tileset entry for it, and
+  the contract says to draw one with Phaser graphics instead of touching the
+  tileset. `GameScene.createConversationMarker` draws a small speech-bubble
+  shape on the anchor tile (clickable, opens the object inspector) and
+  `updateConversationLines` redraws, every frame, a line from the anchor to
+  each current participant's interpolated position, thicker and gold for
+  whoever `state.speaker` says has the turn. Both are keyed by object id and
+  cleaned up on `removed` (including the blanket removal a replay snapshot
+  sends for every existing object before seeking).
+- Utterances on the `conversation` channel get the same speech bubble as
+  `local`/`shout` (`SPEECH_BUBBLE_CHANNELS` in `GameScene`).
+- The agent panel (`OverlayUI`) shows `reflex` and `conversation` as their own
+  mode-badge colors (`.mode-badge.reflex`/`.mode-badge.conversation` in
+  `index.html`), and adds a "Conversation" section — participants, speaker,
+  transcript — whenever the selected entity is a participant in one, found by
+  scanning `WorldState.getObjects()` for a `conversation` object that lists it.
+- The replay object inspector (`ObjectPanel`) formats a selected conversation's
+  participants, speaker and transcript as readable rows instead of raw JSON.
+- Not verified live: no world-side `conversation` object exists yet to test
+  against (concurrent work), and the fake replay server/browser automation
+  were unavailable in this pass, so the marker, lines and panels are checked
+  by `tsc`/`vite build` and code reading only. `scripts/fake_replay_server.mjs`
+  would be the place to add a scripted conversation object for a real check.

@@ -66,11 +66,7 @@ def classify_terrain(
         config.beach_max_width * smoothstep(0.2, 0.8, beach_noise)
     ).astype(np.int32)
 
-    for y in range(height):
-        for x in range(width):
-            if land_mask[y, x]:
-                if dist_to_water[y, x] <= beach_width[y, x]:
-                    floor[y, x] = _floor_value(FloorType.SAND)
+    floor[land_mask & (dist_to_water <= beach_width)] = _floor_value(FloorType.SAND)
 
     # Mountains: inland, high elevation or ridged noise
     land_elevations = elevation[land_mask]
@@ -88,8 +84,16 @@ def classify_terrain(
     )
 
     # Cap mountains at max fraction
+    # Rank candidates by how mountainous they are so that, when the cap bites,
+    # the highest ground survives as contiguous massifs.
+    elev_span = float(elevation.max() - elevation.min()) + 1e-9
+    mountain_score = (elevation - elevation.min()) / elev_span + 0.5 * ridged_noise
     floor = _apply_mountain_cap(
-        floor, mountain_candidate, land_mask, config.mountain_fraction_max
+        floor,
+        mountain_candidate,
+        mountain_score,
+        land_mask,
+        config.mountain_fraction_max,
     )
 
     # Dirt: low moisture or high slope (on remaining grass)
@@ -139,37 +143,40 @@ def floor_value_to_type(value: int) -> FloorType:
 def _apply_mountain_cap(
     floor: NDArray[np.uint8],
     mountain_candidate: NDArray[np.bool_],
+    mountain_score: NDArray[np.float32],
     land_mask: NDArray[np.bool_],
     max_fraction: float,
 ) -> NDArray[np.uint8]:
-    """Apply mountain cap by adjusting threshold if needed.
+    """Turn mountain candidates into mountains, at most `max_fraction` of land.
+
+    When there are more candidates than the cap allows, the highest-scoring
+    ones win. The score is a smooth field, so the survivors form contiguous
+    massifs (a random subset would pepper the map with one-tile mountains).
 
     Args:
-        floor: Current floor array.
+        floor: Current floor array (modified in place and returned).
         mountain_candidate: Boolean mask of mountain candidates.
+        mountain_score: Smooth "how mountainous" field; higher wins.
         land_mask: Boolean mask of land.
         max_fraction: Maximum fraction of land as mountains.
 
     Returns:
         Updated floor array.
     """
-    land_count = np.sum(land_mask)
-    max_mountains = int(land_count * max_fraction)
-
-    candidate_count = np.sum(mountain_candidate)
+    max_mountains = int(np.sum(land_mask) * max_fraction)
+    candidate_count = int(np.sum(mountain_candidate))
 
     if candidate_count <= max_mountains:
-        # All candidates can be mountains
         floor[mountain_candidate] = _floor_value(FloorType.MOUNTAIN)
-    else:
-        # Need to select a subset - use highest elevations
-        # Get candidate positions and their indices
-        candidate_ys, candidate_xs = np.where(mountain_candidate)
+        return floor
+    if max_mountains == 0:
+        return floor
 
-        # This is a simplified approach - we just take random subset
-        # A better approach would sort by elevation and take top N
-        indices = np.random.choice(len(candidate_ys), size=max_mountains, replace=False)
-        for i in indices:
-            floor[candidate_ys[i], candidate_xs[i]] = _floor_value(FloorType.MOUNTAIN)
-
+    scores = mountain_score[mountain_candidate]
+    cutoff = np.partition(scores, candidate_count - max_mountains)[
+        candidate_count - max_mountains
+    ]
+    floor[mountain_candidate & (mountain_score >= cutoff)] = _floor_value(
+        FloorType.MOUNTAIN
+    )
     return floor

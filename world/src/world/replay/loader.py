@@ -16,6 +16,7 @@ from typing import Any, Iterator
 import structlog
 
 from ..recording import file_sha256, read_jsonl_gz
+from ..state import DEFAULT_DAY_LENGTH_TICKS
 
 logger = structlog.get_logger()
 
@@ -184,6 +185,11 @@ class RunLoader:
     @property
     def tick_duration_ms(self) -> int:
         return int(self.meta.get("tick_duration_ms", 1000))
+
+    @property
+    def day_length_ticks(self) -> int:
+        """Day length recorded in meta.json; the default for older runs."""
+        return int(self.meta.get("day_length_ticks") or DEFAULT_DAY_LENGTH_TICKS)
 
     @property
     def map_path(self) -> str:
@@ -416,7 +422,7 @@ class RunLoader:
                         action.get("details", ""),
                     )
             for utterance in record.get("utterances", ()):
-                if utterance.get("channel") == "local":
+                if utterance.get("channel") in ("local", "shout"):
                     add(
                         tick_id,
                         "say",

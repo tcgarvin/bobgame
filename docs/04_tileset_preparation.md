@@ -2,6 +2,43 @@
 
 The DawnLike tileset needs processing before use with Phaser 3. This document covers the preparation workflow.
 
+## What we actually built
+
+The options below were the design study. What shipped is a variant of Option B
+driven by Tiled tileset files instead of a YAML manifest:
+
+- Each sheet has a `.tsx` beside it in `assets/dawnlike-tileset/`. A tile gets a
+  name by carrying a `key` string property (and `two-frame-animation` when the
+  `File0`/`File1` pair should animate).
+- `python tools/generate_sprite_index.py` walks every `.tsx`, refuses duplicate
+  keys and writes `viewer/public/assets/sprite-index.json`.
+- `PreloadScene` loads exactly the sheets the index mentions, so adding a key on
+  a new sheet needs no change in the viewer.
+- Keys are kebab-case (`stone-wall`); `OBJECT_SPRITE_MAP` in `GameScene` maps
+  the server's snake_case `object_type` onto them.
+
+Sheets and tiles picked for the building update (docs/08_building.md), by
+`frame` index within the sheet:
+
+| key | sheet | frame | tile (col, row) |
+| --- | --- | --- | --- |
+| `reeds` | `Objects/Tree0.png` | 399 | (3, 33) |
+| `clay-deposit` | `Objects/Ground0.png` | 54 | (6, 6) |
+| `road` | `Objects/Floor.png` | 99 | (15, 4) |
+| `wood-floor` | `Objects/Floor.png` | 652 | (1, 31) |
+| `stone-floor` | `Objects/Floor.png` | 148 | (1, 7) |
+| `wood-wall` | `Objects/Wall.png` | 130 | (10, 6) |
+| `stone-wall` | `Objects/Wall.png` | 123 | (3, 6) |
+| `door` | `Objects/Door0.png` | 0 | (0, 0) |
+| `bed` | `Objects/Decor0.png` | 72 | (0, 9) |
+| `chair` | `Objects/Decor0.png` | 56 | (0, 7) |
+| `table` | `Objects/Decor0.png` | 57 | (1, 7) |
+| `workshop-table` | `Objects/Decor0.png` | 39 | (7, 4) |
+
+The wall and floor tiles are the *fill* tile of a DawnLike autotile block: they
+repeat seamlessly on their own, which is why the viewer can draw walls as plain
+single sprites and skip the autotiling described at the end of this document.
+
 ## Source Tileset Structure
 
 Location: `assets/dawnlike-tileset/`

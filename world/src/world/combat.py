@@ -13,12 +13,16 @@ from .events import (
 )
 from .exceptions import EntityNotFoundError
 from .items import attack_damage
-from .state import Entity, World
+from .sleep import is_tired
+from .state import WOLF_ENTITY_TYPE, Entity, World
 from .types import AttackIntent, is_adjacent
 
 logger = structlog.get_logger()
 
-WOLF_TYPE = "wolf"
+WOLF_TYPE = WOLF_ENTITY_TYPE
+
+# Attack damage lost while tired (docs/10_metal_and_sleep.md, "Fatigue").
+TIRED_DAMAGE_PENALTY = 1
 
 
 def apply_damage(
@@ -133,6 +137,9 @@ def process_attack_phase(
             continue
 
         damage = attack_damage(attacker.entity_type, attacker.wielded)
+        if is_tired(attacker):
+            # docs/10 "Fatigue": a tired settler hits one point softer.
+            damage = max(1, damage - TIRED_DAMAGE_PENALTY)
         strikes.append((entity_id, target.entity_id, damage))
 
     # Apply damage simultaneously: accumulate per target, then resolve deaths.

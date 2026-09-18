@@ -29,11 +29,36 @@ from .exceptions import (
     ObjectNotFoundError,
     PositionOccupiedError,
 )
+from .items import BLOCKING_OBJECT_TYPES, WOLF_BLOCKING_OBJECT_TYPES
 from .types import Position
 
 
 # status_bits flag for a dead entity (bit 0), see docs/05_jev_agents_design.md.
 STATUS_BIT_DEAD = 1
+
+# Entity types. Wolves are stopped by doors; everyone else opens them.
+DEFAULT_ENTITY_TYPE = "default"
+WOLF_ENTITY_TYPE = "wolf"
+
+# The day clock (docs/10_metal_and_sleep.md, "The day"). The first two thirds
+# of a day are daylight, the rest is night.
+DEFAULT_DAY_LENGTH_TICKS = 300
+NIGHT_START_NUMERATOR = 2
+NIGHT_START_DENOMINATOR = 3
+
+
+def night_start_tick(day_length: int) -> int:
+    """First tick of the day that counts as night."""
+    return day_length * NIGHT_START_NUMERATOR // NIGHT_START_DENOMINATOR
+
+
+class WorldClock(BaseModel, frozen=True):
+    """Where the world sits in its day/night cycle."""
+
+    day: int
+    tick_of_day: int
+    day_length: int
+    night: bool
 
 
 class Inventory(BaseModel, frozen=True):
@@ -124,6 +149,16 @@ class Entity(BaseModel, frozen=True):
     wielded: str = ""  # item kind currently wielded, "" if none
     alive: bool = True
 
+    # Body clock (docs/10_metal_and_sleep.md, "Fatigue and sleep"). Wolves
+    # never accumulate fatigue, so theirs stays at 0.
+    fatigue: int = 0
+    max_fatigue: int = 100
+    asleep: bool = False
+    # Object id of the bed slept on, "" for the ground (and while awake).
+    sleeping_on: str = ""
+    # True while the sleep was forced by exhaustion rather than chosen.
+    collapsed: bool = False
+
     def with_position(self, new_position: Position) -> "Entity":
         """Return copy with updated position."""
         return self.model_copy(update={"position": new_position})
@@ -146,6 +181,27 @@ class Entity(BaseModel, frozen=True):
         """Return copy with a different wielded item kind ("" for none)."""
         return self.model_copy(update={"wielded": kind})
 
+    def with_fatigue(self, new_fatigue: int) -> "Entity":
+        """Return copy with fatigue clamped to [0, max_fatigue]."""
+        clamped = max(0, min(self.max_fatigue, new_fatigue))
+        return self.model_copy(update={"fatigue": clamped})
+
+    def as_asleep(self, sleeping_on: str, collapsed: bool = False) -> "Entity":
+        """Return copy asleep on a bed (`sleeping_on`) or the ground ("")."""
+        return self.model_copy(
+            update={
+                "asleep": True,
+                "sleeping_on": sleeping_on,
+                "collapsed": collapsed,
+            }
+        )
+
+    def as_awake(self) -> "Entity":
+        """Return copy awake and off whatever it was sleeping on."""
+        return self.model_copy(
+            update={"asleep": False, "sleeping_on": "", "collapsed": False}
+        )
+
     def as_dead(self) -> "Entity":
         """Return copy marked dead: no health, no inventory, nothing wielded."""
         return self.model_copy(
@@ -155,10 +211,15 @@ class Entity(BaseModel, frozen=True):
                 "inventory": Inventory(),
                 "wielded": "",
                 "status_bits": self.status_bits | STATUS_BIT_DEAD,
+                "asleep": False,
+                "sleeping_on": "",
+                "collapsed": False,
             }
         )
 
-    def as_respawned(self, position: Position, hunger: int) -> "Entity":
+    def as_respawned(
+        self, position: Position, hunger: int, fatigue: int = 0
+    ) -> "Entity":
         """Return a fresh copy for respawn at `position`."""
         return self.model_copy(
             update={
@@ -166,6 +227,10 @@ class Entity(BaseModel, frozen=True):
                 "alive": True,
                 "health": self.max_health,
                 "hunger": max(0, min(self.max_hunger, hunger)),
+                "fatigue": max(0, min(self.max_fatigue, fatigue)),
+                "asleep": False,
+                "sleeping_on": "",
+                "collapsed": False,
                 "inventory": Inventory(),
                 "wielded": "",
                 "status_bits": self.status_bits & ~STATUS_BIT_DEAD,
@@ -207,6 +272,8 @@ class World(BaseModel):
     width: int
     height: int
     tick: int = 0
+    # Ticks in one day/night cycle (docs/10_metal_and_sleep.md, "The day").
+    day_length_ticks: int = DEFAULT_DAY_LENGTH_TICKS
     # Settlement centre (set by settlement.py when spawn_mode = "settlement").
     settlement: Position | None = None
 
@@ -230,6 +297,12 @@ class World(BaseModel):
 
     # entity_id -> tick at which the entity died (drives respawn scheduling)
     _death_ticks: dict[str, int] = PrivateAttr(default_factory=dict)
+
+    # Tiles holding a blocking object -> how many such objects stand there.
+    # Maintained by add_object/remove_object/update_object; walls block
+    # everyone, doors block wolves only (docs/08_building.md).
+    _blocked_positions: dict[Position, int] = PrivateAttr(default_factory=dict)
+    _wolf_blocked_positions: dict[Position, int] = PrivateAttr(default_factory=dict)
 
     # Monotonic counter backing generate_object_id()
     _object_id_seq: int = PrivateAttr(default=0)
@@ -308,6 +381,26 @@ class World(BaseModel):
     def in_bounds(self, position: Position) -> bool:
         """Check if position is within world bounds."""
         return 0 <= position.x < self.width and 0 <= position.y < self.height
+
+    def is_blocked(
+        self, position: Position, entity_type: str = DEFAULT_ENTITY_TYPE
+    ) -> bool:
+        """Whether an object on this tile stops an entity of this type."""
+        if position in self._blocked_positions:
+            return True
+        if entity_type == WOLF_ENTITY_TYPE:
+            return position in self._wolf_blocked_positions
+        return False
+
+    def is_passable(
+        self, position: Position, entity_type: str = DEFAULT_ENTITY_TYPE
+    ) -> bool:
+        """Walkable terrain in bounds with no blocking object for this type.
+
+        Says nothing about entities standing there; movement resolution and
+        `settlement.is_free_walkable` add that rule.
+        """
+        return self.is_walkable(position) and not self.is_blocked(position, entity_type)
 
     # --- Entity operations ---
 
@@ -495,6 +588,7 @@ class World(BaseModel):
         if obj.position not in self._object_positions:
             self._object_positions[obj.position] = []
         self._object_positions[obj.position].append(obj.object_id)
+        self._index_blocking(obj, 1)
 
     def get_object(self, object_id: str) -> WorldObject:
         """Get object by ID.
@@ -517,8 +611,14 @@ class World(BaseModel):
         Raises:
             ObjectNotFoundError: If object not found.
         """
-        if obj.object_id not in self._objects:
+        existing = self._objects.get(obj.object_id)
+        if existing is None:
             raise ObjectNotFoundError(f"Object {obj.object_id} not found")
+        # Type and position are stable in practice; re-index defensively so the
+        # blocking index can never drift from the object registry.
+        if (existing.object_type, existing.position) != (obj.object_type, obj.position):
+            self._index_blocking(existing, -1)
+            self._index_blocking(obj, 1)
         self._objects[obj.object_id] = obj
 
     def remove_object(self, object_id: str) -> WorldObject:
@@ -535,7 +635,22 @@ class World(BaseModel):
             ids_at.remove(object_id)
         if not ids_at:
             self._object_positions.pop(obj.position, None)
+        self._index_blocking(obj, -1)
         return obj
+
+    def _index_blocking(self, obj: WorldObject, delta: int) -> None:
+        """Add (delta=1) or drop (delta=-1) one object from the blocking index."""
+        for index, blocking_types in (
+            (self._blocked_positions, BLOCKING_OBJECT_TYPES),
+            (self._wolf_blocked_positions, WOLF_BLOCKING_OBJECT_TYPES),
+        ):
+            if obj.object_type not in blocking_types:
+                continue
+            count = index.get(obj.position, 0) + delta
+            if count > 0:
+                index[obj.position] = count
+            else:
+                index.pop(obj.position, None)
 
     def generate_object_id(self, prefix: str) -> str:
         """Return an unused object id of the form `<prefix>_<n>`."""
@@ -613,6 +728,18 @@ class World(BaseModel):
         return chunk
 
     # --- Tick operations ---
+
+    @property
+    def clock(self) -> WorldClock:
+        """Where the current tick sits in the day (docs/10)."""
+        length = self.day_length_ticks
+        tick_of_day = self.tick % length
+        return WorldClock(
+            day=self.tick // length,
+            tick_of_day=tick_of_day,
+            day_length=length,
+            night=tick_of_day >= night_start_tick(length),
+        )
 
     def advance_tick(self) -> None:
         """Increment tick counter."""

@@ -31,9 +31,9 @@ track needs to deviate, note it in the "Deviations" section at the bottom.
 
 | Field | Player | Wolf |
 | --- | --- | --- |
-| `max_health` | 20 | 8 |
+| `max_health` | 20 | 16 |
 | `max_hunger` | 100 | n/a (hunger stays at max) |
-| base attack damage | 2 | 2 |
+| base attack damage | 2 | 3 |
 
 - Hunger drops by 1 every 4 ticks. At hunger 0 the entity loses 1 health every 4 ticks.
 - Health regenerates 1 per 5 ticks while hunger > 50 and health < max.
@@ -49,6 +49,11 @@ track needs to deviate, note it in the "Deviations" section at the bottom.
 - Players respawn 10 ticks later at the settlement spawn (nearest free walkable
   tile to the settlement centre), full health, hunger 50, empty inventory,
   nothing wielded. `EntityRespawned` event. Viewer gets `entity_spawned`.
+  When a living wolf is within 10 tiles of that tile (wider than the wolves'
+  chase radius of 8), the respawn moves to the nearest of sixteen candidate
+  points 12 and 24 tiles out that is clear of every wolf; with wolves
+  everywhere it falls back to the settlement. One wolf camping the spawn
+  killed 18 respawning settlers in 95 ticks before this rule.
 - Wolves do not respawn; they are removed (`entity_despawned` to the viewer).
 - Dead entities cannot submit intents (reject with reason `dead`).
 
@@ -103,8 +108,10 @@ accepts at most one intent per entity per tick (any type).
    any slot. `ObjectChanged` event with field `notes`.
 10. **Eat** (existing, now affects hunger). **Say**: channel `local` produces
     an `Utterance` event for every entity within 10 tiles (including the
-    speaker); channel `thought` produces nothing in observations and is
-    forwarded to the viewer only.
+    speaker); channel `shout` does the same within 60 tiles, and the event
+    carries the speaker's position so hearers can walk to it; channel
+    `thought` produces nothing in observations and is forwarded to the viewer
+    only.
 11. **Wait**: no-op but counts as a submitted intent.
 12. **Regeneration / hunger / wolves / respawn** bookkeeping.
 
@@ -133,9 +140,13 @@ Wolves have hunger fixed at max and never starve.
 ### Settlement site
 
 `world/src/world/settlement.py` picks, deterministically for a given map, a
-walkable grass or dirt tile such that within a 30-tile radius there are at
-least 15 trees, 15 rocks (any size), 8 bushes, and at least one water tile
-(shallow or deep), preferring sites with the most balanced supply. The chosen
+grass or dirt tile such that within a 30-tile radius (Chebyshev) there are at
+least 120 trees, 50 rocks (any size), 12 bushes, 25 reeds, 12 clay deposits
+and at least one water tile, at least 60% of that box is dry land, and the
+15 x 15 square around the centre is at least 90% buildable (grass or dirt with
+no natural object). Every tile is tested exactly with integral images; among
+qualifying tiles the finder prefers balanced supply and open ground to grow
+into. Thresholds and rationale: [08_building.md](08_building.md). The chosen
 centre is logged and stored on the World (`world.settlement: Position`).
 
 Config: `[world] spawn_mode = "settlement"` makes every configured entity
@@ -287,16 +298,18 @@ is fast, cheap, and literal, while the planner is slow and expensive. Tools:
   `eat(kind)`, `pickup(kind, amount)`, `drop(kind, amount)`,
   `deposit(object_id, kind, amount)`, `withdraw(object_id, kind, amount)`,
   `craft(recipe)`, `equip(kind)`, `place(kind, direction)`, `wait(ticks)`.
-- `say(text)` → local speech (free text).
+- `say(text)` → local speech (free text, 10 tiles). `shout(text)` → the
+  `shout` channel (60 tiles); hearers see where it came from.
 - `write_note(board_id, slot, title, text)` and `read_board(board_id)`.
 - `remember(text)` / `recall()` → the agent's persistent notes file.
 
 The planner loop: each planner turn gets the latest `look()` and the last
 stint report in the prompt, thinks, calls tools, and ends its turn with a
 one-paragraph reflection which is stored as `planner_thought` and shown in
-the viewer. Then the next turn starts immediately. Cap tool calls per turn at
-12. Conversation history is trimmed to the last ~20 messages plus the
-persistent notes.
+the viewer. Then the next turn starts immediately. Tool calls per turn are
+budgeted at 30 (see "Per-turn tool budget" below). Conversation history keeps
+the first message plus as many whole recent turns as fit in 80 messages, cut
+only on turn boundaries, plus the persistent notes.
 
 Persistent memory: `logs/agent-<id>/memory.md` (planner notes) and the last 10
 stint reports.
@@ -484,13 +497,62 @@ observation and viewer services: `move_results`, `action_results`
   can still call `place(kind, direction)` for any direction.
 - **`drop` is not offered to Jev** (it is not in the doc's option list either);
   the planner's `drop` tool covers it.
-- **Say options** use a fixed phrase table (`help`, `wolf_here`, `come_here`,
-  `all_good`); free-text speech stays a planner tool.
+- **Say options** use a fixed phrase table (`come_here`, `all_good`);
+  free-text speech stays a planner tool. Jev may shout only the phrases the
+  planner lists in the brief's `shouts` (up to 4, offered as `shout:<n>`, 8
+  tick cooldown); nothing about them is wolf-specific. For 20 ticks after
+  hearing anyone's shout it is offered `travel_to:shout:<speaker>`, a
+  code-owned walk to where the shout came from. Both sit in the survival
+  group at the top of the list so truncation never drops them.
+- **The attack alert only looks back a few ticks.** `!! UNDER ATTACK` counts
+  bites from the last `RECENT_ATTACK_TICKS` (never from before the turn). A
+  turn lasts 150 to 330 ticks because stints run inside it, and summing the
+  whole turn made settlers report "phantom wolves" long after a fight ended.
+- **Example briefs are deliberately not about wolves.** In the first run with
+  planner-supplied shouts, 85% of phrases were wolf calls and 144 of 510 were
+  the prompt's example verbatim. The prompt now shows two briefs of different
+  shape (a long gathering stint with one shout, a short crafting stint with
+  none).
+- **Tools, not rules (2026-09-17).** The planner prompt states the setting,
+  the goal ("build a civilization"), the physics with numbers, and how to
+  drive Jev, with one worked brief. Strategy, etiquette and what the message
+  board is for were removed so they can emerge from the settlers.
+- **Cooperation is the balance.** Wolves have 16 health and bite for 3, and
+  attacks resolve simultaneously. A lone unarmed settler dies, a lone
+  swordsman wins at the cost of 12 of 20 health, and two armed settlers take
+  6 between them. `world/tests/test_combat.py` pins these relations. Jev's
+  state gains a `threat` block while a wolf is in view (nearest wolf, settlers
+  next to it, settlers within 3 tiles, and the group-fighting facts), its
+  `self` block carries the actor's `name`, entities list what they wield, and
+  the attack option says how many settlers are already next to the wolf. The
+  planner's `look` lists every settler met with last-seen position and age.
 - **Planner tool errors use `ModelRetry`.** An unknown direction or recipe is
   reported back to the model rather than raised, so the turn can correct itself.
-- **Per-turn tool budget.** The 12-call cap is enforced with pydantic-ai's
-  `UsageLimits(tool_calls_limit=12)`; hitting it ends the turn normally rather
-  than erroring.
+- **The planner knows it is on a clock.** Fighting belongs to Jev, which acts
+  every tick; there is deliberately no scripted combat tool. In run
+  `20260917-115123-settlement` settlers spent about 65% of ticks standing in
+  planning mode, planners swung with single `attack` calls (145 of them, one
+  model round trip each) and 29 settlers died, most with allies within 5
+  tiles. So every tool result now carries `[tick N; this turn has cost K ticks
+  so far]`, and `threat_alert` adds a `!! UNDER ATTACK` line (damage taken
+  from an attacker since the turn began) or a `!! WOLF NEAR` line (wolf within
+  8 tiles), both ending with the instruction to hand the body back to Jev with
+  one `start_stint` fighting brief. A turn that starts within 5 ticks of a
+  bite opens with the same alert above the `look` block, and the system prompt
+  has a real-time paragraph saying why the planner cannot fight by hand.
+- **Per-turn tool budget.** The original 12-call cap was a pydantic-ai
+  `UsageLimits` hard stop. In run `20260917-091932-settlement` it ended 110 of
+  155 turns, and each of those turns lost its reflection and its message
+  history, so planners were amnesiac apart from `memory.md`. The budget is now
+  30 and soft: the tools live in a `FunctionToolset` wrapped by
+  `BudgetedToolset`, which appends `[tool budget: N of 30 calls left this
+  turn]` to every tool result (with a wrap-up nudge at 5 and below) and
+  answers a call past the budget with a "NOT EXECUTED" message instead of
+  running it. The turn then ends normally and traces `tool_budget_spent`.
+  `UsageLimits(tool_calls_limit=36)` remains as a backstop; if it fires, the
+  messages captured so far are still kept as history and the trace says
+  `tool_budget_reached`. The system prompt states the budget and that a stint
+  is one call.
 - **`PLANNER_MODEL`** is prefixed with `openrouter:` only when it looks like a
   bare OpenRouter id (contains `/` and no `:`), so `provider:model` strings and
   test models pass through unchanged.

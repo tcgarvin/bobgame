@@ -60,9 +60,7 @@ class TestLeaseServiceIntegration:
             lease_id = response.lease_id
 
             # Renew lease
-            renew_response = stub.RenewLease(
-                pb.RenewLeaseRequest(lease_id=lease_id)
-            )
+            renew_response = stub.RenewLease(pb.RenewLeaseRequest(lease_id=lease_id))
 
             assert renew_response.success
             assert renew_response.lease_id == lease_id
@@ -75,9 +73,7 @@ class TestLeaseServiceIntegration:
             assert release_response.success
 
             # Verify lease is gone
-            renew_again = stub.RenewLease(
-                pb.RenewLeaseRequest(lease_id=lease_id)
-            )
+            renew_again = stub.RenewLease(pb.RenewLeaseRequest(lease_id=lease_id))
             assert not renew_again.success
 
             channel.close()

@@ -1,12 +1,20 @@
 """Tests for attacks, damage, death and respawn."""
 
+import pytest
+
 from world.combat import kill_entity, process_attack_phase
 from world.containers import read_contents
 from world.events import TickEvents
-from world.items import attack_damage
+from world.items import WIELD_DAMAGE_BONUS, attack_damage
 from world.state import Entity, Inventory, World
-from world.stats import RESPAWN_DELAY_TICKS, RESPAWN_HUNGER, process_respawns
+from world.stats import (
+    RESPAWN_DELAY_TICKS,
+    RESPAWN_HUNGER,
+    RESPAWN_SAFE_DISTANCE,
+    process_respawns,
+)
 from world.types import AttackIntent, Position
+from world.wolves import WOLF_MAX_HEALTH
 
 
 def _world_with_pair() -> World:
@@ -19,7 +27,7 @@ def _world_with_pair() -> World:
 class TestAttackDamage:
     def test_base_damage_for_player_and_wolf(self) -> None:
         assert attack_damage("player", "") == 2
-        assert attack_damage("wolf", "") == 2
+        assert attack_damage("wolf", "") == 3
 
     def test_wielded_bonus(self) -> None:
         assert attack_damage("player", "sword") == 5
@@ -183,3 +191,122 @@ class TestRespawn:
         alice = world.get_entity("alice")
         assert alice.position != Position(x=6, y=5)
         assert max(abs(alice.position.x - 6), abs(alice.position.y - 5)) == 1
+
+    def test_respawn_avoids_a_wolf_camping_the_settlement(self) -> None:
+        world = World(width=60, height=60)
+        world.settlement = Position(x=30, y=30)
+        world.add_entity(Entity(entity_id="alice", position=Position(x=5, y=5)))
+        world.add_entity(_wolf("wolf_1", Position(x=31, y=30)))
+        events = TickEvents()
+        kill_entity(world, "alice", "wolf_1", events)
+
+        world.tick = RESPAWN_DELAY_TICKS
+        process_respawns(world, events)
+
+        alice = world.get_entity("alice")
+        assert alice.alive
+        distance = max(abs(alice.position.x - 31), abs(alice.position.y - 30))
+        assert distance >= RESPAWN_SAFE_DISTANCE
+        assert max(abs(alice.position.x - 30), abs(alice.position.y - 30)) <= 12
+
+    def test_respawn_uses_the_settlement_when_the_wolf_is_far_away(self) -> None:
+        world = World(width=60, height=60)
+        world.settlement = Position(x=30, y=30)
+        world.add_entity(Entity(entity_id="alice", position=Position(x=5, y=5)))
+        world.add_entity(_wolf("wolf_1", Position(x=30 + RESPAWN_SAFE_DISTANCE, y=30)))
+        events = TickEvents()
+        kill_entity(world, "alice", "wolf_1", events)
+
+        world.tick = RESPAWN_DELAY_TICKS
+        process_respawns(world, events)
+
+        assert world.get_entity("alice").position == Position(x=30, y=30)
+
+    def test_respawn_falls_back_to_the_settlement_when_wolves_are_everywhere(
+        self,
+    ) -> None:
+        world = World(width=20, height=20)
+        world.settlement = Position(x=10, y=10)
+        world.add_entity(Entity(entity_id="alice", position=Position(x=5, y=5)))
+        for index, (x, y) in enumerate([(3, 3), (16, 3), (3, 16), (16, 16), (10, 9)]):
+            world.add_entity(_wolf(f"wolf_{index}", Position(x=x, y=y)))
+        events = TickEvents()
+        kill_entity(world, "alice", "wolf_0", events)
+
+        world.tick = RESPAWN_DELAY_TICKS
+        process_respawns(world, events)
+
+        assert world.get_entity("alice").position == Position(x=10, y=10)
+
+
+def _wolf(entity_id: str, position: Position) -> Entity:
+    return Entity(
+        entity_id=entity_id,
+        position=position,
+        entity_type="wolf",
+        health=16,
+        max_health=16,
+    )
+
+
+def _damage_taken_killing_a_wolf(attacker_damages: list[int]) -> int:
+    """Total damage a group takes killing one wolf, everyone striking each tick.
+
+    Attacks are simultaneous, so the wolf still bites on the tick it dies.
+    """
+    per_tick = sum(attacker_damages)
+    ticks = -(-WOLF_MAX_HEALTH // per_tick)
+    return ticks * attack_damage("wolf", "")
+
+
+class TestWolfBalanceRewardsCooperation:
+    """The balance contract: alone is costly or fatal, together is cheap."""
+
+    PLAYER_HEALTH = Entity(entity_id="probe", position=Position(x=0, y=0)).max_health
+
+    def test_a_lone_unarmed_settler_dies(self) -> None:
+        unarmed = attack_damage("player", "")
+        assert _damage_taken_killing_a_wolf([unarmed]) >= self.PLAYER_HEALTH
+
+    def test_a_lone_swordsman_wins_but_loses_at_least_half_their_health(self) -> None:
+        taken = _damage_taken_killing_a_wolf([attack_damage("player", "sword")])
+        assert self.PLAYER_HEALTH // 2 <= taken < self.PLAYER_HEALTH
+
+    def test_two_armed_settlers_take_a_third_of_one_health_bar_at_most(self) -> None:
+        sword = attack_damage("player", "sword")
+        axe = attack_damage("player", "axe")
+        assert _damage_taken_killing_a_wolf([sword, axe]) <= self.PLAYER_HEALTH // 3
+
+    def test_three_unarmed_settlers_beat_a_wolf_comfortably(self) -> None:
+        unarmed = attack_damage("player", "")
+        taken = _damage_taken_killing_a_wolf([unarmed] * 3)
+        assert taken < self.PLAYER_HEALTH // 2
+
+
+class TestMetalWeaponDamage:
+    """docs/10_metal_and_sleep.md section 2: the tier's damage bonuses."""
+
+    PLAYER_HEALTH = Entity(entity_id="probe", position=Position(x=0, y=0)).max_health
+
+    @pytest.mark.parametrize(
+        "wielded,damage",
+        [
+            ("iron_sword", 7),
+            ("copper_axe", 4),
+            ("iron_axe", 5),
+            ("copper_pickaxe", 3),
+            ("iron_pickaxe", 4),
+        ],
+    )
+    def test_metal_tool_damage(self, wielded: str, damage: int) -> None:
+        assert attack_damage("player", wielded) == damage
+
+    def test_there_is_no_copper_sword(self) -> None:
+        assert "copper_sword" not in WIELD_DAMAGE_BONUS
+
+    def test_a_lone_iron_swordsman_kills_a_wolf_in_three_hits_taking_nine(self) -> None:
+        iron = attack_damage("player", "iron_sword")
+        assert -(-WOLF_MAX_HEALTH // iron) == 3
+        taken = _damage_taken_killing_a_wolf([iron])
+        assert taken == 9
+        assert taken < self.PLAYER_HEALTH // 2

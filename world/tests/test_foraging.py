@@ -236,7 +236,9 @@ class TestCollectPhase:
         world.add_object(bush)
 
         # No object_id specified (empty string)
-        intents = {"bob": CollectIntent(entity_id="bob", object_id="", item_type="berry")}
+        intents = {
+            "bob": CollectIntent(entity_id="bob", object_id="", item_type="berry")
+        }
 
         results, object_changes = process_collect_phase(world, intents)
 

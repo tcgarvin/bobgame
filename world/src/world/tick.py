@@ -12,11 +12,13 @@ from .containers import (
     process_deposit_phase,
     process_drop_phase,
     process_equip_phase,
+    process_give_phase,
     process_pickup_phase,
     process_place_phase,
     process_withdraw_phase,
     process_write_note_phase,
 )
+from .conversations import process_conversation_phase
 from .crafting import process_craft_phase
 from .events import (
     ActionResult,
@@ -40,11 +42,18 @@ from .foraging import (
     process_regeneration,
 )
 from .movement import MoveResult, process_movement_phase
-from .stats import process_health_regen, process_hunger_phase, process_respawns
+from .sleep import process_fatigue_phase, process_sleep_phase
+from .stats import (
+    process_health_regen,
+    process_hunger_phase,
+    process_respawns,
+    process_rest_phase,
+)
 from .state import World
 from .tick_context import TickContext
 from .types import (
     AttackIntent,
+    ConverseIntent,
     CraftIntent,
     DepositIntent,
     Direction,
@@ -52,10 +61,15 @@ from .types import (
     EntityIntent,
     EquipIntent,
     ExtractIntent,
+    GiveIntent,
     PickupIntent,
     PlaceIntent,
+    RestIntent,
+    SAY_CHANNELS,
     SayIntent,
+    SleepIntent,
     WaitIntent,
+    WakeIntent,
     WithdrawIntent,
     WriteNoteIntent,
 )
@@ -122,7 +136,11 @@ def _living_subset(
     action_type: str,
     events: TickEvents,
 ) -> dict[str, T]:
-    """Drop intents from missing or dead entities, recording the failure."""
+    """Drop intents from missing, dead or sleeping entities, recording why.
+
+    `TickContext` already refuses a sleeper's intents; this is the same guard
+    applied to intents the world itself injected (docs/10).
+    """
     kept: dict[str, T] = {}
     for entity_id, intent in intents.items():
         entity = world.all_entities().get(entity_id)
@@ -131,6 +149,9 @@ def _living_subset(
             continue
         if not entity.alive:
             events.acted(entity_id, action_type, False, "dead")
+            continue
+        if entity.asleep:
+            events.acted(entity_id, action_type, False, "asleep")
             continue
         kept[entity_id] = intent
     return kept
@@ -170,7 +191,7 @@ def _process_say_phase(
     """Emit one utterance per speaker; channel filtering happens downstream."""
     for entity_id in sorted(intents):
         intent = intents[entity_id]
-        if intent.channel not in ("local", "thought"):
+        if intent.channel not in SAY_CHANNELS:
             events.acted(entity_id, "say", False, f"unknown channel {intent.channel}")
             continue
         entity = world.get_entity(entity_id)
@@ -206,7 +227,9 @@ def process_tick(
     move_intents = {
         entity_id: direction
         for entity_id, direction in ctx.move_intents.items()
-        if (entity := world.all_entities().get(entity_id)) is not None and entity.alive
+        if (entity := world.all_entities().get(entity_id)) is not None
+        and entity.alive
+        and not entity.asleep
     }
     move_results = process_movement_phase(world, move_intents)
 
@@ -217,14 +240,27 @@ def process_tick(
         events,
     )
 
-    # Phase 3: Extract
+    # Phase 3: Give, then conversations. Both run on post-combat positions;
+    # give first, so a hand-over still works on the tick a conversation closes.
+    process_give_phase(
+        world,
+        _living_subset(world, ctx.intents_of(GiveIntent), "give", events),
+        events,
+    )
+    process_conversation_phase(
+        world,
+        _living_subset(world, ctx.intents_of(ConverseIntent), "converse", events),
+        events,
+    )
+
+    # Phase 4: Extract
     process_extract_phase(
         world,
         _living_subset(world, ctx.intents_of(ExtractIntent), "extract", events),
         events,
     )
 
-    # Phase 4: Collect, pickup, withdraw
+    # Phase 5: Collect, pickup, withdraw
     collect_results, collect_changes = process_collect_phase(
         world,
         _living_subset(world, ctx.collect_intents, "collect", events),
@@ -243,7 +279,7 @@ def process_tick(
         events,
     )
 
-    # Phase 5: Drop, deposit
+    # Phase 6: Drop, deposit
     process_drop_phase(
         world,
         _living_subset(world, ctx.intents_of(DropIntent), "drop", events),
@@ -255,53 +291,67 @@ def process_tick(
         events,
     )
 
-    # Phase 6: Craft
+    # Phase 7: Craft
     process_craft_phase(
         world,
         _living_subset(world, ctx.intents_of(CraftIntent), "craft", events),
         events,
     )
 
-    # Phase 7: Equip
+    # Phase 8: Equip
     process_equip_phase(
         world,
         _living_subset(world, ctx.intents_of(EquipIntent), "equip", events),
         events,
     )
 
-    # Phase 8: Place
+    # Phase 9: Place
     process_place_phase(
         world,
         _living_subset(world, ctx.intents_of(PlaceIntent), "place", events),
         events,
     )
 
-    # Phase 9: Write note
+    # Phase 10: Write note
     process_write_note_phase(
         world,
         _living_subset(world, ctx.intents_of(WriteNoteIntent), "write_note", events),
         events,
     )
 
-    # Phase 10: Eat, say
+    # Phase 11: Eat, rest, say
     eat_results = process_eat_phase(
         world, _living_subset(world, ctx.eat_intents, "eat", events)
     )
     _record_eat_results(eat_results, events)
+    process_rest_phase(
+        world,
+        _living_subset(world, ctx.intents_of(RestIntent), "rest", events),
+        events,
+    )
     _process_say_phase(
         world,
         _living_subset(world, ctx.intents_of(SayIntent), "say", events),
         events,
     )
 
-    # Phase 11: Wait
+    # Phase 12: Wait
     for entity_id in sorted(
         _living_subset(world, ctx.intents_of(WaitIntent), "wait", events)
     ):
         events.acted(entity_id, "wait", True, "")
 
-    # Phase 12: Bookkeeping
+    # Phase 13: Sleep and wake, after movement and every action phase.
+    process_sleep_phase(
+        world,
+        _living_subset(world, ctx.intents_of(SleepIntent), "sleep", events),
+        ctx.intents_of(WakeIntent),
+        events,
+    )
+
+    # Phase 14: Bookkeeping
     process_hunger_phase(world, events)
+    process_fatigue_phase(world, events)
     process_health_regen(world)
     events.object_changes.extend(process_regeneration(world, regen_rate=regen_rate))
     process_respawns(world, events)
@@ -449,6 +499,11 @@ class TickLoop:
                     except asyncio.TimeoutError:
                         pass  # Normal - tick duration elapsed
 
+        except Exception:
+            # The task's exception is otherwise only seen when the server is
+            # stopped, with the frames that matter stripped; log it here.
+            logger.exception("tick_loop_crashed", tick=self.world.tick)
+            raise
         finally:
             self._running = False
             self._current_context = None

@@ -66,6 +66,13 @@
       #follow-indicator.off {
         color: #8a8a9a;
       }
+      #clock-readout {
+        color: #c9c9dd;
+        white-space: nowrap;
+      }
+      #clock-readout.night {
+        color: #8fb0ff;
+      }
 
       #agent-panel {
         position: absolute;
@@ -125,6 +132,14 @@
       .mode-badge.idle {
         background: #4a4a30;
         color: #eee7c0;
+      }
+      .mode-badge.reflex {
+        background: #7a3535;
+        color: #ffd8d8;
+      }
+      .mode-badge.conversation {
+        background: #3a5d6b;
+        color: #cdeef7;
       }
       .bar-row {
         display: flex;
@@ -330,6 +345,7 @@
           <option value="">(none)</option>
         </select>
         <span id="follow-indicator" class="off">follow off</span>
+        <span id="clock-readout" class="muted">-</span>
       </div>
       <div id="agent-panel" class="panel">
         <h2 id="ap-name">No entity selected</h2>
@@ -344,6 +360,11 @@
           <div class="label">Brief</div>
           <div id="ap-brief" class="text muted">-</div>
           <div id="ap-brief-meta"></div>
+        </div>
+
+        <div id="ap-conversation" class="section hidden">
+          <div class="label">Conversation</div>
+          <div id="ap-conversation-body"></div>
         </div>
 
         <div class="section">

@@ -4,6 +4,8 @@ from enum import IntEnum
 
 from pydantic import BaseModel
 
+from .items import CONVERSATION_CHANNEL
+
 
 class Direction(IntEnum):
     """8-direction movement enum matching proto Direction."""
@@ -149,10 +151,14 @@ class EquipIntent(EntityIntent, frozen=True):
 
 
 class PlaceIntent(EntityIntent, frozen=True):
-    """Intent to place a placeable item on the adjacent tile in `direction`."""
+    """Intent to place a placeable item on the adjacent tile in `direction`.
+
+    `direction` is None only for ground-layer kinds (road, floors), which are
+    laid on the placer's own tile; structures always name a direction.
+    """
 
     kind: str
-    direction: Direction
+    direction: Direction | None = None
 
 
 class WriteNoteIntent(EntityIntent, frozen=True):
@@ -164,11 +170,75 @@ class WriteNoteIntent(EntityIntent, frozen=True):
     text: str = ""
 
 
+class RestIntent(EntityIntent, frozen=True):
+    """Intent to rest on a bed on the same or an adjacent tile."""
+
+    object_id: str
+
+
+class SleepIntent(EntityIntent, frozen=True):
+    """Intent to fall asleep on a bed (`object_id`) or the ground ("")."""
+
+    object_id: str = ""
+
+
+class WakeIntent(EntityIntent, frozen=True):
+    """Intent to wake up from a voluntary sleep."""
+
+
+# Channels other entities can hear; "thought" only reaches the viewer.
+LOCAL_CHANNEL = "local"
+SHOUT_CHANNEL = "shout"
+THOUGHT_CHANNEL = "thought"
+AUDIBLE_CHANNELS: frozenset[str] = frozenset(
+    {LOCAL_CHANNEL, SHOUT_CHANNEL, CONVERSATION_CHANNEL}
+)
+# Channels a bare SayIntent may use. The conversation channel is deliberately
+# absent: only a ConverseIntent can put a line on it, so every such utterance
+# carries a conversation_id the world agrees with.
+SAY_CHANNELS: frozenset[str] = frozenset(
+    {LOCAL_CHANNEL, SHOUT_CHANNEL, THOUGHT_CHANNEL}
+)
+
+
 class SayIntent(EntityIntent, frozen=True):
-    """Intent to speak on a channel ("local" or "thought")."""
+    """Intent to speak on a channel ("local", "shout" or "thought")."""
 
     text: str
     channel: str = "local"
+
+
+# ConverseIntent actions (docs/09_conversation_and_reflex.md, section 2.3).
+CONVERSE_OPEN = "open"
+CONVERSE_JOIN = "join"
+CONVERSE_SPEAK = "speak"
+CONVERSE_PASS = "pass"
+CONVERSE_LEAVE = "leave"
+CONVERSE_ACTIONS: frozenset[str] = frozenset(
+    {CONVERSE_OPEN, CONVERSE_JOIN, CONVERSE_SPEAK, CONVERSE_PASS, CONVERSE_LEAVE}
+)
+
+
+class ConverseIntent(EntityIntent, frozen=True):
+    """Intent to open, join, speak in, pass in or leave a conversation.
+
+    `direction` names the anchor tile for `open`; `conversation_id` names the
+    conversation for `join`. `speak` and `pass` act on the conversation the
+    entity already sits in.
+    """
+
+    action: str
+    direction: Direction | None = None
+    conversation_id: str = ""
+    text: str = ""
+
+
+class GiveIntent(EntityIntent, frozen=True):
+    """Intent to hand items to an adjacent entity or a fellow participant."""
+
+    target_entity_id: str
+    kind: str
+    amount: int = 1
 
 
 class WaitIntent(EntityIntent, frozen=True):

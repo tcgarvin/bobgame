@@ -15,29 +15,27 @@ from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
 from .. import world_pb2 as pb
+from . import items
 from .geometry import Coord, chebyshev, direction_name
 
 VIEW_RADIUS = 8
 
-# Object types that occupy their tile. Mirrors world/src/world/settlement.py's
-# BLOCKING_OBJECT_TYPES; the agent stays conservative because treating a
-# passable tile as blocked only costs a slightly longer path.
-ROCK_TYPES: frozenset[str] = frozenset(
-    {"rock_small", "rock_medium", "rock_large", "boulder"}
+# Object types that occupy their tile. Walls really do block (the world says so
+# in `Tile.walkable` too); trees and rocks are treated as blocking only because
+# the agent stays conservative - a slightly longer path costs little. Doors are
+# deliberately absent: settlers walk through them, only wolves cannot.
+BLOCKING_OBJECT_TYPES: frozenset[str] = (
+    frozenset({items.TREE}) | items.ROCK_TYPES | items.BLOCKING_OBJECT_TYPES
 )
-BLOCKING_OBJECT_TYPES: frozenset[str] = frozenset({"tree"}) | ROCK_TYPES
-EXTRACTABLE_TYPES: frozenset[str] = frozenset({"tree"}) | ROCK_TYPES
 
-DEFAULT_REMAINING: Mapping[str, int] = {
-    "tree": 4,
-    "rock_small": 1,
-    "rock_medium": 2,
-    "rock_large": 4,
-    "boulder": 6,
-}
+# Re-exported so the rest of the agent can keep importing them from here.
+ROCK_TYPES = items.ROCK_TYPES
+EXTRACTABLE_TYPES = items.EXTRACTABLE_TYPES
+DEFAULT_REMAINING: Mapping[str, int] = items.DEFAULT_REMAINING
 
 HISTORY_LIMIT = 200
 UTTERANCE_LIMIT = 40
+DAMAGE_LOG_LIMIT = 40
 
 
 @dataclass(frozen=True)
@@ -49,6 +47,23 @@ class TileInfo:
     opaque: bool
     floor_type: str
     last_seen: int
+
+
+@dataclass(frozen=True)
+class WorldClock:
+    """The world's day clock, as the observation reports it (docs/10 section 3)."""
+
+    day: int = 0
+    tick_of_day: int = 0
+    day_length: int = items.DEFAULT_DAY_LENGTH
+    night: bool = False
+
+    def as_text(self) -> str:
+        """`"day 2 212/300 night"`, the form every tick line uses."""
+        return (
+            f"day {self.day} {self.tick_of_day}/{self.day_length} "
+            f"{'night' if self.night else 'day'}"
+        )
 
 
 @dataclass(frozen=True)
@@ -77,6 +92,18 @@ class ObjectInfo:
     def contents(self) -> dict[str, int]:
         """Parsed `contents` JSON for chests and item piles ({} when absent/bad)."""
         return _parse_counts(self.state.get("contents", ""))
+
+    def craft_progress(self, entity_id: str) -> tuple[str, int]:
+        """`(recipe, actions done)` this crafter has banked at this station.
+
+        Empty recipe and zero when the station holds no progress for them, or
+        when the state value is not the `"<recipe>:<done>"` the world writes.
+        """
+        raw = self.state.get(f"{items.CRAFT_PROGRESS_PREFIX}{entity_id}", "")
+        recipe, _, done = raw.partition(":")
+        if not recipe or not done.isdigit():
+            return ("", 0)
+        return (recipe, int(done))
 
     def notes(self) -> list[dict[str, object]]:
         """Parsed `notes` JSON for message boards, with empty slots dropped."""
@@ -107,6 +134,14 @@ class EntityInfo:
     alive: bool
     inventory: Mapping[str, int]
     last_seen: int
+    fatigue: int = 0
+    max_fatigue: int = items.MAX_FATIGUE
+    asleep: bool = False
+
+    @property
+    def fatigue_word(self) -> str:
+        """`fresh`, `tired` or `exhausted` for this entity's fatigue."""
+        return items.fatigue_word(self.fatigue)
 
 
 @dataclass(frozen=True)
@@ -119,12 +154,137 @@ class HistoryEntry:
 
 @dataclass(frozen=True)
 class HeardUtterance:
-    """Something another actor said within earshot."""
+    """Something an actor said within earshot, and where they stood.
+
+    `conversation_id` is empty for ordinary speech; it names the conversation
+    for a line spoken in one, and for the opening line, which is heard on the
+    local channel.
+    """
 
     tick: int
     speaker_id: str
     channel: str
     text: str
+    position: Coord
+    conversation_id: str = ""
+
+
+@dataclass(frozen=True)
+class TranscriptLine:
+    """One line of a conversation, as the actor heard it or as state records it."""
+
+    tick: int
+    speaker: str
+    text: str
+
+    def as_line(self) -> str:
+        """`t12 mira: hello`, the form both prompts and reports use."""
+        return f"t{self.tick} {self.speaker}: {self.text}"
+
+
+@dataclass(frozen=True)
+class ConversationInfo:
+    """A `conversation` object, parsed out of its string state.
+
+    The world's contract is docs/09_conversation_and_reflex.md section 2.1;
+    every value in object state is a string, so everything here is parsed
+    defensively and falls back to an empty or zero value.
+    """
+
+    conversation_id: str
+    anchor: Coord
+    participants: tuple[str, ...]
+    speaker: str
+    turn_started: int
+    opened_tick: int
+    opened_by: str
+    utterances: int
+    transcript: tuple[TranscriptLine, ...]
+
+    @property
+    def free_seats(self) -> int:
+        """Seats still open at this conversation."""
+        return max(0, items.CONVERSATION_MAX_PARTICIPANTS - len(self.participants))
+
+    def has(self, entity_id: str) -> bool:
+        """Whether `entity_id` currently holds a seat."""
+        return entity_id in self.participants
+
+    def summary(self) -> str:
+        """One line for `look`: who is there and how many seats are free."""
+        seated = ", ".join(self.participants) or "nobody"
+        return (
+            f"{self.conversation_id} at {self.anchor}: {seated} "
+            f"({self.free_seats} free seats, {self.utterances} lines said)"
+        )
+
+
+def _parse_participants(raw: str) -> tuple[str, ...]:
+    """Parse the `participants` JSON list; a bad value means nobody."""
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(str(entry) for entry in parsed)
+
+
+def _parse_transcript(raw: str) -> tuple[TranscriptLine, ...]:
+    """Parse the `transcript` JSON list; malformed entries are dropped."""
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    lines: list[TranscriptLine] = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        tick = entry.get("tick", 0)
+        lines.append(
+            TranscriptLine(
+                tick=tick if isinstance(tick, int) else 0,
+                speaker=str(entry.get("speaker", "")),
+                text=str(entry.get("text", "")),
+            )
+        )
+    return tuple(lines)
+
+
+def _parse_int(raw: str) -> int:
+    """A non-negative integer from object state; anything else is 0."""
+    return int(raw) if raw.isdigit() else 0
+
+
+def conversation_from_object(obj: ObjectInfo) -> ConversationInfo:
+    """Build a `ConversationInfo` from a `conversation` world object."""
+    state = obj.state
+    return ConversationInfo(
+        conversation_id=obj.object_id,
+        anchor=obj.position,
+        participants=_parse_participants(state.get("participants", "")),
+        speaker=state.get("speaker", ""),
+        turn_started=_parse_int(state.get("turn_started", "")),
+        opened_tick=_parse_int(state.get("opened_tick", "")),
+        opened_by=state.get("opened_by", ""),
+        utterances=_parse_int(state.get("utterances", "")),
+        transcript=_parse_transcript(state.get("transcript", "")),
+    )
+
+
+@dataclass(frozen=True)
+class DamageTaken:
+    """One hit this actor took; `attacker_id` is empty for starvation."""
+
+    tick: int
+    amount: int
+    attacker_id: str
 
 
 @dataclass
@@ -133,6 +293,9 @@ class TickDigest:
 
     tick: int = 0
     own_actions: list[pb.EntityActed] = field(default_factory=list)
+    # Actions by other entities that this actor was shown, such as a `give`
+    # aimed at it. The world only sends these when they concern the actor.
+    others_actions: list[pb.EntityActed] = field(default_factory=list)
     damage_taken: int = 0
     attackers: list[str] = field(default_factory=list)
     deaths: list[str] = field(default_factory=list)
@@ -191,8 +354,14 @@ class WorldModel:
         # field, so the first observed position is the best available estimate.
         self.settlement: Coord = (0, 0)
         self.settlement_known = False
+        self.clock = WorldClock()
         self.history: deque[HistoryEntry] = deque(maxlen=HISTORY_LIMIT)
         self.heard: deque[HeardUtterance] = deque(maxlen=UTTERANCE_LIMIT)
+        self.damage_log: deque[DamageTaken] = deque(maxlen=DAMAGE_LOG_LIMIT)
+        # Everything this actor heard inside a conversation, kept per
+        # conversation: `heard` is a short shared window, and a converser needs
+        # the whole exchange it sat through.
+        self.conversation_lines: dict[str, list[TranscriptLine]] = {}
         self.last_digest = TickDigest()
         # Position indexes rebuilt once per update() so that pathfinding's
         # walkability checks are O(1) instead of scanning every known object.
@@ -240,6 +409,7 @@ class WorldModel:
         digest = TickDigest(tick=observation.tick_id)
 
         self.self_info = _entity_info(observation.self, observation.tick_id)
+        self.clock = _world_clock(observation.clock)
         if not self.settlement_known:
             self.settlement = self.self_info.position
             self.settlement_known = True
@@ -305,6 +475,7 @@ class WorldModel:
             if kind == "entity_acted":
                 acted = event.entity_acted
                 if acted.entity_id != self.entity_id:
+                    digest.others_actions.append(acted)
                     continue
                 digest.own_actions.append(acted)
                 outcome = "ok" if acted.success else "failed"
@@ -325,14 +496,24 @@ class WorldModel:
             elif kind == "utterance":
                 utterance = event.utterance
                 heard = HeardUtterance(
-                    tick, utterance.speaker_id, utterance.channel, utterance.text
+                    tick,
+                    utterance.speaker_id,
+                    utterance.channel,
+                    utterance.text,
+                    (utterance.position.x, utterance.position.y),
+                    utterance.conversation_id,
                 )
                 self.heard.append(heard)
                 digest.utterances.append(heard)
+                if heard.conversation_id:
+                    self._remember_conversation_line(heard)
             elif kind == "entity_damaged":
                 damaged = event.entity_damaged
                 if damaged.entity_id == self.entity_id:
                     digest.damage_taken += damaged.amount
+                    self.damage_log.append(
+                        DamageTaken(tick, damaged.amount, damaged.attacker_id)
+                    )
                     if damaged.attacker_id:
                         digest.attackers.append(damaged.attacker_id)
             elif kind == "entity_died":
@@ -391,6 +572,40 @@ class WorldModel:
         """Every known object standing on `position`."""
         return [obj for obj in self.objects.values() if obj.position == position]
 
+    def ground_objects_at(self, position: Coord) -> list[ObjectInfo]:
+        """Known ground-layer objects (road, floors) on `position`."""
+        return [
+            obj
+            for obj in self.object_at(position)
+            if obj.object_type in items.GROUND_LAYER_KINDS
+        ]
+
+    def structure_objects_at(self, position: Coord) -> list[ObjectInfo]:
+        """Known structure-layer objects (everything that is not ground) on `position`."""
+        return [
+            obj
+            for obj in self.object_at(position)
+            if obj.object_type not in items.GROUND_LAYER_KINDS
+        ]
+
+    def station_near(self, station: str) -> ObjectInfo | None:
+        """A placed station of this type on or next to the actor, if it knows of one.
+
+        A station recipe fails anywhere else, so this is the gate for offering
+        it at all. An empty `station` (a hand recipe) has no gate and yields
+        None, which callers read as "no station needed".
+        """
+        if not station:
+            return None
+        for obj in self.objects_near(1):
+            if obj.object_type == station:
+                return obj
+        return None
+
+    def workshop_table_near(self) -> ObjectInfo | None:
+        """A placed workshop table on or next to the actor, if it knows of one."""
+        return self.station_near(items.WORKSHOP_TABLE)
+
     def objects_near(self, radius: int) -> list[ObjectInfo]:
         """Known objects within `radius` of the actor, nearest first."""
         centre = self.position
@@ -427,6 +642,87 @@ class WorldModel:
             return None
         return min(wolves, key=lambda w: chebyshev(w.position, self.position))
 
+    def wolves_near(self, radius: int) -> list[EntityInfo]:
+        """Living wolves within `radius` of the actor, nearest first."""
+        return [
+            entity
+            for entity in self.entities_near(radius)
+            if entity.entity_type == "wolf" and entity.alive
+        ]
+
+    def allies_near(self, centre: Coord, radius: int) -> list[EntityInfo]:
+        """Other living settlers within `radius` of `centre`."""
+        return [
+            entity
+            for entity in self.entities.values()
+            if entity.entity_id != self.entity_id
+            and entity.entity_type != "wolf"
+            and entity.alive
+            and chebyshev(entity.position, centre) <= radius
+        ]
+
+    def _remember_conversation_line(self, heard: HeardUtterance) -> None:
+        """Append a heard conversation line, ignoring a repeat of the last one."""
+        lines = self.conversation_lines.setdefault(heard.conversation_id, [])
+        line = TranscriptLine(heard.tick, heard.speaker_id, heard.text)
+        if lines and lines[-1] == line:
+            return
+        lines.append(line)
+
+    def conversations(self) -> list[ConversationInfo]:
+        """Every conversation object the actor knows about, nearest first."""
+        return [
+            conversation_from_object(obj)
+            for obj in self.objects_by_type([items.CONVERSATION])
+        ]
+
+    def conversation_by_id(self, conversation_id: str) -> ConversationInfo | None:
+        """The named conversation, or None when the actor cannot see it."""
+        obj = self.objects.get(conversation_id)
+        if obj is None or obj.object_type != items.CONVERSATION:
+            return None
+        return conversation_from_object(obj)
+
+    def my_conversation(self) -> ConversationInfo | None:
+        """The conversation this actor currently holds a seat in, if any."""
+        for conversation in self.conversations():
+            if conversation.has(self.entity_id):
+                return conversation
+        return None
+
+    def heard_conversation_lines(self, conversation_id: str) -> list[TranscriptLine]:
+        """Every line of `conversation_id` this actor heard, oldest first."""
+        return list(self.conversation_lines.get(conversation_id, ()))
+
+    def recent_shouts(self, max_age: int) -> list[HeardUtterance]:
+        """The latest shout from each other settler in the last `max_age` ticks.
+
+        Newest first. A shout is a call across the map, usually for help.
+        """
+        latest: dict[str, HeardUtterance] = {}
+        for utterance in self.heard:
+            if utterance.channel != items.SHOUT_CHANNEL:
+                continue
+            if utterance.speaker_id == self.entity_id:
+                continue
+            if self.tick - utterance.tick > max_age:
+                continue
+            latest[utterance.speaker_id] = utterance
+        return sorted(latest.values(), key=lambda u: -u.tick)
+
+    def last_own_shout_tick(self) -> int:
+        """The tick of this actor's most recent shout, or -1 when it never has."""
+        ticks = [
+            u.tick
+            for u in self.heard
+            if u.speaker_id == self.entity_id and u.channel == items.SHOUT_CHANNEL
+        ]
+        return max(ticks, default=-1)
+
+    def damage_since(self, tick: int) -> list[DamageTaken]:
+        """Every hit the actor took at or after `tick`, oldest first."""
+        return [hit for hit in self.damage_log if hit.tick >= tick]
+
     def recent_history(self, count: int = 8) -> list[str]:
         """The last `count` lines of the actor's own action log."""
         entries = list(self.history)[-count:]
@@ -450,6 +746,21 @@ def _entity_info(entity: pb.Entity, tick: int) -> EntityInfo:
         alive=entity.alive,
         inventory=inventory_to_dict(entity.inventory),
         last_seen=tick,
+        fatigue=entity.fatigue,
+        max_fatigue=entity.max_fatigue or items.MAX_FATIGUE,
+        asleep=entity.asleep,
+    )
+
+
+def _world_clock(clock: pb.WorldClock) -> WorldClock:
+    """The observation's clock; a world that sends none leaves the defaults."""
+    if clock.day_length <= 0:
+        return WorldClock()
+    return WorldClock(
+        day=clock.day,
+        tick_of_day=clock.tick_of_day,
+        day_length=clock.day_length,
+        night=clock.night,
     )
 
 

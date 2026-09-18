@@ -5,6 +5,7 @@ import type {
   InterpolatedEntity,
   TrackedObject,
   UtteranceEvent,
+  WorldClock,
 } from '../network';
 import type { SpriteIndex } from '../sprites';
 import { getSpriteFrame } from '../sprites';
@@ -12,6 +13,7 @@ import { ChunkManager, ViewportTracker } from '../terrain';
 import { INSPECTABLE_TYPES, ObjectPanel, OverlayUI, ReplayBar } from '../ui';
 import type { DeepLinkParams, DeepLinkState } from '../DeepLink';
 import { buildQuery, buildUrl, parseDeepLink, resolveWsUrl } from '../DeepLink';
+import { CONVERSATION_TYPE, parseConversationParticipants } from '../conversation';
 
 const TILE_SIZE = 16;
 const SCALE = 3; // Scale up for visibility (16 * 3 = 48px per tile)
@@ -71,7 +73,51 @@ const OBJECT_SPRITE_MAP: Record<string, string> = {
   chest: 'chest-closed',
   message_board: 'message-board',
   item_pile: 'item-pile',
+  // Natural building materials (docs/08_building.md).
+  reeds: 'reeds',
+  clay_deposit: 'clay-deposit',
+  // Ore veins (docs/10_metal_and_sleep.md, section 2).
+  copper_vein: 'copper-vein',
+  iron_vein: 'iron-vein',
+  // Ground layer.
+  road: 'road',
+  wood_floor: 'wood-floor',
+  stone_floor: 'stone-floor',
+  // Structure layer.
+  wood_wall: 'wood-wall',
+  stone_wall: 'stone-wall',
+  door: 'door',
+  bed: 'bed',
+  chair: 'chair',
+  table: 'table',
+  workshop_table: 'workshop-table',
+  // Crafting stations (docs/10_metal_and_sleep.md, section 1).
+  furnace: 'furnace',
+  anvil: 'anvil',
 };
+
+/**
+ * Object types that lie on the ground layer: a tile may hold one of these plus
+ * one structure-layer object, so they draw underneath everything else
+ * (docs/08_building.md, "Layers and placement").
+ */
+const GROUND_LAYER_TYPES = new Set(['road', 'wood_floor', 'stone_floor']);
+
+/** Draw depths: ground objects, then structures, then entities. */
+const GROUND_OBJECT_DEPTH = 4;
+const STRUCTURE_OBJECT_DEPTH = 5;
+
+/** Draw depths for the conversation marker and its lines to participants. */
+const CONVERSATION_LINE_DEPTH = 6;
+const CONVERSATION_MARKER_DEPTH = 7;
+
+/** Radius (px) of the conversation marker drawn on its anchor tile. */
+const CONVERSATION_MARKER_RADIUS = 10;
+const CONVERSATION_LINE_COLOR = 0x9aa0c0;
+const CONVERSATION_SPEAKER_COLOR = 0xffe066;
+
+/** Utterance channels rendered as speech bubbles (`local`, `shout`, `conversation`). */
+const SPEECH_BUBBLE_CHANNELS = new Set(['local', 'shout', 'conversation']);
 
 // Bush sprites are special - they have state-dependent sprites
 const BUSH_SPRITE_FULL = 'berry-bush-full';
@@ -81,7 +127,30 @@ const BAR_WIDTH = TILE_SIZE * SCALE - 8;
 const HEALTH_BAR_HEIGHT = 4;
 const HUNGER_BAR_HEIGHT = 2;
 const SPEECH_BUBBLE_MS = 3000;
+/** How long each step of the thinking-bubble dot animation lasts. */
+const THOUGHT_DOT_MS = 500;
 const DAMAGE_FLASH_MS = 350;
+
+/**
+ * Day/night tint (docs/10_metal_and_sleep.md, sections 3 and 4). The overlay is
+ * a screen-space rectangle above the world but below the HUD text (depth 100)
+ * and below the HTML overlay entirely, so only the map darkens. Everything is
+ * derived from the latest tick's clock, never accumulated, so a replay seek
+ * lands on exactly the right shade.
+ */
+const NIGHT_OVERLAY_DEPTH = 50;
+const NIGHT_TINT_COLOR = 0x0a1436;
+const NIGHT_TINT_ALPHA = 0.55;
+/** Daytime is the first two thirds of a day (`NIGHT_START_FRACTION`). */
+const NIGHT_START_FRACTION = 2 / 3;
+/** Dusk ramps over the last tenth of the daytime. */
+const DUSK_FRACTION = 0.1;
+/** Dawn ramps over the first tenth of the whole day. */
+const DAWN_FRACTION = 0.1;
+
+/** Marker drawn above a sleeping entity, red once it has collapsed. */
+const SLEEP_MARKER_COLOR = '#cfe3ff';
+const COLLAPSE_MARKER_COLOR = '#ff6b6b';
 
 /** How often the address bar is rewritten (about 4 Hz). */
 const URL_SYNC_MS = 250;
@@ -93,6 +162,38 @@ function hashToActorSprite(entityId: string): string {
     hash = (hash * 31 + entityId.charCodeAt(i)) >>> 0;
   }
   return ACTOR_SPRITES[hash % ACTOR_SPRITES.length];
+}
+
+/**
+ * Tint strength for a moment in the day: 0 in broad daylight, full at night,
+ * with a dusk ramp at the end of the daytime and a dawn ramp at the start of
+ * the day. Pure function of the clock, so seeking is exact.
+ */
+export function nightTintAlpha(clock: WorldClock): number {
+  const dayLength = clock.day_length;
+  if (dayLength <= 0) return clock.night ? NIGHT_TINT_ALPHA : 0;
+
+  const t = Math.max(0, Math.min(dayLength, clock.tick_of_day));
+  const dayEnd = dayLength * NIGHT_START_FRACTION;
+  if (t >= dayEnd) return NIGHT_TINT_ALPHA;
+
+  const dawnEnd = dayLength * DAWN_FRACTION;
+  if (t < dawnEnd) {
+    return NIGHT_TINT_ALPHA * (1 - t / dawnEnd);
+  }
+
+  const duskStart = dayEnd * (1 - DUSK_FRACTION);
+  if (t >= duskStart) {
+    return NIGHT_TINT_ALPHA * ((t - duskStart) / (dayEnd - duskStart));
+  }
+  return 0;
+}
+
+/** `day 2 · 143/300 · night`, for the overlay clock readout. */
+export function formatClock(clock: WorldClock): string {
+  return `day ${clock.day} · ${clock.tick_of_day}/${clock.day_length} · ${
+    clock.night ? 'night' : 'day'
+  }`;
 }
 
 function spriteKeyForEntity(entity: InterpolatedEntity): string {
@@ -116,9 +217,19 @@ export class GameScene extends Phaser.Scene {
   private entitySprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private objectSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private speechBubbles: Map<string, Phaser.GameObjects.Text> = new Map();
+  /** Small "..." bubbles over agents whose planner is thinking. */
+  private thoughtBubbles: Map<string, Phaser.GameObjects.Text> = new Map();
   private damageFlashUntil: Map<string, number> = new Map();
+  /** "z" markers above sleeping entities, keyed by entity id. */
+  private sleepMarkers: Map<string, Phaser.GameObjects.Text> = new Map();
+  /** Screen-space day/night tint over the map. */
+  private nightOverlay?: Phaser.GameObjects.Rectangle;
   private connectionText?: Phaser.GameObjects.Text;
   private statusBars?: Phaser.GameObjects.Graphics;
+  /** Marker on each conversation's anchor tile, keyed by object id. */
+  private conversationMarkers: Map<string, Phaser.GameObjects.Graphics> = new Map();
+  /** One shared graphics object for the anchor-to-participant lines, redrawn every frame. */
+  private conversationLines?: Phaser.GameObjects.Graphics;
 
   // Chunk-based terrain
   private chunkManager?: ChunkManager;
@@ -200,6 +311,17 @@ export class GameScene extends Phaser.Scene {
     // Graphics layer for health/hunger bars and the selection ring
     this.statusBars = this.add.graphics();
     this.statusBars.setDepth(15);
+
+    // Day/night tint: screen-space, above the world, below the HUD text
+    this.nightOverlay = this.add
+      .rectangle(0, 0, 10, 10, NIGHT_TINT_COLOR, 0)
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(NIGHT_OVERLAY_DEPTH);
+
+    // Graphics layer for conversation anchor-to-participant lines
+    this.conversationLines = this.add.graphics();
+    this.conversationLines.setDepth(CONVERSATION_LINE_DEPTH);
 
     // Setup camera dev tools
     this.setupCameraControls();
@@ -445,6 +567,23 @@ export class GameScene extends Phaser.Scene {
 
     // Handle object changes
     this.worldState.onObjectChange((action, obj) => {
+      if (obj.objectType === CONVERSATION_TYPE) {
+        // Conversations have no sprite: a marker plus lines to participants,
+        // drawn with Phaser graphics (see createConversationMarker). `updated`
+        // needs no extra work here: the lines are redrawn every frame from
+        // the latest object state in `update()`.
+        if (action === 'added') {
+          this.createConversationMarker(obj);
+          if (this.pendingObjectId && obj.objectId === this.pendingObjectId) {
+            this.pendingObjectId = '';
+            this.selectObject(obj.objectId);
+          }
+        } else if (action === 'removed') {
+          this.removeConversationMarker(obj.objectId);
+        }
+        return;
+      }
+
       if (action === 'added') {
         this.createObjectSprite(obj);
         if (this.pendingObjectId && obj.objectId === this.pendingObjectId) {
@@ -633,12 +772,16 @@ export class GameScene extends Phaser.Scene {
     }
     this.speechBubbles.get(entityId)?.destroy();
     this.speechBubbles.delete(entityId);
+    this.thoughtBubbles.get(entityId)?.destroy();
+    this.thoughtBubbles.delete(entityId);
+    this.sleepMarkers.get(entityId)?.destroy();
+    this.sleepMarkers.delete(entityId);
     this.damageFlashUntil.delete(entityId);
   }
 
-  /** Show a `local` utterance above the speaker for a few seconds. */
+  /** Show a spoken (`local`, `shout` or `conversation`) utterance above the speaker for a few seconds. */
   private showSpeechBubble(utterance: UtteranceEvent): void {
-    if (utterance.channel !== 'local') return;
+    if (!SPEECH_BUBBLE_CHANNELS.has(utterance.channel)) return;
 
     const existing = this.speechBubbles.get(utterance.speaker_id);
     if (existing) {
@@ -666,6 +809,39 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  /**
+   * Show an animated "..." bubble while the agent's planner is thinking
+   * (agent_status mode `planning`), and hide it otherwise.
+   */
+  private updateThoughtBubble(entityId: string, x: number, y: number, allowed: boolean): void {
+    const thinking =
+      allowed && this.worldState.getAgentStatus(entityId)?.mode === 'planning';
+    let bubble = this.thoughtBubbles.get(entityId);
+    if (!thinking) {
+      bubble?.setVisible(false);
+      return;
+    }
+    if (!bubble) {
+      bubble = this.add.text(0, 0, '', {
+        fontFamily: 'monospace',
+        fontSize: '12px',
+        fontStyle: 'bold',
+        color: '#333333',
+        backgroundColor: '#ffffffdd',
+        padding: { x: 4, y: 0 },
+      });
+      bubble.setOrigin(0, 1);
+      bubble.setDepth(29);
+      this.thoughtBubbles.set(entityId, bubble);
+    }
+    // One to three dots, stepping twice a second; fixed width so it does not jitter.
+    const dots = 1 + (Math.floor(this.time.now / THOUGHT_DOT_MS) % 3);
+    bubble.setText('.'.repeat(dots).padEnd(3, ' '));
+    bubble.setVisible(true);
+    bubble.x = x + (TILE_SIZE * SCALE) / 4;
+    bubble.y = y - (TILE_SIZE * SCALE) / 2 - 2;
+  }
+
   private createObjectSprite(obj: TrackedObject): void {
     const posX = obj.position.x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
     const posY = obj.position.y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
@@ -690,7 +866,9 @@ export class GameScene extends Phaser.Scene {
 
     const sprite = this.add.sprite(posX, posY, spriteData.textureKey, spriteData.frame);
     sprite.setScale(SCALE);
-    sprite.setDepth(5); // Between tiles and entities
+    sprite.setDepth(
+      GROUND_LAYER_TYPES.has(obj.objectType) ? GROUND_OBJECT_DEPTH : STRUCTURE_OBJECT_DEPTH
+    );
 
     const animKey = `${spriteKey}-idle`;
     if (this.anims.exists(animKey)) {
@@ -704,6 +882,85 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.objectSprites.set(obj.objectId, sprite);
+  }
+
+  /**
+   * Draw the marker for a conversation object on its anchor tile. There is no
+   * sprite for this in the tileset, so it is drawn with Phaser graphics: a
+   * small speech-bubble shape, clickable to open the object inspector.
+   */
+  private createConversationMarker(obj: TrackedObject): void {
+    this.conversationMarkers.get(obj.objectId)?.destroy();
+
+    const posX = obj.position.x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+    const posY = obj.position.y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+
+    const marker = this.add.graphics();
+    marker.setDepth(CONVERSATION_MARKER_DEPTH);
+    marker.fillStyle(0xffe066, 0.9);
+    marker.lineStyle(2, 0x333333, 1);
+    marker.fillCircle(0, 0, CONVERSATION_MARKER_RADIUS);
+    marker.strokeCircle(0, 0, CONVERSATION_MARKER_RADIUS);
+    marker.fillTriangle(
+      -4,
+      CONVERSATION_MARKER_RADIUS - 2,
+      4,
+      CONVERSATION_MARKER_RADIUS - 2,
+      0,
+      CONVERSATION_MARKER_RADIUS + 6
+    );
+    marker.setPosition(posX, posY);
+    marker.setInteractive(
+      new Phaser.Geom.Circle(0, 0, CONVERSATION_MARKER_RADIUS),
+      Phaser.Geom.Circle.Contains
+    );
+    marker.on('pointerdown', () => this.selectObject(obj.objectId));
+
+    this.conversationMarkers.set(obj.objectId, marker);
+  }
+
+  private removeConversationMarker(objectId: string): void {
+    this.conversationMarkers.get(objectId)?.destroy();
+    this.conversationMarkers.delete(objectId);
+  }
+
+  /**
+   * Redraw the lines from every live conversation's anchor to each current
+   * participant's rendered position, highlighting the current speaker's line.
+   * Runs every frame since participants move; state (participants, speaker)
+   * comes straight from the latest tracked object.
+   */
+  private updateConversationLines(): void {
+    const g = this.conversationLines;
+    if (!g) return;
+    g.clear();
+
+    for (const obj of this.worldState.getObjects()) {
+      if (obj.objectType !== CONVERSATION_TYPE) continue;
+
+      const anchorX = obj.position.x * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+      const anchorY = obj.position.y * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+      const speaker = obj.state.speaker ?? '';
+
+      for (const participantId of parseConversationParticipants(obj.state.participants)) {
+        const entity = this.worldState.getEntity(participantId);
+        if (!entity || !entity.alive) continue;
+
+        const ex = entity.currentX * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+        const ey = entity.currentY * TILE_SIZE * SCALE + (TILE_SIZE * SCALE) / 2;
+        const isSpeaker = participantId !== '' && participantId === speaker;
+
+        g.lineStyle(
+          isSpeaker ? 3 : 1,
+          isSpeaker ? CONVERSATION_SPEAKER_COLOR : CONVERSATION_LINE_COLOR,
+          isSpeaker ? 0.95 : 0.5
+        );
+        g.beginPath();
+        g.moveTo(anchorX, anchorY);
+        g.lineTo(ex, ey);
+        g.strokePath();
+      }
+    }
   }
 
   private objectSpriteKey(obj: TrackedObject): string | null {
@@ -915,11 +1172,20 @@ export class GameScene extends Phaser.Scene {
         bubble.x = x;
         bubble.y = y - (TILE_SIZE * SCALE) / 2 - 14;
       }
+      // Speech wins the space above the head; the thought bubble yields to it.
+      this.updateThoughtBubble(entity.entityId, x, y, entity.alive && !bubble);
+      this.updateSleepMarker(entity, x, y);
 
       if (entity.alive) {
         this.drawEntityBars(entity, x, y, entity.entityId === selectedId);
       }
     }
+
+    // Redraw conversation anchor-to-participant lines
+    this.updateConversationLines();
+
+    // Day/night tint from the latest tick's clock
+    this.updateNightOverlay();
 
     // Update viewport tracker (requests new chunks when camera moves)
     this.viewportTracker?.update();
@@ -976,6 +1242,62 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
+   * Resize and re-tint the day/night overlay. The rectangle has no scroll
+   * factor, so it is positioned in screen space and enlarged by the camera
+   * zoom (which scales screen-space objects about the camera centre).
+   */
+  private updateNightOverlay(): void {
+    const overlay = this.nightOverlay;
+    if (!overlay) return;
+
+    const clock = this.worldState.getClock();
+    if (!clock) {
+      overlay.setAlpha(0);
+      return;
+    }
+
+    const cam = this.cameras.main;
+    const zoom = cam.zoom > 0 ? cam.zoom : 1;
+    overlay.setPosition(cam.width / 2, cam.height / 2);
+    overlay.setSize((cam.width / zoom) * 1.1, (cam.height / zoom) * 1.1);
+    overlay.setAlpha(nightTintAlpha(clock));
+  }
+
+  /**
+   * Show a small "z" above a sleeping entity: red once it has collapsed from
+   * exhaustion (asleep at full fatigue, docs/10_metal_and_sleep.md).
+   */
+  private updateSleepMarker(entity: InterpolatedEntity, x: number, y: number): void {
+    const asleep = entity.asleep && entity.alive;
+    let marker = this.sleepMarkers.get(entity.entityId);
+
+    if (!asleep) {
+      marker?.setVisible(false);
+      return;
+    }
+
+    if (!marker) {
+      marker = this.add.text(0, 0, 'z', {
+        fontFamily: 'monospace',
+        fontSize: '14px',
+        fontStyle: 'bold',
+        color: SLEEP_MARKER_COLOR,
+        backgroundColor: '#00000099',
+        padding: { x: 3, y: 0 },
+      });
+      marker.setOrigin(0.5, 1);
+      marker.setDepth(28);
+      this.sleepMarkers.set(entity.entityId, marker);
+    }
+
+    const collapsed = entity.maxFatigue > 0 && entity.fatigue >= entity.maxFatigue;
+    marker.setColor(collapsed ? COLLAPSE_MARKER_COLOR : SLEEP_MARKER_COLOR);
+    marker.setVisible(true);
+    marker.x = x - (TILE_SIZE * SCALE) / 3;
+    marker.y = y - (TILE_SIZE * SCALE) / 2 - 2;
+  }
+
+  /**
    * Draw the health bar (and, for players, the thin hunger bar) above an
    * entity, plus a selection outline for the currently selected one.
    */
@@ -1029,5 +1351,14 @@ export class GameScene extends Phaser.Scene {
     if (this.chunkManager) {
       this.chunkManager.clear();
     }
+    // Cleanup conversation markers (the shared lines graphics is destroyed with the scene)
+    for (const marker of this.conversationMarkers.values()) {
+      marker.destroy();
+    }
+    this.conversationMarkers.clear();
+    for (const marker of this.sleepMarkers.values()) {
+      marker.destroy();
+    }
+    this.sleepMarkers.clear();
   }
 }

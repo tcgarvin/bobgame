@@ -17,6 +17,7 @@ from ..types import Position
 from ..viewer_payload import (
     action_payload,
     entity_state,
+    clock_payload,
     entity_updates,
     move_payload,
     object_change_payload,
@@ -253,6 +254,7 @@ class ViewerWebSocketService:
         return {
             "type": "snapshot",
             "tick_id": self.world.tick,
+            "clock": clock_payload(self.world.clock),
             "world_size": {"width": self.world.width, "height": self.world.height},
             "chunk_size": CHUNK_SIZE,
             "tick_duration_ms": self.tick_config.tick_duration_ms,
@@ -315,6 +317,7 @@ class ViewerWebSocketService:
         event = {
             "type": "tick_completed",
             "tick_id": result.tick_id,
+            "clock": clock_payload(self.world.clock),
             "moves": moves,
             "object_changes": object_changes,
             "actions_processed": total_actions,

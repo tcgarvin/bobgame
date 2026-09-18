@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import ndimage
 
 from ..state import World, WorldObject
 from ..terrain_types import FloorType
@@ -39,10 +40,14 @@ from .island import (
     enforce_border_ocean,
 )
 from .noise import ridged_multifractal
-from .objects import ObjectType, PlacedObject, place_objects
+from .objects import ObjectType, PlacedObject, PlacementFields, place_objects
 from .persistence import load_map, save_map
 
 logger = logging.getLogger(__name__)
+
+MOUNTAIN_FLOOR_VALUE = 5
+# Distance reported when the thing measured to does not exist on the map.
+_FAR = 1.0e6
 
 
 class GenerationResult:
@@ -164,15 +169,18 @@ def generate_terrain(config: TerrainConfig) -> GenerationResult:
         width, height, config.seed, config.objects.forest
     )
 
-    objects = place_objects(
-        floor,
-        forest_density,
-        ridged,
-        slope,
-        dist_to_water,
-        rng,
-        config.objects,
+    ocean, lakes = split_ocean_and_lakes(land_mask)
+    placement_fields = PlacementFields(
+        floor=floor,
+        forest_density=forest_density,
+        ridged_noise=ridged,
+        slope=slope,
+        dist_to_water=dist_to_water,
+        dist_to_coast=_distance_to(ocean),
+        dist_to_fresh=_distance_to(lakes | river_mask | ford_mask),
+        dist_to_mountain=_distance_to(floor == MOUNTAIN_FLOOR_VALUE),
     )
+    objects = place_objects(placement_fields, rng, config.seed, config.objects)
 
     logger.info(f"Placed {len(objects)} objects")
 
@@ -199,6 +207,32 @@ def generate_terrain(config: TerrainConfig) -> GenerationResult:
         moisture=moisture,
         rivers=rivers,
     )
+
+
+def split_ocean_and_lakes(
+    land_mask: NDArray[np.bool_],
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+    """Split open water into the ocean (touches the map border) and lakes.
+
+    Returns:
+        (ocean_mask, lake_mask); together they equal ~land_mask.
+    """
+    water = ~land_mask
+    labels, _ = ndimage.label(water)
+    border = np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]])
+    ocean_labels = np.unique(border[border > 0])
+    ocean = np.isin(labels, ocean_labels) & water
+    return ocean, water & ~ocean
+
+
+def _distance_to(mask: NDArray[np.bool_]) -> NDArray[np.float32]:
+    """Euclidean distance from every tile to the nearest True tile in `mask`.
+
+    An empty mask yields a field of "very far" so callers need no special case.
+    """
+    if not mask.any():
+        return np.full(mask.shape, _FAR, dtype=np.float32)
+    return ndimage.distance_transform_edt(~mask).astype(np.float32)
 
 
 def generate_world(config: TerrainConfig) -> tuple[World, list[WorldObject]]:
@@ -275,7 +309,7 @@ def objects_to_world_objects(objects: list[PlacedObject]) -> list[WorldObject]:
                 )
             )
         else:
-            # Rock variants
+            # Rocks, reeds, clay: the object type is the enum value, no state.
             world_objects.append(
                 WorldObject(
                     object_id=obj.object_id,

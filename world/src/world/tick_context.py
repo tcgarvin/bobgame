@@ -15,6 +15,7 @@ from .state import World
 from .types import (
     AttackIntent,
     CollectIntent,
+    ConverseIntent,
     CraftIntent,
     DepositIntent,
     Direction,
@@ -23,11 +24,15 @@ from .types import (
     EntityIntent,
     EquipIntent,
     ExtractIntent,
+    GiveIntent,
     MoveIntent,
     PickupIntent,
     PlaceIntent,
+    RestIntent,
     SayIntent,
+    SleepIntent,
     WaitIntent,
+    WakeIntent,
     WithdrawIntent,
     WriteNoteIntent,
 )
@@ -51,7 +56,12 @@ INTENT_ACTION_TYPES: Mapping[type[EntityIntent], str] = {
     EquipIntent: "equip",
     PlaceIntent: "place",
     WriteNoteIntent: "write_note",
+    RestIntent: "rest",
     SayIntent: "say",
+    ConverseIntent: "converse",
+    GiveIntent: "give",
+    SleepIntent: "sleep",
+    WakeIntent: "wake",
     WaitIntent: "wait",
 }
 
@@ -60,6 +70,7 @@ REASON_ACCEPTED = ""
 REASON_LATE = "late_tick"
 REASON_DUPLICATE = "duplicate"
 REASON_DEAD = "dead"
+REASON_ASLEEP = "asleep"
 REASON_UNKNOWN = "unknown_action"
 
 
@@ -130,6 +141,12 @@ class TickContext:
                     "intent_rejected_dead", entity_id=entity_id, tick_id=self.tick_id
                 )
                 return False, REASON_DEAD
+            # A sleeper only gets to wake up (docs/10_metal_and_sleep.md).
+            if entity is not None and entity.asleep and type(intent) is not WakeIntent:
+                logger.debug(
+                    "intent_rejected_asleep", entity_id=entity_id, tick_id=self.tick_id
+                )
+                return False, REASON_ASLEEP
 
         self.intents[entity_id] = intent
         return True, REASON_ACCEPTED
@@ -217,10 +234,40 @@ class TickContext:
         """Submit a write_note intent. Returns True if accepted."""
         return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
 
+    def submit_rest_intent(
+        self, intent: RestIntent, enforce_deadline: bool = True
+    ) -> bool:
+        """Submit a rest intent. Returns True if accepted."""
+        return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
+
     def submit_say_intent(
         self, intent: SayIntent, enforce_deadline: bool = True
     ) -> bool:
         """Submit a say intent. Returns True if accepted."""
+        return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
+
+    def submit_converse_intent(
+        self, intent: ConverseIntent, enforce_deadline: bool = True
+    ) -> bool:
+        """Submit a converse intent. Returns True if accepted."""
+        return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
+
+    def submit_give_intent(
+        self, intent: GiveIntent, enforce_deadline: bool = True
+    ) -> bool:
+        """Submit a give intent. Returns True if accepted."""
+        return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
+
+    def submit_sleep_intent(
+        self, intent: SleepIntent, enforce_deadline: bool = True
+    ) -> bool:
+        """Submit a sleep intent. Returns True if accepted."""
+        return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
+
+    def submit_wake_intent(
+        self, intent: WakeIntent, enforce_deadline: bool = True
+    ) -> bool:
+        """Submit a wake intent. Returns True if accepted."""
         return self.submit_intent(intent.entity_id, intent, enforce_deadline)[0]
 
     def submit_wait_intent(

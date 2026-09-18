@@ -62,9 +62,43 @@ function positionAt(entityId, tick) {
   }
 }
 
+/**
+ * The world clock (docs/10_metal_and_sleep.md, section 3). A short day here so
+ * a 200-tick run runs through several dusks and nights.
+ */
+const DAY_LENGTH = 60;
+const NIGHT_START = Math.floor((DAY_LENGTH * 2) / 3);
+
+function clockAt(tick) {
+  const tickOfDay = tick % DAY_LENGTH;
+  return {
+    day: Math.floor(tick / DAY_LENGTH),
+    tick_of_day: tickOfDay,
+    day_length: DAY_LENGTH,
+    night: tickOfDay >= NIGHT_START,
+  };
+}
+
+/**
+ * Fatigue and sleep: everyone tires through the day, cleo sleeps at night and
+ * bram collapses from tick 40 (asleep at full fatigue: a red marker).
+ */
+function fatigueOf(entityId, tick) {
+  const tickOfDay = tick % DAY_LENGTH;
+  const night = tickOfDay >= NIGHT_START;
+  if (entityId === 'bram') {
+    return { fatigue: 100, asleep: tick >= 40 };
+  }
+  const fatigue = Math.min(99, 20 + tickOfDay);
+  return { fatigue, asleep: night && entityId === 'cleo' };
+}
+
 function entityState(entityId, tick) {
   const isWolf = entityId.startsWith('wolf');
   const damaged = entityId === 'ada' && tick >= 120 ? 6 : 0;
+  const { fatigue, asleep } = isWolf
+    ? { fatigue: 0, asleep: false }
+    : fatigueOf(entityId, tick);
   return {
     entity_id: entityId,
     position: positionAt(entityId, tick),
@@ -76,6 +110,9 @@ function entityState(entityId, tick) {
     max_hunger: 100,
     wielded: entityId === 'ada' ? 'axe' : '',
     alive: true,
+    fatigue: isWolf ? 0 : fatigue,
+    max_fatigue: 100,
+    asleep: isWolf ? false : asleep,
     inventory: isWolf ? {} : { wood: tick % 7, berry: Math.floor(tick / 30) },
   };
 }
@@ -128,7 +165,72 @@ function objectsAt(tick) {
       object_type: 'tree',
       state: {},
     },
+    ...settlementObjects(tick),
   ];
+}
+
+/**
+ * A little built settlement so the building sprites and the two object layers
+ * (a floor under a bed) can be seen without a real recording.
+ */
+function settlementObjects(tick) {
+  const objects = [];
+  const push = (type, x, y, state = {}) =>
+    objects.push({
+      object_id: `${type}_${x}_${y}`,
+      position: { x, y },
+      object_type: type,
+      state: { owner: 'ada', ...state },
+    });
+
+  // A hut: wood walls round the outside, a door in the south wall.
+  for (let x = 20; x <= 24; x++) {
+    for (let y = 8; y <= 11; y++) {
+      const onEdge = x === 20 || x === 24 || y === 8 || y === 11;
+      if (!onEdge) continue;
+      if (x === 22 && y === 11) push('door', x, y);
+      else push('wood_wall', x, y);
+    }
+  }
+  // Wooden floor inside, with furniture standing on it.
+  for (let x = 21; x <= 23; x++) {
+    for (let y = 9; y <= 10; y++) push('wood_floor', x, y);
+  }
+  push('bed', 21, 9);
+  push('table', 22, 9);
+  push('chair', 22, 10);
+
+  // A stone workshop next door; its table is being taken apart.
+  for (let x = 26; x <= 27; x++) {
+    for (let y = 9; y <= 10; y++) push('stone_floor', x, y);
+  }
+  push('stone_wall', 26, 8);
+  push('stone_wall', 27, 8);
+  push('workshop_table', 27, 9, { progress: String(tick % 3) });
+
+  // A road out of the front door, and raw material by the water.
+  for (let x = 18; x <= 24; x++) push('road', x, 12);
+  // Stations with craft progress, and ore veins up the hill.
+  push('furnace', 26, 10, { [`craft:ada`]: `copper_ingot:${tick % 3}` });
+  push('anvil', 27, 10, { [`craft:bram`]: `iron_sword:${1 + (tick % 3)}` });
+  objects.push({
+    object_id: 'copper_vein_32_6',
+    position: { x: 32, y: 6 },
+    object_type: 'copper_vein',
+    state: { remaining: String(4 - (tick % 4)) },
+  });
+  objects.push({
+    object_id: 'iron_vein_33_6',
+    position: { x: 33, y: 6 },
+    object_type: 'iron_vein',
+    state: { remaining: '4' },
+  });
+
+  push('reeds', 16, 16, { remaining: '3' });
+  push('reeds', 17, 16, { remaining: '3' });
+  push('clay_deposit', 16, 17, { remaining: String(6 - (tick % 7)) });
+
+  return objects;
 }
 
 /** Actions recorded at a tick. */
@@ -220,6 +322,7 @@ function tickCompleted(tick) {
     utterances: utterancesAt(tick),
     objects_added: [],
     objects_removed: [],
+    clock: clockAt(tick),
   };
 }
 
@@ -549,6 +652,7 @@ class Session {
       tick_duration_ms: TICK_DURATION_MS,
       settlement: SETTLEMENT,
       run_id: RUN_ID,
+      clock: clockAt(this.tick),
       replay: {
         run_id: RUN_ID,
         first_tick: FIRST_TICK,

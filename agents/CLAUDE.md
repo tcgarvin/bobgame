@@ -26,7 +26,15 @@ Available intents (defined in `proto/world.proto`):
 - `CollectIntent` - Collect from an object at current position
 - `EatIntent` - Consume items from inventory
 - `WaitIntent` - Do nothing this tick
-- `SayIntent`, `PickupIntent`, `UseIntent` - Not yet implemented
+- `SayIntent` - Speak on a channel (`local` 10 tiles, `shout` 60 tiles, `thought` viewer only)
+- `AttackIntent`, `ExtractIntent` - Fight, and chop/mine/dismantle
+- `CraftIntent`, `EquipIntent`, `PlaceIntent` - Make, wield and put down items
+- `PickupIntent`, `DropIntent`, `DepositIntent`, `WithdrawIntent` - Piles and chests
+- `WriteNoteIntent` - Write a message board slot
+- `RestIntent` - Heal on a bed (see docs/08_building.md)
+- `ConverseIntent`, `GiveIntent` - Conversations and handing items over (docs/09)
+- `SleepIntent`, `WakeIntent` - Sleep on a bed (`object_id`) or on the ground
+  (empty), and wake again (see docs/10_metal_and_sleep.md)
 
 ### Foraging Pattern
 
@@ -189,21 +197,25 @@ stderr; the trace files go under `<log_root>/agent-<id>/`.
 The log root is `--log-root` when it is given, else `$BOBGAME_RUN_DIR/agents`
 when that environment variable is set (`dev.sh` exports it; see
 [docs/07_replay.md](../docs/07_replay.md)), else `./logs`. Each agent process
-opens three gzip JSONL files in `<log_root>/agent-<id>/` once, writes one JSON
+opens four gzip JSONL files in `<log_root>/agent-<id>/` once, writes one JSON
 object per line, and flushes with `zlib.Z_SYNC_FLUSH` after every line, so a
 reader sees everything up to a Ctrl-C (readers must treat an `EOFError` or
 `zlib.error` on the last partial line as end of file). `stints.jsonl.gz` is the
 light one: a `stint_start` line with the whole brief, one record per tick with
 the chosen action, the full probability map, confidence, eject, danger, latency
 and the world's verdict, and a `stint_end` line carrying the end reason and the
-rendered `StintReport`. `jev_states.jsonl.gz` is the heavy one: the exact state
+rendered `StintReport`. A tick driven by code instead of Jev (the `build` tool)
+writes the same row with `"driver": "build"` and without Jev's numbers. `jev_states.jsonl.gz` is the heavy one: the exact state
 and criteria sent to Jev, one line per real call (repeats under `check_every`
 make no call and write no line; a timed-out call still wrote its state).
 `planner.jsonl.gz` holds the planner's turns: `turn_start` with the full prompt,
 `tool_call` and `tool_result` with untruncated args and results, `turn_end` with
 the reflection, tool count, duration and token usage, plus `turn_failed`,
-`tool_budget_reached` and `history_reset`. `memory.md`, the planner's persistent
-notes, sits in the same directory. A file that cannot be opened or written
+`tool_budget_spent` (the soft 30-call budget ran out and the turn ended
+normally), `tool_budget_reached` (the hard backstop fired) and `history_reset`. `conversations.jsonl.gz` holds one
+conversation per `conversation_start`/`turn`/`conversation_end` triple.
+`memory.md`, the planner's persistent notes, and `reflex.json`, the registered
+reflex brief, sit in the same directory. A file that cannot be opened or written
 complains once and then goes inert - tracing never stops the agent.
 
 `tracelog.py` owns this: `JsonlGzWriter`, the per-entity `AgentTrace` (created
@@ -216,17 +228,26 @@ once per process by `JevAgent`, closed in `run_agent`'s finally block) and
 | --- | --- |
 | `client.py` | Async wrapper over the sync gRPC stubs (stream on a thread, unary via `to_thread`), lease renewal every 10 s |
 | `geometry.py` | Direction tables, offsets, Chebyshev distance (`+y` is south) |
+| `items.py` | The agent-side mirror of `world/src/world/items.py`: recipes, item kinds, object layers, extraction yields |
+| `build.py` | Shape geometry and the `BuildExecutor` that drives the planner's `build` tool |
 | `pathfinding.py` | 8-connected A* with the world's diagonal-blocking rule; unknown tiles cost 3 |
 | `worldmodel.py` | Everything ever observed: tiles, objects, entities, own history, settlement |
 | `options.py` | The legal actions for this tick, each carrying its proto Intent |
 | `jevstate.py` | The compact JSON state (with the 17x17 ASCII map) Jev sees |
 | `jevclient.py` | The TypeSafe System One call; `JevClient` protocol for fakes |
 | `stint.py` | `Brief` -> one Jev call per tick -> Intent, plus the code rules and `StintReport` |
+| `reflex.py` | The pre-registered reflex brief: persistence, trigger, cooldown, end rule |
+| `conversation.py` | Conversation mode: the converser, the per-turn session, the report and the note |
+| `llm.py` | Model id resolution and model settings shared by the planner and the converser |
 | `tracelog.py` | The gzip JSONL trace files, the `AgentTrace` that owns them, and the log-root rules |
 | `planner.py` | The pydantic-ai agent, its tools, and the turn loop |
 | `agent.py` | The tick loop and the planner handshake |
 
-### The two modes
+### The four modes
+
+`JevAgent.mode` is `planning`, `stint`, `reflex` or `conversation`
+(docs/09_conversation_and_reflex.md section 4.1); it is reported to the viewer
+on the status channel.
 
 - **Stint**: Jev picks one action per tick from the code-enumerated options.
   The stint ends on two consecutive `eject >= 0.7`, an exhausted tick budget,
@@ -235,9 +256,165 @@ once per process by `JevAgent`, closed in `run_agent`'s finally block) and
   channel when the planner produces a new reflection) while the planner task
   thinks. Planner tools reach the tick loop through asyncio Futures, so
   `start_stint` resolves only when the stint has actually finished.
+- **Reflex**: the brief the planner registered with `set_reflex` runs as an
+  ordinary Jev stint, started by code.
+- **Conversation**: the actor holds a seat and answers on its own turn.
 
 Jev and the planner never run at the same time: during a stint the planner task
 is parked on the `start_stint` future, and during planning Jev is not called.
+
+`agent.py` is only the sequencer. It checks the reflex trigger at the very top
+of the tick (before the last tick's single-tick action is resolved, so an
+in-flight one comes back as `interrupted: reflex stint started`), then runs the
+reflex stint, then the conversation session, then the ordinary stint or
+planning path. A stint that a reflex or a join cut short is *held*: its
+`StintReport` waits in `_held_stint` until the reflex line or the conversation
+report exists, and `StintReport.append` puts them in one tool result.
+
+### Reflex (docs/09 section 4.2)
+
+`set_reflex(instruction, success_condition, max_ticks, trigger_distance,
+notes, shouts)` stores a `ReflexBrief` on the agent and in
+`<log_root>/agent-<id>/reflex.json`, reloaded at start; `clear_reflex` removes
+it. There is no default. `ReflexWatch` fires it when a living wolf is within
+`trigger_distance` (1-8) or an attacker damaged the actor on the tick just
+observed; the distance trigger is ignored for `REFLEX_COOLDOWN_TICKS` (10)
+after a reflex stint, damage is not. It runs in planning, in conversation and
+during driver stints (`build`, code-driven `travel_to`), never during an
+ordinary Jev stint. The stint ends when no wolf has been in view for
+`REFLEX_CLEAR_TICKS` (3) consecutive ticks (`threat_gone`) or on the usual
+stint endings, and the planner is told in one line:
+`[reflex ran ticks A-B: ended because R; health X -> Y]`, shown both in the
+next tool result (via `BudgetedToolset`) and in the next turn prompt. The
+brief itself is in every turn prompt. `stint_start` lines carry `kind`
+(`stint` or `reflex`) and, for a reflex, `trigger` and `interrupted`.
+
+### Conversations (docs/09 sections 2, 3 and 4.3)
+
+A conversation is a world object of type `conversation` on an anchor tile;
+`worldmodel.py` parses it into `ConversationInfo` and `my_conversation()`
+returns the seat this actor holds. Utterances carrying a `conversation_id` are
+kept per conversation (`heard_conversation_lines`), because the object only
+keeps the last twelve lines; the object's transcript is the fallback for lines
+said before the actor joined.
+
+`ConversationSession` owns the body while the seat lasts: `wait` every tick
+except on the actor's own turn, and on its turn one call to the **converser**
+(`ModelConverser`: two pydantic-ai agents on the planner's model, structured
+`ConverserMove` output, no tools, a system prompt with the setting and the
+physics of section 2 and nothing else). The call runs as a background task, so
+the tick loop never waits on it; it is timed from inside (`run_converser`), and
+every tick - including ticks that are not this actor's turn - a call whose turn
+the world has moved past is traced `stale` and dropped, cancelled if it is
+still running. `give` does not use up the turn, and the session records what
+the world made of each of its own moves (`MoveOutcome`, from the digest's
+`own_actions`) so the next prompt shows "Your moves so far this turn" with the
+failure reason verbatim; a `give` with no receiver or no kind is refused in
+code without spending a tick. When the seat
+is gone the session makes one more model call - what to keep - and appends it
+to `memory.md` as `- [conversation, tick N, with a, b] <text>`, then returns a
+`ConversationReport`. Trace: `conversations.jsonl.gz` with `conversation_start`,
+`turn` and `conversation_end`.
+
+Planner tools: `open_conversation(direction, opening_line)` and
+`join_conversation(conversation_id)` (a code-owned `ApproachDriver` walk to a
+free tile beside the anchor, then the join) both block until the conversation
+is over and return the report; `give(entity_id, kind, amount)` is single-tick;
+`look` lists the conversations in view. Jev's option is
+`join_conversation:<id>` - the join intent next to the anchor, otherwise a
+code-owned walk like the heard-shout option. A join during a stint ends it with
+reason `joined_conversation` and `start_stint` returns after the conversation
+with the report appended.
+
+### Stations, metal and sleep (docs/10_metal_and_sleep.md)
+
+`items.py` also mirrors the deeper tree: `Recipe` carries `station`
+(`""`, `workshop_table`, `furnace` or `anvil`) and `work` (craft actions),
+`EXTRACT_TOOLS`/`EXTRACT_WORK_BY_TOOL` give the tool tiers,
+`EXTRACT_REQUIRED_TOOLS` gates the two veins, and the fatigue, day and
+sleep-recovery numbers live beside them. `recipe_table_text()` renders the
+station and the action count, and the planner prompt is generated from it.
+
+`options.py` offers a craft only when the recipe's station is on or next to the
+tile, names the work and the progress banked in the station under this actor's
+name, refuses a vein the wielded tool cannot bite, and offers `sleep:<bed>`,
+`sleep:ground` (whenever fatigue > 0) and `wake` (only while asleep).
+`jevstate.py` adds `self.fatigue`, `self.asleep`, the `clock` block and the
+fatigue physics line.
+
+**The asleep wait**: while `observation.self.asleep` is true `agent.py` submits
+nothing, and calls neither Jev nor the planner nor the converser - the one
+exception is a `wake` the planner queued, which is the only intent the world
+accepts from a sleeper. The reflex cannot fire while asleep; the tick the actor
+wakes is an ordinary tick, so a bite that woke it triggers the reflex there.
+Falling asleep and waking are written to `stints.jsonl.gz` as `sleep_start` and
+`sleep_end` (with the wake reason). The planner's `sleep` tool parks on
+`JevAgent.await_wake` until then; `craft` repeats the craft action until the
+recipe completes or an action fails.
+
+### Building (docs/08_building.md)
+
+`items.py` restates the world's contract for the agent: the full recipe table
+(inputs, output count, `station`, `work`), the ground/structure layer split, the
+building kinds, and what `reeds` and `clay_deposit` yield. It is a mirror, so a
+change in `world/src/world/items.py` has to be copied here in the same commit.
+
+What Jev may choose (`options.py`):
+
+- **craft** only when the recipe would actually succeed: the inputs are in the
+  pack and, for a station recipe, `WorldModel.station_near(kind)` finds a
+  placed station of that kind on or next to the tile. Craft options are ordered by
+  `CRAFT_PRIORITY`, drop recipes for something already carried, and are capped
+  at `CRAFT_OPTION_LIMIT`, because `MAX_OPTIONS` is 40 and the movement options
+  must survive.
+- **place**: one option per carried building item, capped at
+  `PLACE_OPTION_LIMIT`. Ground kinds (road, floors) go on the actor's own tile
+  with `DIRECTION_UNSPECIFIED`; structures go on the first free neighbour.
+- **rest**: only when wounded, fed, and standing on or next to a bed.
+- **shout:<n>**: one option per phrase in `Brief.shouts`, which the planner
+  writes in `start_stint` (at most `MAX_BRIEF_SHOUTS`, with a cooldown). Jev
+  has no shout of its own and none is tied to wolves.
+  **travel_to:shout:<speaker>** walks to where a shout came from for
+  `HEARD_SHOUT_MAX_AGE_TICKS` after hearing it, whatever it said.
+  `jevstate.py` adds a `threat` block with wolf counts and wolf physics (no
+  tactics) whenever a wolf is in view.
+- **Tools, not rules**: the planner prompt (`SETTLEMENT_NARRATIVE`) gives the
+  setting, the goal "build a civilization", the physics with numbers, and how
+  to operate Jev. It gives no strategy, etiquette or uses for the tools; those
+  are meant to emerge. Keep advice out of option descriptions and alerts too. The wolf numbers in `items.py` mirror
+  `world/wolves.py` and `world/items.py`.
+- **extract** now covers `reeds` (fiber, no tool) and `clay_deposit` (clay,
+  pickaxe).
+- **dismantle is deliberately not offered.** It is `ExtractIntent` on a placed
+  building, and Jev reads "extract" as "gather", so it would cheerfully eat the
+  town wall. Dismantling is a planner tool only.
+
+The planner's `build` tool is the deterministic one, in the spirit of
+`travel_to`: `build(kind, shape, x1, y1, x2, y2, max_ticks, skip, tiles)` where
+the shape is `line`, `rect` (outline), `rect_filled` or `tiles`, and `skip` is
+the door gap, written `"x,y; x,y"`. `make_plan` resolves the shape to an
+ordered tile list (a bad kind or shape raises `BuildPlanError`, which the tool
+turns into a `ModelRetry`), and a `BuildExecutor` runs it as a **driven stint**:
+
+- `Stint` takes an optional `StintDriver`. With one, Jev is never called, no
+  option list is enumerated and no `jev_states` line is written; the driver's
+  `stop_reason(model)` is consulted where Jev's rules would be, and
+  `choose(model)` returns the tick's `Option`.
+- The executor walks with the ordinary path finder, standing on the tile for
+  ground kinds and next to it for structures, skipping tiles that already carry
+  that layer or are blocked by something else, and refusing any placement that
+  would shut the builder into a pocket (a capped flood fill from where it would
+  stand, so a wall ring gets closed from the outside).
+- Stop reasons: `build_done`, `build_out_of_items`, `build_blocked`,
+  `build_danger` (a wolf within `BUILD_DANGER_RADIUS`, or health below the
+  stint's `DANGER_HEALTH_FLOOR`), `build_would_seal_you_in`, plus the stint's
+  own `ticks_exhausted`, `death` and `repeated_failure`. The tool returns the
+  stint report followed by `BuildExecutor.summary()`.
+- Trace shape: driver ticks are ordinary `stints.jsonl.gz` tick rows with
+  `"driver": "build"` and an action of `build_step:<dir>` or
+  `build_place:<kind>:<x>,<y>`. They carry no `latency_ms`, `eject`, `danger`,
+  `confidence` or token count, because there was no Jev call and averaging
+  zeros would poison `tools/analyze_run.py`.
 
 ### Testing
 
@@ -247,4 +424,7 @@ uv run mypy src/agents/jev_agent
 uv run black src/agents/jev_agent tests
 ```
 
-`tests/helpers.py` builds synthetic `Observation` protos and the `FakeJevClient`.
+`tests/helpers.py` builds synthetic `Observation` protos, the `FakeJevClient`,
+the `FakeConverser` and the `converse_object`/`conversation_utterance_event`
+builders. No test makes a model call: the planner runs on pydantic-ai's
+`TestModel`/`FunctionModel` and the converser on the fake.

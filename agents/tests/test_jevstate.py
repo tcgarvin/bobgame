@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from agents.jev_agent.jevstate import MAP_SIZE, build_state, render_map
+from agents.jev_agent.jevstate import MAP_LEGEND, MAP_SIZE, build_state, render_map
 from agents.jev_agent.options import TravelState
 from agents.jev_agent.worldmodel import WorldModel
 
@@ -14,6 +14,7 @@ from helpers import (
     make_object,
     make_observation,
     make_tiles,
+    utterance_event,
 )
 
 
@@ -151,3 +152,211 @@ def test_state_stays_well_under_the_token_budget() -> None:
     )
     approximate_tokens = len(json.dumps(state)) // 4
     assert approximate_tokens < 3000
+
+
+# --- building (docs/08_building.md) ----------------------------------------
+
+
+def test_the_map_shows_the_new_objects_and_the_legend_explains_them() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object("r1", "reeds", (11, 10)),
+                make_object("c1", "clay_deposit", (12, 10)),
+                make_object("w1", "wood_wall", (10, 9)),
+                make_object("d1", "door", (9, 10)),
+                make_object("b1", "bed", (10, 11)),
+                make_object("ws1", "workshop_table", (9, 9)),
+            ],
+        )
+    )
+    rows = render_map(model).splitlines()
+    centre = len(rows) // 2
+    assert rows[centre][centre + 1] == "r"
+    assert rows[centre][centre + 2] == "y"
+    assert rows[centre - 1][centre] == "#"
+    assert rows[centre][centre - 1] == "+"
+    assert rows[centre + 1][centre] == "z"
+    assert rows[centre - 1][centre - 1] == "X"
+    for glyph in ("r reeds", "y clay", "+ door", "z bed", "X workshop table"):
+        assert glyph in MAP_LEGEND
+
+
+def test_a_structure_is_drawn_over_the_floor_it_stands_on() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object("f1", "wood_floor", (11, 10)),
+                make_object("b1", "bed", (11, 10)),
+                make_object("r1", "road", (12, 10)),
+            ],
+        )
+    )
+    rows = render_map(model).splitlines()
+    centre = len(rows) // 2
+    assert rows[centre][centre + 1] == "z"
+    assert rows[centre][centre + 2] == ","
+
+
+def test_the_state_says_whether_a_workshop_table_is_within_reach() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            objects=[make_object("ws1", "workshop_table", (11, 10))],
+        )
+    )
+    state = build_state(
+        model, instruction="craft", success_condition="a bed exists", ticks_left=4
+    )
+    assert state["self"]["at_workshop_table"] is True
+
+
+def test_reeds_report_what_they_yield() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            objects=[make_object("r1", "reeds", (11, 10))],
+        )
+    )
+    state = build_state(
+        model, instruction="gather", success_condition="6 fiber", ticks_left=4
+    )
+    entry = next(item for item in state["nearby"] if item["id"] == "r1")
+    assert entry["yields"] == "fiber"
+    assert entry["remaining"] == 3
+
+
+# --- names, threats and shouts -------------------------------------------------
+
+
+def _state(model: WorldModel) -> dict[str, object]:
+    return build_state(
+        model, instruction="Chop", success_condition="4 wood", ticks_left=10
+    )
+
+
+def test_jev_is_told_its_own_name() -> None:
+    assert _state(build_model())["self"]["name"] == "ada"  # type: ignore[index]
+
+
+def test_no_threat_block_without_a_wolf_in_view() -> None:
+    model = WorldModel("ada")
+    model.update(make_observation(1, make_entity("ada", (10, 10))))
+    assert "threat" not in _state(model)
+
+
+def test_the_threat_block_counts_allies_and_states_wolf_physics_only() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            entities=[
+                make_entity("wolf_1", (13, 10), entity_type="wolf", health=9),
+                make_entity("bram", (12, 10), wielded="sword"),
+                make_entity("cleo", (11, 12)),
+            ],
+        )
+    )
+    state = _state(model)
+    threat = state["threat"]
+    assert isinstance(threat, dict)
+    assert threat["nearest_wolf"]["id"] == "wolf_1"
+    assert threat["nearest_wolf"]["dx"] == 3
+    assert threat["nearest_wolf"]["settlers_next_to_it"] == 1
+    assert threat["settlers_within_3_of_you"] == 2
+    assert "16 health" in threat["facts"]
+    assert "Shout" not in threat["facts"] and "allies" not in threat["facts"]
+    wielded = {e["id"]: e["wielded"] for e in state["entities"]}  # type: ignore[union-attr]
+    assert wielded["bram"] == "sword"
+
+
+def test_a_heard_shout_says_where_it_came_from() -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            7,
+            make_entity("ada", (10, 10)),
+            events=[
+                utterance_event("bram", "Wolf!", (40, 4), channel="shout"),
+                utterance_event("cleo", "hello", (11, 10)),
+            ],
+        )
+    )
+    heard = _state(model)["heard"]
+    assert heard == [
+        "bram shouted from dx 30 dy -6, 0 ticks ago: Wolf!",
+        "cleo: hello",
+    ]
+
+
+# --- fatigue, sleep and the clock (docs/10_metal_and_sleep.md) --------------
+
+
+def _state_for(entity: object, tick: int = 41, **kwargs: object) -> dict:
+    """The Jev state for one entity after a single observation."""
+    model = WorldModel("ada")
+    model.update(make_observation(tick, entity, **kwargs))  # type: ignore[arg-type]
+    return build_state(model, instruction="do", success_condition="done", ticks_left=5)
+
+
+def test_the_state_reports_fatigue_as_a_number_and_a_word() -> None:
+    fresh = _state_for(make_entity("ada", (10, 10), fatigue=12))
+    assert fresh["self"]["fatigue"] == "12/100 (fresh)"
+    assert fresh["self"]["asleep"] is False
+
+    tired = _state_for(make_entity("ada", (10, 10), fatigue=75))
+    assert tired["self"]["fatigue"] == "75/100 (tired)"
+
+    spent = _state_for(make_entity("ada", (10, 10), fatigue=100, asleep=True))
+    assert spent["self"]["fatigue"] == "100/100 (exhausted)"
+    assert spent["self"]["asleep"] is True
+
+
+def test_the_state_carries_the_clock_and_the_day_physics() -> None:
+    state = _state_for(make_entity("ada", (10, 10)), tick=250)
+    assert state["clock"]["day"] == 0
+    assert state["clock"]["tick_of_day"] == "250/300"
+    assert state["clock"]["night"] is True
+    assert "300 ticks" in state["clock"]["facts"]
+
+
+def test_the_state_states_the_fatigue_physics_without_advice() -> None:
+    facts = _state_for(make_entity("ada", (10, 10)))["fatigue_facts"]
+    assert "1 every 4 ticks by day" in facts
+    assert "From 60 you are tired" in facts
+    assert "At 100 you collapse" in facts
+    assert "1 fatigue per tick" in facts
+
+
+def test_the_state_says_which_stations_are_within_reach() -> None:
+    state = _state_for(
+        make_entity("ada", (10, 10)),
+        objects=[
+            make_object("fur1", "furnace", (11, 10)),
+            make_object("anv1", "anvil", (9, 10)),
+        ],
+    )
+    assert state["self"]["at_furnace"] is True
+    assert state["self"]["at_anvil"] is True
+    assert state["self"]["at_workshop_table"] is False
+
+
+def test_veins_show_their_units_and_what_they_yield() -> None:
+    state = _state_for(
+        make_entity("ada", (10, 10)),
+        objects=[make_object("v1", "iron_vein", (11, 10))],
+    )
+    entry = next(item for item in state["nearby"] if item["id"] == "v1")
+    assert entry["yields"] == "iron_ore"
+    assert entry["remaining"] == 4
