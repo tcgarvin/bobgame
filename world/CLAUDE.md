@@ -413,7 +413,7 @@ An `ExtractIntent` aimed at a `BUILDING_KINDS` object dismantles it:
 object's `progress` state key, `ObjectRemoved` plus one item back to whoever
 lands the last blow. `RestIntent` heals `REST_HEAL` on a bed on or next to the
 entity's tile; one rester per bed per tick (smallest entity id wins) and only
-while hunger is above zero. The rest phase sits beside eat in `process_tick`.
+while food is above zero. The rest phase sits beside eat in `process_tick`.
 
 ## The Day, Fatigue and Sleep (docs/10_metal_and_sleep.md)
 
@@ -441,7 +441,7 @@ Two phases, both in `sleep.py`:
 - `process_sleep_phase` (after movement and every action phase) applies
   `WakeIntent` then `SleepIntent`. One sleeper per bed, smallest entity id
   wins, as everywhere else.
-- `process_fatigue_phase` (beside `process_hunger_phase`) accumulates fatigue
+- `process_fatigue_phase` (beside `process_food_phase`) accumulates fatigue
   for the awake, recovers it for sleepers at the bed/ground x night/day rate,
   heals bed sleepers, collapses anyone at max fatigue and wakes sleepers whose
   reason to sleep has gone.
@@ -451,7 +451,7 @@ Sleep is a *state*: `TickContext.submit_intent` refuses every intent but
 the guard for intents the world injects itself. Waking on damage reads
 `TickEvents.damage_events` in the fatigue phase rather than hooking
 `combat.apply_damage`, which keeps combat unaware of sleep and makes
-starvation damage (applied in the hunger phase, just before) behave the same.
+starvation damage (applied in the food phase, just before) behave the same.
 
 `is_tired(entity)` (fatigue >= 60) is the one predicate other modules use:
 `stats.process_health_regen` skips the tired, and extraction and combat apply

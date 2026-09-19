@@ -41,6 +41,7 @@ from .geometry import (
     direction_name,
     offset,
 )
+from .journal import append_scratch_line, read_journal
 from .llm import planner_model_settings, resolve_model_name
 from .stint import DriverChoice
 from .options import Option
@@ -127,11 +128,11 @@ How a conversation works:
 - While you are in the conversation your body stays on its tile and the moves
   below are the only things you can do. Walking, gathering, crafting, placing
   and fighting only happen after you `leave` or the conversation closes.
-  The world keeps ticking while you talk: hunger drops 1 every 4 ticks and at
-  hunger 0 you lose health.
+  The world keeps ticking while you talk: food drops 1 every 4 ticks and at
+  food 0 you lose health.
 - On your turn you may `speak` (one line of at most {items.CONVERSATION_TEXT_LIMIT} characters), `pass`,
   `leave`, `give` items to someone in the conversation or standing next to
-  you, or `eat` one item from your pack (a berry restores 20 hunger). Speaking
+  you, or `eat` one item from your pack (a berry restores 20 food). Speaking
   or passing ends your turn; giving and eating do not, so afterwards you are
   asked again on the next tick.
 - A turn you do not use within {items.CONVERSATION_TURN_TICKS} ticks counts as a pass. The conversation
@@ -817,12 +818,12 @@ class ConversationSession:
             f"You are {self.model.entity_id}. It is tick {self.model.tick} and it "
             f"is your turn in conversation {conversation.conversation_id}.",
             f"Seated with you: {', '.join(others) or 'nobody yet'}.",
-            f"Your health {info.health}/{info.max_health}, hunger "
-            f"{info.hunger}/{info.max_hunger}, wielded "
+            f"Your health {info.health}/{info.max_health}, food "
+            f"{info.food}/{info.max_food}, wielded "
             f"{info.wielded or 'nothing'}.\nYour pack: {inventory}.",
             "Transcript so far:\n" + self._transcript_text(conversation),
             self._moves_text(conversation.turn_started),
-            "Your notes:\n" + read_notes(self.memory_path),
+            "Your journal:\n" + read_notes(self.memory_path, self.model.entity_id),
             self.reflex_line(),
         ]
         alert = self.alert_line()
@@ -876,6 +877,7 @@ class ConversationSession:
                 tick=self.model.tick,
                 participants=self._other_participants(),
                 text=note,
+                entity_id=self.model.entity_id,
             )
         report = ConversationReport(
             conversation_id=self.conversation_id,
@@ -958,18 +960,21 @@ class ConversationSession:
         )
 
 
-def read_notes(path: Path) -> str:
-    """The actor's persistent notes, or a placeholder."""
-    if not path.exists():
-        return "(no notes yet)"
-    return path.read_text(encoding="utf-8").strip() or "(no notes yet)"
+def read_notes(path: Path, entity_id: str = "") -> str:
+    """The actor's journal, seeded on first read (docs/12_sleep_journal.md)."""
+    return read_journal(path, entity_id)
 
 
 def append_conversation_note(
-    path: Path, *, tick: int, participants: Sequence[str], text: str
+    path: Path,
+    *,
+    tick: int,
+    participants: Sequence[str],
+    text: str,
+    entity_id: str = "",
 ) -> None:
-    """Append `- [conversation, tick N, with a, b] <text>` to the notes file."""
+    """Append `[conversation, tick N, with a, b] <text>` to today's notes."""
     with_whom = ", ".join(participants) or "nobody"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"- [conversation, tick {tick}, with {with_whom}] {text}\n")
+    append_scratch_line(
+        path, f"[conversation, tick {tick}, with {with_whom}] {text}", entity_id
+    )

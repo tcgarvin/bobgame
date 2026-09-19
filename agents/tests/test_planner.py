@@ -6,7 +6,7 @@ import asyncio
 import gzip
 import json
 from pathlib import Path
-from typing import AsyncIterator, Mapping
+from typing import AsyncIterator, Callable, Mapping
 
 import pytest
 from pydantic_ai import ModelRetry
@@ -45,6 +45,13 @@ from agents.jev_agent.planner import (
     _validated_invitations as validated_invitations,
 )
 from agents.jev_agent.conversation import ApproachDriver, ConversationReport
+from agents.jev_agent.journal import (
+    ALL_SECTIONS,
+    SECTION_SCRATCH,
+    SECTION_STORY,
+    SECTION_TOMORROW,
+    Journal,
+)
 from agents.jev_agent.reflex import EMPTY_REFLEX, NO_REFLEX_LINE, ReflexBrief
 from agents.jev_agent.stint import Brief, StintReport
 from agents.jev_agent.tracelog import AgentTrace
@@ -78,6 +85,11 @@ class RecordingBridge:
         self.direct_results: list[str] = []
         self.wake_calls: list[int] = []
         self.wake_result = ""
+        self.journal_waits = 0
+        self.active_waits = 0
+        # Called while a turn waits for the journal, to stand in for a rewrite
+        # finishing between turns.
+        self.on_journal_wait: Callable[[], None] = lambda: None
 
     @property
     def model(self) -> WorldModel:
@@ -94,8 +106,8 @@ class RecordingBridge:
             end_reason="eject",
             start_position=(10, 10),
             end_position=(12, 10),
-            start_stats="hp 20/20, hunger 80/100",
-            end_stats="hp 20/20, hunger 77/100",
+            start_stats="hp 20/20, food 80/100",
+            end_stats="hp 20/20, food 77/100",
             inventory_delta={"wood": 2},
             action_counts={"extract": (3, 0)},
             notable=["discovered 2 new objects"],
@@ -118,6 +130,9 @@ class RecordingBridge:
         self.wake_calls.append(since_tick)
         return self.wake_result
 
+    async def await_active(self) -> None:
+        self.active_waits += 1
+
     async def await_conversation(self) -> ConversationReport | None:
         if not self.conversation_reports:
             return None
@@ -133,6 +148,10 @@ class RecordingBridge:
         notes = list(self.reflex_notes)
         self.reflex_notes.clear()
         return notes
+
+    async def await_journal(self) -> None:
+        self.journal_waits += 1
+        self.on_journal_wait()
 
     def set_thought(self, thought: str) -> None:
         self.thoughts.append(thought)
@@ -175,6 +194,55 @@ def bridge(world_model: WorldModel) -> RecordingBridge:
 def deps(bridge: RecordingBridge, tmp_path: Path) -> PlannerDeps:
     """Planner dependencies pointing at a throwaway memory file."""
     return PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+
+
+def test_look_lists_item_piles_with_their_contents(world_model: WorldModel) -> None:
+    world_model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object(
+                    "item_pile_3",
+                    "item_pile",
+                    (14, 10),
+                    {"contents": '{"axe": 1, "wood": 5}'},
+                ),
+                make_object("item_pile_4", "item_pile", (20, 10), {"contents": "{}"}),
+            ],
+        )
+    )
+    text = describe_world(world_model)
+    assert "item pile item_pile_3 at (14, 10) (d4): axe x1, wood x5" in text
+    assert "item_pile_4" not in text.split("item pile item_pile_3")[1]
+
+
+async def test_a_failed_pickup_names_the_nearest_piles(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object(
+                    "item_pile_3", "item_pile", (14, 10), {"contents": '{"axe": 1}'}
+                )
+            ],
+        )
+    )
+    bridge.direct_result = "pickup 1 axe -> pickup failed: no item pile here"
+    agent = build_planner_agent("test")
+    with agent.override(model=one_tool_call("pickup", {"kind": "axe"})):
+        result = await agent.run("go", deps=deps)
+    returned = [
+        str(part.content)
+        for message in result.all_messages()
+        for part in message.parts
+        if isinstance(part, ToolReturnPart)
+    ]
+    assert "no item pile here" in returned[0]
+    assert "item_pile_3 at (14, 10) (d4): axe x1" in returned[0]
 
 
 def test_look_summary_covers_stats_objects_and_neighbours(
@@ -252,11 +320,20 @@ def test_the_prompt_states_physics_and_leaves_strategy_to_the_settlers() -> None
 
 
 def test_the_prompt_shows_whole_briefs_including_shout_phrases() -> None:
-    """Two stint briefs and two reflex briefs, each shown in full."""
+    """Three stint briefs and two reflex briefs, each shown in full."""
     for field in ("instruction:", "success_condition:", "max_ticks:"):
-        assert SETTLEMENT_NARRATIVE.count(field) == 4, field
+        assert SETTLEMENT_NARRATIVE.count(field) == 5, field
     assert SETTLEMENT_NARRATIVE.count("shouts:") == 2
+    assert SETTLEMENT_NARRATIVE.count("places:") == 1
     assert SETTLEMENT_NARRATIVE.count("trigger_distance:") == 2
+
+
+def test_the_prompt_explains_how_jev_sees_the_world() -> None:
+    """The planner is told what Jev can and cannot read (docs/05)."""
+    assert "Jev does\n  not understand absolute coordinates" in SETTLEMENT_NARRATIVE
+    assert 'the stint ends\n  with "lost"' in SETTLEMENT_NARRATIVE
+    assert "bushes marked B" in SETTLEMENT_NARRATIVE
+    assert "each stage leaves a\n  mark Jev can see" in SETTLEMENT_NARRATIVE
 
 
 def test_the_example_shouts_are_not_about_wolves() -> None:
@@ -297,6 +374,26 @@ def test_too_many_or_too_long_shout_phrases_are_sent_back_to_the_model() -> None
         planner_module._validated_shouts(["a", "b", "c", "d", "e"])
     with pytest.raises(ModelRetry, match="characters"):
         planner_module._validated_shouts(["x" * 121])
+
+
+def test_a_place_name_must_be_short_lowercase_and_unused(
+    world_model: WorldModel,
+) -> None:
+    assert planner_module._validated_places({"the_lake": [3, 4]}, world_model) == {
+        "the_lake": (3, 4)
+    }
+    with pytest.raises(ModelRetry, match="at most"):
+        planner_module._validated_places(
+            {f"p{i}": [0, 0] for i in range(7)}, world_model
+        )
+    with pytest.raises(ModelRetry, match="lowercase"):
+        planner_module._validated_places({"The Lake": [3, 4]}, world_model)
+    with pytest.raises(ModelRetry, match="already the id"):
+        planner_module._validated_places({"tree_1": [3, 4]}, world_model)
+    with pytest.raises(ModelRetry, match="already the id"):
+        planner_module._validated_places({"bob": [3, 4]}, world_model)
+    with pytest.raises(ModelRetry, match=r"\[x, y\] pair"):
+        planner_module._validated_places({"the_lake": [3]}, world_model)
 
 
 async def test_every_documented_tool_is_registered(deps: PlannerDeps) -> None:
@@ -357,7 +454,9 @@ async def test_travel_to_builds_a_brief_with_a_preset_travel(
         await agent.run("go", deps=deps)
     brief = bridge.briefs[0]
     assert brief.travel is not None
-    assert "Walk to" in brief.instruction
+    assert brief.instruction == "Walk to the destination."
+    # Jev is given the offset to a named place, never the numbers themselves.
+    assert list(brief.places) == ["destination"]
 
 
 async def test_single_tick_tools_submit_the_right_intents(
@@ -400,16 +499,22 @@ async def test_read_board_renders_the_notes(deps: PlannerDeps) -> None:
     assert "board" in result.output.lower() or "have not seen" in result.output
 
 
-async def test_remember_and_recall_round_trip(deps: PlannerDeps) -> None:
+async def test_remember_appends_under_todays_notes(deps: PlannerDeps) -> None:
     agent = build_planner_agent("test")
     with agent.override(model=TestModel(call_tools=["remember"])):
         await agent.run("go", deps=deps)
     assert deps.memory_path.exists()
-    assert read_memory(deps.memory_path).startswith("-")
+    journal = Journal.parse(deps.memory_path.read_text(encoding="utf-8"))
+    assert journal.scratch and journal.scratch[0].startswith("- ")
+    assert SECTION_SCRATCH in read_memory(deps.memory_path)
 
 
-def test_read_memory_reports_an_empty_file_clearly(tmp_path: Path) -> None:
-    assert read_memory(tmp_path / "missing.md") == "(no notes yet)"
+def test_read_memory_seeds_a_missing_journal(tmp_path: Path) -> None:
+    path = tmp_path / "missing.md"
+    text = read_memory(path, "ada")
+    assert "## Story so far" in text
+    assert "ada woke up on a large, wild island" in text
+    assert path.exists(), "the seed is written out on first read"
 
 
 def _turn(prompt: str, tool_rounds: int) -> list[ModelMessage]:
@@ -475,6 +580,7 @@ async def test_a_planner_turn_publishes_its_reflection(
     with planner.agent.override(model=test_model):
         thought = await planner.take_turn()
     assert thought == "Chopping next."
+    assert bridge.active_waits == 1, "a turn waits for an awake, living body first"
     assert bridge.thoughts == ["Chopping next."]
     assert planner.history, "history is kept for the next turn"
 
@@ -489,11 +595,12 @@ async def test_the_prompt_carries_the_latest_look_and_stint_report(
         Brief(instruction="Chop", success_condition="2 wood", max_ticks=5)
     )
     planner.note_report(report)
-    prompt = planner.build_prompt()
+    prompt = await planner.build_prompt()
     assert prompt.startswith("Your name is ada.")
     assert "you are ada at (10, 10)" in prompt
     assert "STINT REPORT: Chop" in prompt
-    assert "Your notes:" in prompt
+    assert "Your journal:" in prompt
+    assert bridge.journal_waits == 1, "the prompt waits for the journal rewrite"
 
 
 def test_only_the_last_ten_reports_are_kept(
@@ -752,14 +859,14 @@ def test_the_alert_window_never_reaches_before_the_turn_or_past_a_few_ticks() ->
     )
 
 
-def test_a_turn_that_starts_under_attack_opens_with_the_alert(
+async def test_a_turn_that_starts_under_attack_opens_with_the_alert(
     bridge: RecordingBridge, world_model: WorldModel, tmp_path: Path
 ) -> None:
     planner = Planner(
         bridge, "ada", model_name="test", trace=AgentTrace("ada", tmp_path)
     )
     _bitten(world_model, tick=9, health=17)
-    prompt = planner.build_prompt()
+    prompt = await planner.build_prompt()
     assert prompt.index("!! UNDER ATTACK") < prompt.index("you are ada at")
 
 
@@ -877,9 +984,19 @@ def one_tool_call(tool_name: str, args: dict[str, object]) -> FunctionModel:
     return FunctionModel(respond)
 
 
+def carrying(model: WorldModel, inventory: dict[str, int]) -> None:
+    """Re-observe the model's actor with this pack."""
+    model.update(
+        make_observation(
+            model.tick + 1, make_entity("ada", (10, 10), inventory=inventory)
+        )
+    )
+
+
 async def test_build_hands_the_bridge_a_driver_with_the_planned_tiles(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
+    carrying(bridge.model, {"wood_wall": 3})
     agent = build_planner_agent("test")
     model = one_tool_call(
         "build",
@@ -903,6 +1020,30 @@ async def test_build_hands_the_bridge_a_driver_with_the_planned_tiles(
     assert len(driver.plan.tiles) == 11
     assert bridge.briefs[0].max_ticks == 40
     assert "wood_wall" in bridge.briefs[0].instruction
+
+
+async def test_build_with_no_pieces_runs_nothing_and_names_the_recipe(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    model = one_tool_call(
+        "build",
+        {"kind": "wood_wall", "shape": "line", "x1": 10, "y1": 12, "x2": 13, "y2": 12},
+    )
+    with agent.override(model=model):
+        result = await agent.run("go", deps=deps)
+    returned = [
+        part.content
+        for message in result.all_messages()
+        for part in message.parts
+        if isinstance(part, ToolReturnPart)
+    ]
+    assert not bridge.briefs, "no stint is started for an empty pack"
+    text = str(returned[0])
+    assert "you carry no wood_wall" in text
+    assert "needs 4" in text
+    assert "craft wood_wall 4 times" in text
+    assert "8 plank in all" in text
 
 
 async def test_build_asks_again_when_the_shape_makes_no_sense(
@@ -1015,7 +1156,7 @@ async def test_the_prompt_shows_the_reflex_brief_and_any_reflex_report(
     bridge: RecordingBridge, tmp_path: Path
 ) -> None:
     planner = Planner(bridge, "ada", model_name="test", trace=AgentTrace.disabled())
-    assert NO_REFLEX_LINE in planner.build_prompt()
+    assert NO_REFLEX_LINE in await planner.build_prompt()
 
     bridge.reflex = ReflexBrief(
         instruction="Walk to the beds.",
@@ -1026,7 +1167,7 @@ async def test_the_prompt_shows_the_reflex_brief_and_any_reflex_report(
     bridge.reflex_notes = [
         "[reflex ran ticks 3-9: ended because threat_gone; " "health 20 -> 17]"
     ]
-    prompt = planner.build_prompt()
+    prompt = await planner.build_prompt()
     assert "Walk to the beds." in prompt
     assert "[reflex ran ticks 3-9" in prompt
 
@@ -1220,6 +1361,8 @@ async def test_sleep_submits_the_intent_and_returns_the_wake(
 ) -> None:
     for reason in ("rested", "damaged", "hungry", "bed removed", "asked"):
         bridge.actions.clear()
+        # `sleep` spends the budget, so each pass needs a fresh turn.
+        deps.budget.reset(planner_module.MAX_TOOL_CALLS_PER_TURN, 0)
         bridge.direct_result = "sleep on bed_1 -> sleep ok: asleep on bed_1"
         bridge.wake_result = (
             f"slept on bed_1 from tick 5 to tick 60 (55 ticks); woke because "
@@ -1233,6 +1376,7 @@ async def test_sleep_submits_the_intent_and_returns_the_wake(
         assert intent.sleep.object_id == "bed_1"
         assert f"woke because {reason}" in result.output
         assert "fatigue 80 -> 25" in result.output
+        assert "Your turn ends here" in result.output
 
 
 async def test_sleep_on_the_ground_names_no_bed(
@@ -1461,7 +1605,9 @@ def test_the_prompt_states_the_invitation_physics() -> None:
     assert "`talk_to` does the" in SETTLEMENT_NARRATIVE
     assert "interrupted: conversation conv_N started" in SETTLEMENT_NARRATIVE
     assert "invitations: []" in SETTLEMENT_NARRATIVE
-    assert "say an invitation line you gave it" in SETTLEMENT_NARRATIVE
+    assert "say an invitation line you gave it" in " ".join(
+        SETTLEMENT_NARRATIVE.split()
+    )
 
 
 # -- the goal, and the brief example's invitation cue ------------------------
@@ -1479,3 +1625,138 @@ def test_the_brief_example_says_when_to_use_the_invitation_line() -> None:
         "When another\n      settler is within ten tiles, say the invitation line "
         "once." in SETTLEMENT_NARRATIVE
     )
+
+
+# --- the sleep-time journal (docs/12_sleep_journal.md) -----------------------
+
+
+async def test_a_turn_that_lived_through_a_wake_drops_its_history(
+    bridge: RecordingBridge, tmp_path: Path
+) -> None:
+    trace = AgentTrace("ada", tmp_path)
+    planner = Planner(bridge, "ada", model_name="test", trace=trace)
+    with planner.agent.override(model=TestModel(call_tools=[], custom_output_text="A")):
+        await planner.take_turn()
+    assert planner.history, "an ordinary turn keeps its history"
+
+    planner.note_life_event("woke")
+    with planner.agent.override(model=TestModel(call_tools=[], custom_output_text="B")):
+        await planner.take_turn()
+
+    # The wake landed between turns, so the reset happens before the next one
+    # starts, and nothing from before the sleep is in what the model sees.
+    assert not any("A" in str(message) for message in planner.history)
+    events = [
+        (line["event"], line.get("reason"))
+        for line in planner_lines(trace)
+        if line["event"] in ("turn_start", "history_reset")
+    ]
+    assert events[:3] == [
+        ("turn_start", None),
+        ("history_reset", "woke"),
+        ("turn_start", None),
+    ]
+
+
+async def test_a_respawn_drops_the_history_with_its_own_reason(
+    bridge: RecordingBridge, tmp_path: Path
+) -> None:
+    trace = AgentTrace("ada", tmp_path)
+    planner = Planner(bridge, "ada", model_name="test", trace=trace)
+
+    planner.note_life_event("respawned")
+    with planner.agent.override(model=TestModel(call_tools=[], custom_output_text="A")):
+        await planner.take_turn()
+
+    # Reset before the turn, so the turn's own messages are what remains.
+    assert planner.history
+    reasons = [
+        line.get("reason")
+        for line in planner_lines(trace)
+        if line["event"] == "history_reset"
+    ]
+    assert reasons == ["respawned"]
+
+
+async def test_the_prompt_waits_for_an_in_flight_rewrite_before_reading_the_journal(
+    bridge: RecordingBridge, tmp_path: Path
+) -> None:
+    planner = Planner(
+        bridge, "ada", model_name="test", trace=AgentTrace("ada", tmp_path)
+    )
+    # The rewrite lands while the turn is parked in `await_journal`.
+    bridge.on_journal_wait = lambda: Journal(
+        story_so_far="I slept by the lake.", tomorrow="Chop six wood."
+    ).save(planner.memory_path)
+
+    prompt = await planner.build_prompt()
+
+    assert bridge.journal_waits == 1
+    assert "I slept by the lake." in prompt
+    assert "Chop six wood." in prompt
+
+
+async def test_turn_start_traces_the_journal_as_sections(
+    bridge: RecordingBridge, tmp_path: Path
+) -> None:
+    trace = AgentTrace("ada", tmp_path)
+    planner = Planner(bridge, "ada", model_name="test", trace=trace)
+    Journal(
+        story_so_far="Day one by the lake.",
+        tomorrow="Chop six wood.",
+        scratch=["- bo owes me 3 planks"],
+    ).save(planner.memory_path)
+
+    with planner.agent.override(model=TestModel(custom_output_text="Noted.")):
+        await planner.take_turn()
+
+    start = planner_lines(trace)[0]
+    assert start["event"] == "turn_start"
+    sections = start["journal"]
+    assert isinstance(sections, dict)
+    assert list(sections) == list(ALL_SECTIONS)
+    assert sections[SECTION_STORY] == "Day one by the lake."
+    assert sections[SECTION_TOMORROW] == "Chop six wood."
+    assert sections[SECTION_SCRATCH] == "- bo owes me 3 planks"
+
+
+async def test_the_turns_reflection_and_every_tool_call_reach_the_day_log(
+    bridge: RecordingBridge, tmp_path: Path
+) -> None:
+    planner = Planner(bridge, "ada", model_name="test", trace=AgentTrace.disabled())
+    test_model = TestModel(call_tools=["say"], custom_output_text="Said hello.")
+    with planner.agent.override(model=test_model):
+        await planner.take_turn()
+
+    kinds = [entry.kind for entry in planner.day_log.entries]
+    assert "call" in kinds and "result" in kinds and "reflection" in kinds
+    calls = [e.text for e in planner.day_log.entries if e.kind == "call"]
+    assert calls[0].startswith("say(")
+    assert planner.day_log.entries[-1].text == "Said hello."
+
+
+async def test_the_day_log_records_the_bare_tool_result_without_the_footer(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.direct_result = "say hello -> accepted"
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("say", {"text": "hello"})):
+        result = await agent.run("go", deps=deps)
+
+    logged = [e.text for e in deps.day_log.entries if e.kind == "result"]
+    assert logged == ["say hello -> accepted"]
+    assert "tool budget" in result.output, "the footer still reaches the model"
+
+
+async def test_the_sleep_tool_spends_the_whole_budget(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    deps.budget.reset(planner_module.MAX_TOOL_CALLS_PER_TURN, tick=0)
+    bridge.direct_result = "sleep on the ground -> sleep ok: asleep on the ground"
+    bridge.wake_result = "slept on the ground from tick 5 to tick 9 (4 ticks)"
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("sleep", {"bed_object_id": ""})):
+        result = await agent.run("go", deps=deps)
+
+    assert deps.budget.left == 0
+    assert "Your turn ends here" in result.output

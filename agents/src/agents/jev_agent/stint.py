@@ -16,32 +16,45 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 import structlog
 
 from .. import world_pb2 as pb
-from .geometry import Coord
+from .geometry import Coord, chebyshev
 from .jevclient import JevClient, JevDecision
-from .jevstate import build_state
+from .jevstate import StintProgress, build_state, collapse_action
 from .pricing import jev_cost_usd
 from .options import (
+    KEEP_GOING,
     MAX_OPTIONS,
+    STEP_KEY_PREFIX,
     Option,
     TravelState,
+    brief_object_ids,
     enumerate_options,
     options_to_criteria,
     retreat_option,
+    step_target_ids,
 )
 from .tracelog import AgentTrace
 from .worldmodel import TickDigest, WorldModel
 
 logger = structlog.get_logger(__name__)
 
-# Code rules layered on top of Jev's answers. The stint ends when Jev's `done`
-# or its `stuck` probability reaches the threshold on two consecutive ticks.
+# Code rules layered on top of Jev's answers. The stint ends when Jev's `done`,
+# `stuck` or `lost` probability reaches the threshold on two consecutive ticks.
 DONE_OR_STUCK_THRESHOLD = 0.6
+LOST_THRESHOLD = 0.6
 EJECT_STREAK_TO_END = 2
 DANGER_THRESHOLD = 0.8
 DANGER_HEALTH_FLOOR = 6
 REPEATED_FAILURE_LIMIT = 3
 
 END_SUCCESS_OR_JUDGEMENT = "eject"
+# Jev judged that the brief needs something its state does not have: a target
+# out of view with no step option toward it, an item it cannot get, a place it
+# does not know the way to. The planner has to name or approach it, not retry.
+END_LOST = "lost"
+LOST_EXPLANATION = (
+    "Jev could not see or reach what the brief asked for. Name the target by "
+    "object id or as a place in `places`, or move closer first."
+)
 # The world's intent deadline is 1200 ms after tick start; leave room for the
 # gRPC round trip and the state build.
 JEV_TICK_BUDGET_SECONDS = 0.9
@@ -106,10 +119,17 @@ class Brief:
     # The only phrases Jev may say as an invitation to talk; empty means it
     # cannot invite anyone (docs/09 section 8.3).
     invitations: tuple[str, ...] = ()
+    # Named destinations Jev may step toward, so it never sees a coordinate.
+    places: Mapping[str, Coord] = field(default_factory=dict)
 
     def summary(self) -> str:
         """One-line form for status reports and the viewer."""
         return f"{self.instruction} (until: {self.success_condition})"
+
+    @property
+    def text(self) -> str:
+        """Instruction and notes together, for scanning out the ids it names."""
+        return f"{self.instruction}\n{self.notes}"
 
     def as_payload(self) -> dict[str, Any]:
         """The brief as the replay contract serialises it."""
@@ -122,6 +142,9 @@ class Brief:
             "check_every": self.check_every,
             "shouts": list(self.shouts),
             "invitations": list(self.invitations),
+            "places": {
+                name: [target[0], target[1]] for name, target in self.places.items()
+            },
             "travel": (
                 None
                 if travel is None
@@ -137,7 +160,7 @@ class TickRecord:
     tick: int
     position: Coord
     health: str
-    hunger: str
+    food: str
     input_tokens: int
     option_count: int
     action: str
@@ -146,6 +169,7 @@ class TickRecord:
     stuck: float
     danger: float
     latency_ms: int
+    lost: float = 0.0
     confidence: float = 0.0
     probabilities: Mapping[str, float] = field(default_factory=dict)
     intent_result: str = "pending"
@@ -165,7 +189,7 @@ class TickRecord:
             "tick": self.tick,
             "position": list(self.position),
             "health": self.health,
-            "hunger": self.hunger,
+            "food": self.food,
             "options": self.option_count,
             "action": self.action,
             "top": [[key, round(value, 3)] for key, value in self.top],
@@ -185,7 +209,8 @@ class TickRecord:
                 "confidence": round(self.confidence, 3),
                 "done": round(self.done, 3),
                 "stuck": round(self.stuck, 3),
-                "eject": round(max(self.done, self.stuck), 3),
+                "lost": round(self.lost, 3),
+                "eject": round(max(self.done, self.stuck, self.lost), 3),
                 "danger": round(self.danger, 3),
                 "latency_ms": self.latency_ms,
             }
@@ -200,7 +225,7 @@ class TickRecord:
         return (
             f"t{self.tick} {self.action} -> {self.intent_result} "
             f"(done {self.done:.2f}, stuck {self.stuck:.2f}, "
-            f"danger {self.danger:.2f})"
+            f"lost {self.lost:.2f}, danger {self.danger:.2f})"
         )
 
 
@@ -236,6 +261,10 @@ class StintReport:
             f"  success condition: {self.brief.success_condition}",
             f"  ticks used: {self.ticks_used}/{self.brief.max_ticks}",
             f"  ended because: {self.end_reason}",
+        ]
+        if self.end_reason == END_LOST:
+            lines.append(f"  {LOST_EXPLANATION}")
+        lines += [
             f"  position: {self.start_position} -> {self.end_position}",
             f"  stats: {self.start_stats} -> {self.end_stats}",
         ]
@@ -294,7 +323,11 @@ class Stint:
         self.last_decision = JevDecision(action="")
 
         self._pending: TickRecord | None = None
+        # Index into `records` of a row that has a verdict but is not on disk
+        # yet; -1 when there is none. See `_flush_finished_record`.
+        self._unflushed = -1
         self._eject_streak = 0
+        self._lost_streak = 0
         self._failure_action = ""
         self._failure_count = 0
         self._last_option: Option | None = None
@@ -329,6 +362,10 @@ class Stint:
         self._absorb(digest)
         if not any(not acted.success for acted in digest.own_actions):
             self._detect_blocked_move()
+        # Only now is the previous tick's row final: `_detect_blocked_move`
+        # rewrites it, and it used to do so after the row had already gone to
+        # disk, so a silently blocked move never reached the trace.
+        self._flush_finished_record()
 
         reason = self._termination_reason()
         if reason:
@@ -343,9 +380,10 @@ class Stint:
             self.travel,
             shouts=self.brief.shouts,
             invitations=self.brief.invitations,
+            places=self.brief.places,
+            brief_text=self.brief.text,
             max_options=MAX_OPTIONS,
         )
-        ticks_left = self.brief.max_ticks - self.ticks_used
 
         if self._should_repeat_last(options):
             option = _find_option(options, self._last_option.key)  # type: ignore[union-attr]
@@ -357,9 +395,11 @@ class Stint:
             self.model,
             instruction=self.brief.instruction,
             success_condition=self.brief.success_condition,
-            ticks_left=ticks_left,
+            progress=self.progress(),
             notes=self.brief.notes,
             travel=self.travel,
+            places=self.brief.places,
+            highlight_ids=self._highlight_ids(options),
         )
         criteria = options_to_criteria(options)
         # Written before the call: a timed-out or failed call still saw this
@@ -429,13 +469,57 @@ class Stint:
         return choice.option.intent
 
     def record_intent_result(self, result: str) -> None:
-        """Attach the world's verdict to this tick's record and flush it to disk."""
+        """Attach the world's verdict to this tick's record.
+
+        The row is not written yet: next tick's `_detect_blocked_move` may still
+        turn an "accepted" move into a "blocked" one, and the trace should say
+        what actually happened.
+        """
         if self._pending is None:
             return
         record = replace(self._pending, intent_result=result)
         self._pending = None
         self.records.append(record)
+        self._unflushed = len(self.records) - 1
+
+    def _flush_finished_record(self) -> None:
+        """Write the pending tick row, now that nothing else will change it."""
+        if self._unflushed < 0:
+            return
+        record = self.records[self._unflushed]
+        self._unflushed = -1
         self._append_log(record)
+
+    def progress(self) -> StintProgress:
+        """What this stint has achieved so far, for Jev's `so_far` block."""
+        end_inventory = self.model.self_info.inventory
+        change = {
+            kind: end_inventory.get(kind, 0) - self._start_inventory.get(kind, 0)
+            for kind in set(self._start_inventory) | set(end_inventory)
+            if end_inventory.get(kind, 0) != self._start_inventory.get(kind, 0)
+        }
+        actions: dict[str, int] = {}
+        for record in self.records:
+            name = collapse_action(record.action)
+            actions[name] = actions.get(name, 0) + 1
+        position = self.model.position
+        return StintProgress(
+            ticks_used=self.ticks_used,
+            ticks_left=self.brief.max_ticks - self.ticks_used,
+            inventory_change=change,
+            actions=actions,
+            moved_from_start=(
+                position[0] - self._start_position[0],
+                position[1] - self._start_position[1],
+            ),
+            net_tiles_moved=chebyshev(position, self._start_position),
+        )
+
+    def _highlight_ids(self, options: Sequence[Option]) -> frozenset[str]:
+        """Object ids `nearby` must keep: what the brief names or can be walked to."""
+        return step_target_ids(options) | frozenset(
+            brief_object_ids(self.model, self.brief.text)
+        )
 
     # -- rules --------------------------------------------------------------
 
@@ -476,7 +560,7 @@ class Stint:
         if not self.records:
             return
         last = self.records[-1]
-        is_move = last.action.startswith(("move_", "follow_travel", "travel_to:"))
+        is_move = last.action.startswith(("move_", KEEP_GOING, STEP_KEY_PREFIX))
         if not is_move or last.intent_result != "accepted":
             return
         if last.tick != self.model.tick - 1 or self.model.position != last.position:
@@ -499,6 +583,8 @@ class Stint:
             return END_TICKS
         if self._eject_streak >= EJECT_STREAK_TO_END:
             return END_SUCCESS_OR_JUDGEMENT
+        if self._lost_streak >= EJECT_STREAK_TO_END:
+            return END_LOST
         if self._failure_count >= REPEATED_FAILURE_LIMIT:
             return END_REPEATED_FAILURE
         extra = self.end_check(self.model)
@@ -515,6 +601,12 @@ class Stint:
             self._eject_streak += 1
         else:
             self._eject_streak = 0
+        # Counted apart from done/stuck so the report can say *why* the body
+        # came back: "lost" tells the planner to fix the brief, not the plan.
+        if decision.lost >= LOST_THRESHOLD:
+            self._lost_streak += 1
+        else:
+            self._lost_streak = 0
 
     def _danger_override(
         self, decision: JevDecision, options: Sequence[Option]
@@ -559,13 +651,14 @@ class Stint:
             tick=self.model.tick,
             position=self.model.position,
             health=f"{self.model.self_info.health}/{self.model.self_info.max_health}",
-            hunger=f"{self.model.self_info.hunger}/{self.model.self_info.max_hunger}",
+            food=f"{self.model.self_info.food}/{self.model.self_info.max_food}",
             input_tokens=decision.input_tokens,
             option_count=option_count,
             action=option.key,
             top=decision.top(),
             done=decision.done,
             stuck=decision.stuck,
+            lost=decision.lost,
             danger=decision.danger,
             latency_ms=decision.latency_ms,
             confidence=decision.confidence,
@@ -582,6 +675,7 @@ class Stint:
             return
         self.finished = True
         self.end_reason = reason
+        self._flush_finished_record()
         logger.info(
             "stint_finished",
             reason=reason,
@@ -652,6 +746,7 @@ class Stint:
             "confidence": round(decision.confidence, 3),
             "done": round(decision.done, 3),
             "stuck": round(decision.stuck, 3),
+            "lost": round(decision.lost, 3),
             "eject": round(decision.eject, 3),
             "danger": round(decision.danger, 3),
             "latency_ms": decision.latency_ms,
@@ -672,7 +767,7 @@ def _find_option(options: Sequence[Option], key: str) -> Option | None:
 
 def _stats(model: WorldModel) -> str:
     info = model.self_info
-    return f"hp {info.health}/{info.max_health}, hunger {info.hunger}/{info.max_hunger}"
+    return f"hp {info.health}/{info.max_health}, food {info.food}/{info.max_food}"
 
 
 def _dedupe(items: Sequence[str]) -> list[str]:

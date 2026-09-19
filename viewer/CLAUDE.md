@@ -158,13 +158,37 @@ both. Example: `http://localhost:5173/?run=fake&tick=50&entity=ada`.
   `owner` is an entity id, and `progress` is extraction or dismantle work.
   Trees and rocks are deliberately not clickable: there are far too many of
   them to make every one interactive.
-- `src/ui/OverlayUI.ts` — the agent panel: brief (with success condition,
-  ticks used of max, notes), planner thought, the Jev decision with every
-  option's probability as a bar (chosen one highlighted) plus confidence,
-  eject, danger, latency and input tokens. In replay mode it adds collapsible
-  "What Jev saw", "Planner turn" and "Memory" sections fed by `agent_detail`,
-  which is requested when the selection or the tick changes (debounced to
-  ~250 ms while playing).
+- `src/ui/OverlayUI.ts` — the agent panel, written for someone watching a
+  settler rather than reading a trace. Top to bottom: **header** (name, the
+  wielded tool's icon with its tier word, the mode badge and a status chip that
+  appears only when notable - dead, asleep, collapsed, open to talk),
+  **bars** (health, food, tiredness with the `fatigueState` word),
+  **Doing now** (the brief's instruction as the headline, then Jev's chosen
+  action in plain words with its confidence and the criterion it was chosen on,
+  then muted small print: tick N of max, done-when, travel target, notes),
+  **Conversation** (only while seated in one), **Planner thought**,
+  **Journal**, **Inventory**, **Recent**, and a collapsed **Details** block
+  holding everything demoted: the wielded string, spend, every option's
+  probability bar (chosen one highlighted), confidence, eject, danger, latency,
+  tokens, result and option count, plus "What Jev saw" (state JSON + criteria),
+  "Planner turn" (prompt, tool calls, results) and the raw journal text.
+  Nothing in the panel is replay-gated any more: `agent_detail` arrives in live
+  mode too, over a second detail-only socket to the replay server
+  (`GameScene.detailClient`; see docs/07_replay.md, "Live-mode detail"), and
+  requests are debounced to ~250 ms whenever the tick moves on its own
+  (replay playback or a live world ticking).
+- Supporting modules next to it: `src/ui/dom.ts` (the shared element builders),
+  `src/ui/JournalView.ts` (the Journal section: "Today's plan" from the
+  `Tomorrow` section first, then `Story so far`, then `Today's notes` as a
+  list, with `Me`/`Others`/`Learnings` folded away and a muted source line -
+  `written at t950 (fell asleep)`, `as of t700`, `final journal (old run)`),
+  `src/ui/ActionWords.ts` (Jev option keys in plain words:
+  `step_towards:tree_12` -> "walking toward tree 12") and `src/ui/ItemIcon.ts`
+  (the wielded-tool icon: the tier prefix of `copper_pickaxe` is stripped to
+  look `pickaxe` up in `sprite-index.json`, and the icon is a DOM element with
+  the spritesheet as its `background-image`, offset to the frame and scaled 2x
+  with `transform` so the sheet's pixel size never has to be known). The sprite
+  index reaches `OverlayUI` as a constructor argument from `GameScene`.
 
 `WorldState` owns the replay state as well: `isReplay()`, `getReplayStatus()`,
 `getRunId()`, `getRunIndex()`, `getAgentDetail(entityId, tickId)` and the
@@ -177,8 +201,9 @@ recentre the camera or rebuild the `ChunkManager` on it.
 `scripts/fake_replay_server.mjs` serves a synthetic 64x64 run (three settlers,
 a wolf, a chest, an item pile, a message board, a bush, a built hut with a
 walled workshop, a road, reeds and a clay deposit, 200 ticks of scripted
-movement, actions, chat, `agent_status`, `agent_detail` and `run_index`) so the
-replay UI can be developed without a recording. It is the only thing the `ws`
+movement, actions, chat, `agent_status`, `agent_detail` (with a synthetic
+journal, and a wielded tool per settler so the header icon and tier word show)
+and `run_index`) so the replay UI can be developed without a recording. It is the only thing the `ws`
 devDependency is for.
 
 ```bash
@@ -258,9 +283,9 @@ the `shout` channel get the same speech bubble as `local` ones.
   "z" above the sprite (`GameScene.updateSleepMarker`), red when it has
   collapsed — treated as `asleep && fatigue >= max_fatigue`, which is the state
   the world's `collapse` event leaves behind.
-- The agent panel shows a Fatigue bar with the state word from
-  `OverlayUI.fatigueState` (fresh < 60, tired 60-99, exhausted at max) and an
-  "Asleep" row; the header carries the clock readout (`#clock-readout`,
+- The agent panel shows a Tiredness bar labelled with the state word from
+  `OverlayUI.fatigueState` (fresh < 60, tired 60-99, exhausted at max), and an
+  "asleep"/"collapsed" status chip in the header; the header carries the clock readout (`#clock-readout`,
   `day 2 · 143/300 · night`).
 - The object inspector lists a vein's `remaining` units like any other resource
   and, for a `workshop_table`, `furnace` or `anvil`, a "Crafting" section read

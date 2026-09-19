@@ -30,7 +30,7 @@ def world() -> World:
             entity_type="player",
             inventory=Inventory(items=(("wood", 3),)),
             health=14,
-            hunger=42,
+            food=42,
             wielded="axe",
         )
     )
@@ -111,8 +111,8 @@ class TestTickCompleted:
                 "tags": [],
                 "health": 14,
                 "max_health": 20,
-                "hunger": 42,
-                "max_hunger": 100,
+                "food": 42,
+                "max_food": 100,
                 "wielded": "axe",
                 "alive": True,
                 "fatigue": 0,

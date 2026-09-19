@@ -6,6 +6,10 @@ Overnight build and first runs of the planner + Jev settlement scenario
 Reproduce: `./dev.sh settlement`, wait, Ctrl+C, then
 `python tools/analyze_run.py logs`.
 
+Note: the stat now called `food` (100 = well fed, 0 = starving) was called
+`hunger` before 2026-09-18; this document keeps the old name where it records
+what happened at the time.
+
 ## Run 1 (250 ticks, 12 actors, 2 s ticks)
 
 Numbers from `tools/analyze_run.py`:

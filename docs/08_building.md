@@ -108,7 +108,7 @@ New intent `RestIntent { string object_id = 1; }` (`Intent.rest = 17`). The
 entity must stand on or next to a `bed`. One rester per bed per tick
 (lexicographically smallest entity id wins; the others fail with
 `"<bed> is taken"`). A successful rest heals `REST_HEAL` (2) health, capped at
-max health, and requires hunger > 0. Action event type: `"rest"`.
+max health, and requires food > 0. Action event type: `"rest"`.
 
 ## Roads, floors, chairs and tables
 
@@ -146,6 +146,12 @@ runs stay replayable because recordings carry their own objects.
   gets a deterministic `build` tool in the spirit of `travel_to`: given a kind
   and a line or rectangle outline, code walks the entity around and places the
   pieces, stopping when it runs out of items or is interrupted by danger.
+  A build called with none of the pieces in the pack is not started at all:
+  the result says how many the shape needs and the recipe scaled to that
+  count (`craft wood_wall 16 times (2 plank each, by hand): 32 plank in all`),
+  and a build that runs dry ends its report with `carrying now` and
+  `short by` lines of the same form (`BuildExecutor._supply_lines`,
+  `supply_text`, `missing_pieces_text` in `jev_agent/build.py`).
 
 ## Viewer
 

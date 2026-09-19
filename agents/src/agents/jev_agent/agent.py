@@ -24,9 +24,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Coroutine, TypeVar
+from typing import Any, Callable, Coroutine, Sequence, TypeVar
 
 import grpc
 import structlog
@@ -44,7 +45,26 @@ from .conversation import (
     joined_conversation,
 )
 from .jevclient import JevClient, TypeSafeJevClient
-from .planner import Planner, alert_window_start, threat_alert
+from .journal import (
+    JOURNAL_WAIT_SECONDS,
+    KIND_EVENT,
+    KIND_NOTE,
+    TRIGGER_DEATH,
+    TRIGGER_SLEEP,
+    DayLogEntry,
+    Journal,
+    JournalWriter,
+    ModelJournalWriter,
+    render_day_log,
+    rewrite_duration_ms,
+)
+from .planner import (
+    DEATH_NOTE,
+    SLEEP_NOTE,
+    Planner,
+    alert_window_start,
+    threat_alert,
+)
 from .reflex import (
     EMPTY_REFLEX,
     INTERRUPTED_CONVERSATION,
@@ -111,6 +131,10 @@ GROUND_SLEEP_PLACE = "the ground"
 UNKNOWN_WAKE_REASON = "unknown"
 
 ASLEEP_REJECTION = "failed: asleep"
+
+# What the planner is told happened to its body, so it can drop its history.
+LIFE_WOKE = "woke"
+LIFE_RESPAWNED = "respawned"
 
 
 @dataclass(frozen=True)
@@ -230,7 +254,9 @@ class JevAgent:
         *,
         log_root: Path | None = None,
         planner_model: str = "",
+        journal_model: str = "",
         converser: Converser | None = None,
+        journal_writer: JournalWriter | None = None,
     ) -> None:
         self.world = world
         self.ledger = CostLedger()
@@ -254,6 +280,11 @@ class JevAgent:
             ModelConverser(planner_model, self.ledger)
             if converser is None
             else converser
+        )
+        self.journal_writer: JournalWriter = (
+            ModelJournalWriter(journal_model, self.planner.model_name)
+            if journal_writer is None
+            else journal_writer
         )
 
         _write_pricing(self.trace, self.planner.model_name)
@@ -285,7 +316,11 @@ class JevAgent:
         self._sleep_place = GROUND_SLEEP_PLACE
         self._last_sleep: SleepRecord | None = None
         self._wake_waiters: list[_WakeWaiter] = []
+        # Planner turns parked until the body is awake and alive again.
+        self._active_waiters: list[asyncio.Future[None]] = []
         self._background: set[asyncio.Task[None]] = set()
+        # The journal rewrite in flight, if any: exactly one at a time.
+        self._journal_task: asyncio.Task[None] | None = None
         self._pending_thought = ""
         self._last_status = ("", "", "", "", "")
         self._running = False
@@ -330,6 +365,9 @@ class JevAgent:
             return
         self._notes_for_tools.append(text)
         self._notes_for_prompt.append(text)
+        # Recorded here rather than where the planner drains it, because there
+        # are two queues over one note and the journal wants it once.
+        self.planner.day_log.add(self._model.tick, KIND_NOTE, text)
 
     async def run_stint(
         self, brief: Brief, driver: StintDriver | None = None
@@ -408,6 +446,48 @@ class JevAgent:
         )
         return await future
 
+    async def await_active(self) -> None:
+        """Block until the body is awake and alive; return at once if it is.
+
+        The planner takes no turn while the settler is asleep, collapsed or
+        waiting to respawn: there is nothing it could do, and every call it
+        made would be refused (docs/12_sleep_journal.md).
+        """
+        if self._body_is_active():
+            return
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._active_waiters.append(future)
+        await future
+
+    def _body_is_active(self) -> bool:
+        info = self._model.self_info
+        return info.alive and not info.asleep
+
+    def _release_active_waiters(self) -> None:
+        for future in self._active_waiters:
+            if not future.done():
+                future.set_result(None)
+        self._active_waiters.clear()
+
+    async def await_journal(self) -> None:
+        """Wait for a journal rewrite in flight, then let the turn read the file.
+
+        Bounded: a rewrite that has not answered in `JOURNAL_WAIT_SECONDS` is
+        left running and the turn goes ahead with the journal as it stands,
+        because a planner that never takes a turn is worse than a stale note.
+        """
+        task = self._journal_task
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), JOURNAL_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "journal_rewrite_slow",
+                entity_id=self.entity_id,
+                waited_seconds=JOURNAL_WAIT_SECONDS,
+            )
+
     def set_thought(self, thought: str) -> None:
         """Queue a planner reflection to be spoken on the `thought` channel."""
         self._pending_thought = thought
@@ -443,7 +523,10 @@ class JevAgent:
 
     async def _handle_tick(self, observation: pb.Observation) -> None:
         digest = self._model.update(observation)
+        self._note_life_transitions(digest)
         self._note_sleep_transitions(digest)
+        if self._body_is_active():
+            self._release_active_waiters()
         if self._model.self_info.asleep:
             await self._sleeping_tick(observation, digest)
             return
@@ -565,6 +648,102 @@ class JevAgent:
 
         return pb.Intent(wait=pb.WaitIntent()), None
 
+    # -- life and the journal -----------------------------------------------
+
+    def _note_life_transitions(self, digest: TickDigest) -> None:
+        """Death and respawn: end the turn, and write the journal on death.
+
+        Dying is the other end of a day (docs/12_sleep_journal.md): what the
+        turn was doing is void, the planner is told so through the ordinary
+        note queue, and its budget is spent so it writes its reflection and
+        stops.
+        """
+        if digest.self_died:
+            tick = self._model.tick
+            self.planner.day_log.add(tick, KIND_EVENT, f"you died at tick {tick}")
+            self._note_for_planner(DEATH_NOTE.format(tick=tick))
+            self.planner.end_turn_now()
+            self._start_journal_rewrite(TRIGGER_DEATH)
+        if digest.self_respawned:
+            self.planner.day_log.add(self._model.tick, KIND_EVENT, "you respawned")
+            self.planner.note_life_event(LIFE_RESPAWNED)
+
+    def _start_journal_rewrite(self, trigger: str) -> None:
+        """Start the day's journal rewrite in the background, if none is running.
+
+        A second trigger while one is in flight is dropped: the day log it
+        would have been given is already inside the running rewrite.
+        """
+        task = self._journal_task
+        if task is not None and not task.done():
+            logger.debug(
+                "journal_rewrite_skipped", entity_id=self.entity_id, trigger=trigger
+            )
+            return
+        entries = self.planner.day_log.take()
+        self._journal_task = asyncio.create_task(
+            self._rewrite_journal(trigger, entries)
+        )
+        self._background.add(self._journal_task)
+        self._journal_task.add_done_callback(self._background.discard)
+
+    async def _rewrite_journal(
+        self, trigger: str, entries: Sequence[DayLogEntry]
+    ) -> None:
+        """Ask the writer for a new journal and save it; never fail the agent."""
+        started = time.monotonic()
+        path = self.trace.memory_path
+        try:
+            journal = Journal.load(path, self.entity_id)
+            rewrite = await self.journal_writer.rewrite(
+                journal, render_day_log(entries), self.entity_id
+            )
+            rewrite.journal.save(path)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - a lost journal is not fatal
+            logger.warning(
+                "journal_rewrite_failed",
+                entity_id=self.entity_id,
+                trigger=trigger,
+                error=str(error),
+            )
+            # The day is not thrown away with the call: the next rewrite gets
+            # these entries again, in front of whatever has happened since.
+            self.planner.day_log.restore(entries)
+            self.trace.planner.write(
+                {
+                    "event": "journal_rewrite_failed",
+                    "entity_id": self.entity_id,
+                    "tick": self._model.tick,
+                    "trigger": trigger,
+                    "error": str(error),
+                    "duration_ms": rewrite_duration_ms(started),
+                }
+            )
+            return
+        self.ledger.add_journal(rewrite.usage)
+        logger.info(
+            "journal_rewritten",
+            entity_id=self.entity_id,
+            trigger=trigger,
+            truncated=list(rewrite.truncated),
+        )
+        self.trace.planner.write(
+            {
+                "event": "journal_rewrite",
+                "entity_id": self.entity_id,
+                "tick": self._model.tick,
+                "trigger": trigger,
+                "sections": dict(rewrite.token_counts),
+                "journal": rewrite.journal.all_sections(),
+                "truncated": list(rewrite.truncated),
+                "duration_ms": rewrite_duration_ms(started),
+                "usage": dict(rewrite.usage),
+                "model": rewrite.model,
+            }
+        )
+
     # -- sleep --------------------------------------------------------------
 
     async def _sleeping_tick(
@@ -620,6 +799,19 @@ class JevAgent:
                 }
             )
             logger.info("fell_asleep", where=self._sleep_place, fatigue=info.fatigue)
+            self.planner.day_log.add(
+                self._model.tick,
+                KIND_EVENT,
+                f"you lay down to sleep on {self._sleep_place}",
+            )
+            # A collapse, or a sleep Jev chose, ends the turn just as the
+            # `sleep` tool does; that tool says so itself, so it gets no note.
+            if not self._wake_waiters:
+                self._note_for_planner(
+                    SLEEP_NOTE.format(tick=self._model.tick, where=self._sleep_place)
+                )
+            self.planner.end_turn_now()
+            self._start_journal_rewrite(TRIGGER_SLEEP)
             return
         if info.asleep or self._asleep_since < 0:
             return
@@ -646,6 +838,8 @@ class JevAgent:
             }
         )
         logger.info("woke_up", reason=record.reason, ticks=record.ticks_slept)
+        self.planner.day_log.add(self._model.tick, KIND_EVENT, record.to_text())
+        self.planner.note_life_event(LIFE_WOKE)
         self._release_wake_waiters(record.to_text())
 
     def _release_wake_waiters(self, text: str) -> None:
@@ -984,6 +1178,7 @@ async def run_agent(
     log_root: Path | None = None,
     planner_model: str = "",
     jev_model: str = "",
+    journal_model: str = "",
 ) -> None:
     """Build every piece and run one actor until it is interrupted."""
     import os
@@ -991,7 +1186,12 @@ async def run_agent(
     world = WorldClient(server_address, entity_id)
     jev = TypeSafeJevClient(jev_model or os.environ.get("JEV_MODEL", "jev-latest"))
     agent = JevAgent(
-        world, jev, entity_id, log_root=log_root, planner_model=planner_model
+        world,
+        jev,
+        entity_id,
+        log_root=log_root,
+        planner_model=planner_model,
+        journal_model=journal_model,
     )
     try:
         await agent.run()

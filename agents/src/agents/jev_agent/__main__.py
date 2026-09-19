@@ -47,6 +47,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--planner-model", default="", help="override PLANNER_MODEL")
     parser.add_argument("--jev-model", default="", help="override JEV_MODEL")
+    parser.add_argument(
+        "--journal-model",
+        default="",
+        help="override JOURNAL_MODEL; defaults to the planner's model",
+    )
     parser.add_argument("--log-level", default="info", help="debug, info, warning")
     return parser.parse_args(argv)
 
@@ -74,6 +79,7 @@ async def _main_async(args: argparse.Namespace) -> None:
             log_root=resolve_log_root(args.log_root),
             planner_model=args.planner_model,
             jev_model=args.jev_model,
+            journal_model=args.journal_model,
         )
     )
     for signal_name in (signal.SIGINT, signal.SIGTERM):

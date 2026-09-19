@@ -125,8 +125,8 @@ export interface InterpolatedEntity {
   // Stats (defaults are used until the server reports real values)
   health: number;
   maxHealth: number;
-  hunger: number;
-  maxHunger: number;
+  food: number;
+  maxFood: number;
   wielded: string;
   alive: boolean;
   /** Tiredness, 0 = fresh; `maxFatigue` is the collapse point. */
@@ -206,7 +206,7 @@ function easeOutQuad(t: number): number {
 }
 
 const DEFAULT_MAX_HEALTH = 20;
-const DEFAULT_MAX_HUNGER = 100;
+const DEFAULT_MAX_FOOD = 100;
 const DEFAULT_MAX_FATIGUE = 100;
 
 /**
@@ -832,8 +832,8 @@ export class WorldState {
     const previousHealth = entity.health;
     if (update.max_health !== undefined) entity.maxHealth = update.max_health;
     if (update.health !== undefined) entity.health = update.health;
-    if (update.max_hunger !== undefined) entity.maxHunger = update.max_hunger;
-    if (update.hunger !== undefined) entity.hunger = update.hunger;
+    if (update.max_food !== undefined) entity.maxFood = update.max_food;
+    if (update.food !== undefined) entity.food = update.food;
     if (update.wielded !== undefined) entity.wielded = update.wielded;
     if (update.alive !== undefined) entity.alive = update.alive;
     if (update.max_fatigue !== undefined) entity.maxFatigue = update.max_fatigue;
@@ -992,7 +992,7 @@ export class WorldState {
    */
   private createInterpolatedEntity(state: EntityState): InterpolatedEntity {
     const maxHealth = state.max_health ?? DEFAULT_MAX_HEALTH;
-    const maxHunger = state.max_hunger ?? DEFAULT_MAX_HUNGER;
+    const maxFood = state.max_food ?? DEFAULT_MAX_FOOD;
     return {
       entityId: state.entity_id,
       entityType: state.entity_type,
@@ -1006,8 +1006,8 @@ export class WorldState {
       moveStartTime: performance.now(),
       health: state.health ?? maxHealth,
       maxHealth,
-      hunger: state.hunger ?? maxHunger,
-      maxHunger,
+      food: state.food ?? maxFood,
+      maxFood,
       wielded: state.wielded ?? '',
       alive: state.alive ?? true,
       fatigue: state.fatigue ?? 0,

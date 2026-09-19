@@ -1,4 +1,4 @@
-"""Per-tick entity bookkeeping: hunger, starvation, regeneration, respawn."""
+"""Per-tick entity bookkeeping: food, starvation, regeneration, respawn."""
 
 import structlog
 
@@ -7,7 +7,7 @@ from typing import Mapping
 from .combat import WOLF_TYPE, apply_damage
 from .events import RespawnEvent, TickEvents
 from .exceptions import ObjectNotFoundError
-from .items import BED, FOOD_HUNGER_RESTORE, REST_HEAL
+from .items import BED, FOOD_RESTORE, REST_HEAL
 from .settlement import NoSettlementSiteError, nearest_free_walkable
 from .sleep import GROUND, RESPAWN_FATIGUE, is_tired
 from .state import World
@@ -20,17 +20,17 @@ from .types import (
 
 logger = structlog.get_logger()
 
-# Hunger drops one point every HUNGER_INTERVAL_TICKS ticks. At a 2 s tick a
+# Food drops one point every FOOD_INTERVAL_TICKS ticks. At a 2 s tick a
 # full stomach (100) lasts ~13 minutes before starvation damage begins.
-HUNGER_PER_TICK = 1
-HUNGER_INTERVAL_TICKS = 4
+FOOD_PER_TICK = 1
+FOOD_INTERVAL_TICKS = 4
 STARVATION_INTERVAL_TICKS = 4
 STARVATION_DAMAGE = 1
 REGEN_INTERVAL_TICKS = 5
 REGEN_AMOUNT = 1
-REGEN_HUNGER_THRESHOLD = 50
+REGEN_FOOD_THRESHOLD = 50
 RESPAWN_DELAY_TICKS = 10
-RESPAWN_HUNGER = 50
+RESPAWN_FOOD = 50
 
 # Maximum ring radius searched by find_free_tile before giving up.
 FREE_TILE_SEARCH_RADIUS = 64
@@ -51,27 +51,27 @@ RESPAWN_RING_DIRECTIONS = (
 )
 
 
-def hunger_restored(kind: str, amount: int) -> int:
-    """Hunger restored by eating `amount` units of `kind` (0 if inedible)."""
-    return FOOD_HUNGER_RESTORE.get(kind, 0) * amount
+def food_restored(kind: str, amount: int) -> int:
+    """Food restored by eating `amount` units of `kind` (0 if inedible)."""
+    return FOOD_RESTORE.get(kind, 0) * amount
 
 
-def process_hunger_phase(world: World, events: TickEvents) -> None:
-    """Drop hunger, then apply starvation damage to entities at hunger 0.
+def process_food_phase(world: World, events: TickEvents) -> None:
+    """Drop food, then apply starvation damage to entities at food 0.
 
-    Wolves never starve; their hunger stays at max.
+    Wolves never starve; their food stays at max.
     """
-    if world.tick % HUNGER_INTERVAL_TICKS == 0:
+    if world.tick % FOOD_INTERVAL_TICKS == 0:
         for entity in sorted(world.living_entities(), key=lambda e: e.entity_id):
             if entity.entity_type == WOLF_TYPE:
                 continue
-            world.set_entity(entity.with_hunger(entity.hunger - HUNGER_PER_TICK))
+            world.set_entity(entity.with_food(entity.food - FOOD_PER_TICK))
 
     if world.tick % STARVATION_INTERVAL_TICKS != 0:
         return
 
     for entity in sorted(world.living_entities(), key=lambda e: e.entity_id):
-        if entity.entity_type == WOLF_TYPE or entity.hunger > 0:
+        if entity.entity_type == WOLF_TYPE or entity.food > 0:
             continue
         apply_damage(world, entity.entity_id, STARVATION_DAMAGE, "", events)
 
@@ -88,7 +88,7 @@ def process_health_regen(world: World) -> None:
     for entity in sorted(world.living_entities(), key=lambda e: e.entity_id):
         if entity.health >= entity.max_health:
             continue
-        if entity.hunger <= REGEN_HUNGER_THRESHOLD:
+        if entity.food <= REGEN_FOOD_THRESHOLD:
             continue
         if is_tired(entity):
             continue
@@ -105,7 +105,7 @@ def process_rest_phase(
     """Rest on a bed to heal REST_HEAL health (docs/08_building.md, "Resting").
 
     One rester per bed per tick: the lexicographically smallest entity id wins,
-    the others are told the bed is taken. Resting needs hunger above zero.
+    the others are told the bed is taken. Resting needs food above zero.
     """
     taken: set[str] = set()
 
@@ -127,7 +127,7 @@ def process_rest_phase(
         if bed.object_id in taken:
             events.acted(entity_id, "rest", False, f"{bed.object_id} is taken")
             continue
-        if entity.hunger <= 0:
+        if entity.food <= 0:
             events.acted(entity_id, "rest", False, "too hungry to rest")
             continue
 
@@ -211,7 +211,7 @@ def process_respawns(world: World, events: TickEvents) -> None:
             continue
 
         world.set_entity(
-            entity.as_respawned(entity.position, RESPAWN_HUNGER, RESPAWN_FATIGUE)
+            entity.as_respawned(entity.position, RESPAWN_FOOD, RESPAWN_FATIGUE)
         )
         world.attach_entity(entity_id, position)
         world.clear_death(entity_id)

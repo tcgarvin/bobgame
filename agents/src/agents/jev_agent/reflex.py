@@ -12,12 +12,13 @@ what a good reflex is; the planner writes the instruction.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 import structlog
 
+from .geometry import Coord
 from .stint import Brief
 from .worldmodel import TickDigest, WorldModel
 
@@ -65,6 +66,8 @@ class ReflexBrief:
     trigger_distance: int
     notes: str = ""
     shouts: tuple[str, ...] = ()
+    # Named destinations Jev may step toward while the reflex runs.
+    places: Mapping[str, Coord] = field(default_factory=dict)
 
     @property
     def registered(self) -> bool:
@@ -79,6 +82,7 @@ class ReflexBrief:
             max_ticks=self.max_ticks,
             notes=self.notes,
             shouts=self.shouts,
+            places=self.places,
         )
 
     def prompt_line(self) -> str:
@@ -95,6 +99,14 @@ class ReflexBrief:
             parts.append(f"notes: {self.notes}")
         if self.shouts:
             parts.append("shouts: " + "; ".join(self.shouts))
+        if self.places:
+            parts.append(
+                "places: "
+                + "; ".join(
+                    f"{name} ({target[0]}, {target[1]})"
+                    for name, target in self.places.items()
+                )
+            )
         return " | ".join(parts)
 
     def as_payload(self) -> dict[str, Any]:
@@ -106,6 +118,9 @@ class ReflexBrief:
             "trigger_distance": self.trigger_distance,
             "notes": self.notes,
             "shouts": list(self.shouts),
+            "places": {
+                name: [target[0], target[1]] for name, target in self.places.items()
+            },
         }
 
 
@@ -136,7 +151,19 @@ def reflex_from_payload(payload: Mapping[str, Any]) -> ReflexBrief:
         shouts=(
             tuple(str(phrase) for phrase in shouts) if isinstance(shouts, list) else ()
         ),
+        places=_places_from_payload(payload.get("places", {})),
     )
+
+
+def _places_from_payload(raw: Any) -> dict[str, Coord]:
+    """Named places from `reflex.json`; a file written before they existed has none."""
+    if not isinstance(raw, dict):
+        return {}
+    places: dict[str, Coord] = {}
+    for name, position in raw.items():
+        if isinstance(position, (list, tuple)) and len(position) == 2:
+            places[str(name)] = (int(position[0]), int(position[1]))
+    return places
 
 
 class ReflexStore:

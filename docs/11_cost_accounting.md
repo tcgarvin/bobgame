@@ -65,6 +65,12 @@ Every Jev tick row (the ones that already carry `input_tokens` and
 requests. They record the same `usage` block, computed from the captured
 `run_messages`.
 
+`journal_rewrite` records (the sleep-time journal,
+[docs/12_sleep_journal.md](12_sleep_journal.md)) carry the same `usage` block
+for the one call that rewrote the journal, plus `trigger`, `sections`,
+`truncated`, `duration_ms` and `model`. `journal_rewrite_failed` made no
+successful call and carries no `usage`.
+
 ### `agents/agent-<id>/conversations.jsonl.gz`
 
 Each `turn` record gains `usage` in the same shape as the planner's
@@ -86,7 +92,7 @@ Written once when the agent starts, next to `reflex.json`:
 
 The text report gains a "cost" section and the `--json` dump a `cost` object:
 
-- run total, split `planner` / `converser` (moves + notes) / `jev`;
+- run total, split `planner` / `converser` (moves + notes) / `journal` / `jev`;
 - per settler: the same split, plus planner cost per turn (mean, max) and
   the most expensive single turn with a deep link;
 - rates: dollars per 100 world ticks and dollars per wall-clock hour
@@ -114,8 +120,9 @@ Each agent keeps a `CostLedger` (in `pricing.py`) of everything it has spent
 since its process started, and serialises it into every status report:
 
 ```json
-{"planner_usd": 0.0049, "converser_usd": 0.0, "jev_usd": 0.0025,
- "total_usd": 0.0074, "planner_turns": 1, "jev_calls": 60}
+{"planner_usd": 0.0049, "converser_usd": 0.0, "journal_usd": 0.002,
+ "jev_usd": 0.0025, "total_usd": 0.0094, "planner_turns": 1,
+ "journal_rewrites": 1, "jev_calls": 60}
 ```
 
 - `planner_usd` grows by `usage["cost_usd"]` after each planner turn

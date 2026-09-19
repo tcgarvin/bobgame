@@ -41,8 +41,8 @@ def entity_state(entity: Entity, tick: int) -> dict[str, Any]:
         "tags": list(entity.tags),
         "health": entity.health,
         "max_health": entity.max_health,
-        "hunger": entity.hunger,
-        "max_hunger": entity.max_hunger,
+        "food": entity.food,
+        "max_food": entity.max_food,
         "wielded": entity.wielded,
         "alive": entity.alive,
         "fatigue": entity.fatigue,
@@ -71,6 +71,9 @@ def entity_from_state(state: dict[str, Any], tick: int) -> Entity:
     The payload carries only the invitation flag, so an open invitation is
     rebuilt as one that lasts until just after `tick`, with no text.
 
+    Recordings made before 2026-09-18 call the food stat `hunger`/`max_hunger`;
+    those keys are still read here so old runs replay.
+
     Raises:
         KeyError: If a required field is missing.
     """
@@ -90,8 +93,8 @@ def entity_from_state(state: dict[str, Any], tick: int) -> Entity:
         inventory=inventory,
         health=int(state.get("health", 0)),
         max_health=int(state.get("max_health", 20)),
-        hunger=int(state.get("hunger", 0)),
-        max_hunger=int(state.get("max_hunger", 100)),
+        food=int(state.get("food", state.get("hunger", 0))),
+        max_food=int(state.get("max_food", state.get("max_hunger", 100))),
         wielded=state.get("wielded", ""),
         alive=bool(state.get("alive", True)),
         fatigue=int(state.get("fatigue", 0)),

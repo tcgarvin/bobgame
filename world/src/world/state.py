@@ -144,8 +144,8 @@ class Entity(BaseModel, frozen=True):
     inventory: Inventory = Inventory()
     health: int = 20
     max_health: int = 20
-    hunger: int = 80
-    max_hunger: int = 100
+    food: int = 80
+    max_food: int = 100
     wielded: str = ""  # item kind currently wielded, "" if none
     alive: bool = True
 
@@ -180,10 +180,10 @@ class Entity(BaseModel, frozen=True):
         clamped = max(0, min(self.max_health, new_health))
         return self.model_copy(update={"health": clamped})
 
-    def with_hunger(self, new_hunger: int) -> "Entity":
-        """Return copy with hunger clamped to [0, max_hunger]."""
-        clamped = max(0, min(self.max_hunger, new_hunger))
-        return self.model_copy(update={"hunger": clamped})
+    def with_food(self, new_food: int) -> "Entity":
+        """Return copy with food clamped to [0, max_food]."""
+        clamped = max(0, min(self.max_food, new_food))
+        return self.model_copy(update={"food": clamped})
 
     def with_wielded(self, kind: str) -> "Entity":
         """Return copy with a different wielded item kind ("" for none)."""
@@ -252,16 +252,14 @@ class Entity(BaseModel, frozen=True):
             }
         )
 
-    def as_respawned(
-        self, position: Position, hunger: int, fatigue: int = 0
-    ) -> "Entity":
+    def as_respawned(self, position: Position, food: int, fatigue: int = 0) -> "Entity":
         """Return a fresh copy for respawn at `position`."""
         return self.model_copy(
             update={
                 "position": position,
                 "alive": True,
                 "health": self.max_health,
-                "hunger": max(0, min(self.max_hunger, hunger)),
+                "food": max(0, min(self.max_food, food)),
                 "fatigue": max(0, min(self.max_fatigue, fatigue)),
                 "asleep": False,
                 "sleeping_on": "",

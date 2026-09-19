@@ -735,8 +735,8 @@ def test_summarise_reflexes_reports_firings_and_health_change(
                 "tick": 12,
                 "stint_id": "mira-10",
                 "end_reason": "death",
-                "report": "STINT REPORT: ...\n  stats: hp 10/20, hunger 5/10 "
-                "-> hp 0/20, hunger 5/10",
+                "report": "STINT REPORT: ...\n  stats: hp 10/20, food 5/10 "
+                "-> hp 0/20, food 5/10",
             },
         ],
     )
@@ -775,8 +775,8 @@ def test_summarise_reflexes_reports_firings_and_health_change(
                 "tick": 23,
                 "stint_id": "theo-20",
                 "end_reason": "threat_gone",
-                "report": "STINT REPORT: ...\n  stats: hp 15/20, hunger 4/10 "
-                "-> hp 13/20, hunger 4/10",
+                "report": "STINT REPORT: ...\n  stats: hp 15/20, food 4/10 "
+                "-> hp 13/20, food 4/10",
             },
             # An ordinary stint must not be counted as a reflex.
             {
@@ -793,8 +793,8 @@ def test_summarise_reflexes_reports_firings_and_health_change(
                 "tick": 35,
                 "stint_id": "theo-30",
                 "end_reason": "eject",
-                "report": "STINT REPORT: ...\n  stats: hp 13/20, hunger 4/10 "
-                "-> hp 12/20, hunger 3/10",
+                "report": "STINT REPORT: ...\n  stats: hp 13/20, food 4/10 "
+                "-> hp 12/20, food 3/10",
             },
         ],
     )
@@ -1161,6 +1161,28 @@ def cost_run_dir(tmp_path: Path) -> Path:
                     "cost_usd": 0.03,
                 },
             },
+            {
+                "event": "journal_rewrite",
+                "entity_id": "mira",
+                "tick": 25,
+                "trigger": "sleep",
+                "sections": {"Me": 120, "Tomorrow": 90},
+                "truncated": ["Story so far"],
+                "duration_ms": 4200,
+                "model": "openrouter:qwen/qwen3.7-flash",
+                "usage": {"input_tokens": 9_000, "requests": 1, "cost_usd": 0.002},
+            },
+            {
+                "event": "journal_rewrite",
+                "entity_id": "mira",
+                "tick": 40,
+                "trigger": "death",
+                "sections": {"Me": 100},
+                "truncated": [],
+                "duration_ms": 3000,
+                "model": "openrouter:qwen/qwen3.7-flash",
+                "usage": {"input_tokens": 8_000, "requests": 1, "cost_usd": 0.001},
+            },
         ],
     )
     write_gz_jsonl(
@@ -1225,6 +1247,14 @@ def cost_run_dir(tmp_path: Path) -> Path:
                     "requests": 1,
                 },
             },
+            {
+                "event": "journal_rewrite_failed",
+                "entity_id": "theo",
+                "tick": 35,
+                "trigger": "sleep",
+                "error": "no route to host",
+                "duration_ms": 900,
+            },
         ],
     )
     return root
@@ -1237,7 +1267,8 @@ def test_per_agent_cost_rollup(cost_run_dir: Path) -> None:
     assert mira["converser_usd"] == pytest.approx(0.0007)
     # Jev rows carry cost_usd, so pricing.json is not consulted.
     assert mira["jev_usd"] == pytest.approx(0.003)
-    assert mira["total_usd"] == pytest.approx(0.0437)
+    assert mira["journal_usd"] == pytest.approx(0.003)
+    assert mira["total_usd"] == pytest.approx(0.0467)
     assert mira["planner_cost_available"] is True
     assert mira["cost_missing"] is False
     assert mira["turns_with_usage"] == 2
@@ -1263,10 +1294,11 @@ def test_jev_cost_from_tokens_uses_run_price(cost_run_dir: Path) -> None:
 def test_run_level_cost_totals_and_rates(cost_run_dir: Path) -> None:
     cost = analyse(cost_run_dir)["totals"]["cost"]
     jev = 0.003 + 2.0 * analyze_run.JEV_USD_PER_MILLION_INPUT_TOKENS
-    total = 0.04 + 0.0007 + jev
+    total = 0.04 + 0.0007 + 0.003 + jev
     assert cost["planner_usd"] == pytest.approx(0.04)
     assert cost["converser_usd"] == pytest.approx(0.0007)
     assert cost["jev_usd"] == pytest.approx(jev)
+    assert cost["journal_usd"] == pytest.approx(0.003)
     assert cost["total_usd"] == pytest.approx(total)
     assert cost["planner_cost_available"] is True
     assert cost["planner_cost_is_lower_bound"] is True
@@ -1340,3 +1372,50 @@ def test_dollar_formatting_switches_at_one_dollar() -> None:
     assert analyze_run.format_usd(0.0) == "$0.0000"
     assert analyze_run.format_usd(1.0) == "$1.00"
     assert analyze_run.format_usd(12.345) == "$12.35"
+
+
+# --------------------------------------------------------------------------
+# the sleep-time journal (docs/12_sleep_journal.md)
+# --------------------------------------------------------------------------
+
+
+def test_journal_rewrites_are_counted_and_billed(cost_run_dir: Path) -> None:
+    payload = analyse(cost_run_dir)
+    agents = {a["agent"]: a["cost"] for a in payload["agents"]}
+
+    mira = agents["mira"]
+    assert mira["journal_rewrites"] == 2
+    assert mira["journal_failures"] == 0
+    assert mira["journal_triggers"] == {"sleep": 1, "death": 1}
+    assert mira["journal_truncations"] == {"Story so far": 1}
+
+    theo = agents["theo"]
+    assert theo["journal_rewrites"] == 0
+    assert theo["journal_failures"] == 1
+    assert theo["journal_usd"] == pytest.approx(0.0)
+
+    totals = payload["totals"]["cost"]
+    assert totals["journal_rewrites"] == 2
+    assert totals["journal_failures"] == 1
+
+
+def test_journal_section_and_cost_column_are_printed(
+    cost_run_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert analyze_run.main([str(cost_run_dir)]) == 0
+    out = capsys.readouterr().out
+
+    assert "journal: $0.0030" in out
+    assert "== journal (docs/12_sleep_journal.md) ==" in out
+    assert "rewrites: 2  failures: 1" in out
+    assert "sleep x1, death x1" in out
+    assert "Story so far x1" in out
+
+
+def test_a_run_without_journal_rewrites_says_so(
+    run_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert analyze_run.main([str(run_dir)]) == 0
+    out = capsys.readouterr().out
+
+    assert "no journal rewrites recorded" in out

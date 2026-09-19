@@ -78,15 +78,15 @@ class TestVisibility:
         self, world: World, service: ObservationServiceServicer
     ) -> None:
         world._entities["ada"] = world.get_entity("ada").model_copy(
-            update={"health": 12, "hunger": 44, "wielded": "axe", "alive": True}
+            update={"health": 12, "food": 44, "wielded": "axe", "alive": True}
         )
 
         observation = _observe(service)
 
         assert observation.self.health == 12
         assert observation.self.max_health == 20
-        assert observation.self.hunger == 44
-        assert observation.self.max_hunger == 100
+        assert observation.self.food == 44
+        assert observation.self.max_food == 100
         assert observation.self.wielded == "axe"
         assert observation.self.alive is True
 

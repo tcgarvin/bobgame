@@ -3,11 +3,15 @@
  *
  * The markup lives in index.html; this module only wires it to the WorldState
  * and re-renders it when the world changes. It deliberately knows nothing
- * about Phaser: camera work is delegated through OverlayCallbacks.
+ * about Phaser: camera work is delegated through OverlayCallbacks, and the
+ * wielded-tool icon is drawn from the sprite index handed in by GameScene.
  *
- * In replay mode the panel also shows the `agent_detail` sections ("what Jev
- * saw", the planner turn and the planner's memory), which are requested
- * through `onRequestAgentDetail` whenever the selection or the tick changes.
+ * The panel is written for someone watching a settler, not for someone reading
+ * a trace: who this is, how it is doing, what it is doing now, what it is
+ * thinking, what it has written in its journal. Every number behind that lives
+ * in the collapsed "Details" block at the bottom, fed by `agent_detail`, which
+ * is requested through `onRequestAgentDetail` whenever the selection or the
+ * tick changes (in replay and in live mode alike).
  */
 
 import type { InterpolatedEntity, TrackedObject, WorldState } from '../network';
@@ -19,11 +23,16 @@ import type {
   StintBrief,
   StintOptionProbability,
 } from '../network';
+import type { SpriteIndex } from '../sprites/SpriteIndex';
 import {
   CONVERSATION_TYPE,
   parseConversationParticipants,
   parseConversationTranscript,
 } from '../conversation';
+import { actionInWords } from './ActionWords';
+import { barRow, details, kvRow, label, mutedDiv, mutedItem, noteLine, pre, textDiv } from './dom';
+import { createItemIcon } from './ItemIcon';
+import { journalParts, journalRawText } from './JournalView';
 
 /** Modes with a distinct badge color (index.html `.mode-badge.*`). */
 const KNOWN_MODES = ['planning', 'stint', 'idle', 'reflex', 'conversation'];
@@ -31,11 +40,11 @@ const KNOWN_MODES = ['planning', 'stint', 'idle', 'reflex', 'conversation'];
 export interface OverlayCallbacks {
   /** Called when the user picks an entity (via dropdown or by clicking it). */
   onSelectEntity: (entityId: string) => void;
-  /** Replay only: ask the server for the full detail at this entity/tick. */
+  /** Ask the detail server for the full detail at this entity/tick. */
   onRequestAgentDetail: (entityId: string, tickId: number) => void;
 }
 
-/** Entity types that get a hunger bar and a player-style label. */
+/** Entity types that get a food bar and a player-style label. */
 const PLAYER_TYPE = 'player';
 
 /**
@@ -68,8 +77,20 @@ export function formatAgentCost(cost: AgentCost): string {
   return `${parts.join(' · ')} (${turns}, ${cost.jev_calls} Jev calls)`;
 }
 
-/** How long to wait before re-requesting detail while playback runs. */
+/** How long to wait before re-requesting detail while the tick keeps moving. */
 const DETAIL_DEBOUNCE_MS = 250;
+
+/** The one notable state worth a chip next to the mode badge, or ''. */
+export function statusChip(entity: InterpolatedEntity): { text: string; kind: string } | null {
+  if (!entity.alive) return { text: 'dead', kind: 'dead' };
+  if (entity.asleep) {
+    const collapsed =
+      entity.maxFatigue > 0 && entity.fatigue >= entity.maxFatigue;
+    return collapsed ? { text: 'collapsed', kind: '' } : { text: 'asleep', kind: '' };
+  }
+  if (entity.openToTalk) return { text: 'open to talk', kind: 'talk' };
+  return null;
+}
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -111,6 +132,7 @@ function formatPercent(value: number | undefined): string {
 export class OverlayUI {
   private worldState: WorldState;
   private callbacks: OverlayCallbacks;
+  private spriteIndex?: SpriteIndex;
 
   private picker: HTMLSelectElement;
   private followIndicator: HTMLElement;
@@ -118,15 +140,18 @@ export class OverlayUI {
   private costEl: HTMLElement;
   private panel: HTMLElement;
   private nameEl: HTMLElement;
+  private wieldedEl: HTMLElement;
   private modeEl: HTMLElement;
+  private statusEl: HTMLElement;
   private statsEl: HTMLElement;
   private briefEl: HTMLElement;
   private briefMetaEl: HTMLElement;
   private thoughtEl: HTMLElement;
   private jevEl: HTMLElement;
+  private journalEl: HTMLElement;
   private inventoryEl: HTMLElement;
   private logEl: HTMLElement;
-  private replayEl: HTMLElement;
+  private debugEl: HTMLElement;
   private jevStateEl: HTMLElement;
   private plannerEl: HTMLElement;
   private memoryEl: HTMLElement;
@@ -137,9 +162,10 @@ export class OverlayUI {
   private requestedDetailKey: string = '';
   private detailTimer: number | null = null;
 
-  constructor(worldState: WorldState, callbacks: OverlayCallbacks) {
+  constructor(worldState: WorldState, callbacks: OverlayCallbacks, spriteIndex?: SpriteIndex) {
     this.worldState = worldState;
     this.callbacks = callbacks;
+    this.spriteIndex = spriteIndex;
 
     this.picker = requireElement<HTMLSelectElement>('entity-picker');
     this.followIndicator = requireElement('follow-indicator');
@@ -147,15 +173,18 @@ export class OverlayUI {
     this.costEl = requireElement('cost-readout');
     this.panel = requireElement('agent-panel');
     this.nameEl = requireElement('ap-name');
+    this.wieldedEl = requireElement('ap-wielded');
     this.modeEl = requireElement('ap-mode');
+    this.statusEl = requireElement('ap-status');
     this.statsEl = requireElement('ap-stats');
     this.briefEl = requireElement('ap-brief');
     this.briefMetaEl = requireElement('ap-brief-meta');
     this.thoughtEl = requireElement('ap-thought');
     this.jevEl = requireElement('ap-jev');
+    this.journalEl = requireElement('ap-journal');
     this.inventoryEl = requireElement('ap-inventory');
     this.logEl = requireElement('ap-log');
-    this.replayEl = requireElement('ap-replay');
+    this.debugEl = requireElement('ap-debug');
     this.jevStateEl = requireElement('ap-jev-state');
     this.plannerEl = requireElement('ap-planner');
     this.memoryEl = requireElement('ap-memory');
@@ -279,40 +308,80 @@ export class OverlayUI {
     const entity = this.worldState.getSelectedEntity();
 
     if (!entityId || !entity) {
-      this.nameEl.textContent = 'No entity selected';
-      this.modeEl.textContent = 'idle';
-      this.modeEl.className = 'mode-badge idle';
-      this.statsEl.replaceChildren();
-      this.setText(this.briefEl, '');
-      this.briefMetaEl.replaceChildren();
-      this.setText(this.thoughtEl, '');
-      this.setText(this.jevEl, '');
-      this.setText(this.inventoryEl, '');
-      this.logEl.replaceChildren(this.mutedItem('-'));
-      this.replayEl.classList.add('hidden');
-      this.conversationEl.classList.add('hidden');
+      this.clearPanel();
       return;
     }
 
     const status = this.worldState.getAgentStatus(entityId);
     const detail = this.requestDetail(entityId);
+    const isPlayer = entity.entityType === PLAYER_TYPE;
+    const stint = detail?.record ?? status?.stint ?? null;
 
-    this.nameEl.textContent = `${entityId} (${entity.entityType})`;
+    this.renderHeader(entityId, entity, status?.mode ?? (isPlayer ? 'idle' : entity.entityType));
+    this.renderStats(entity, isPlayer);
+    this.renderDoingNow(status?.brief ?? '', stint, detail);
+    this.renderConversation(entityId);
+    this.setText(this.thoughtEl, status?.planner_thought ?? detail?.planner_turn?.thought ?? '');
+    this.renderJournal(detail);
+    this.renderInventory(entity.inventory);
+    this.renderLog(entityId);
+    this.renderDetails(entity, stint, detail);
+  }
 
-    const mode = status?.mode ?? (entity.entityType === PLAYER_TYPE ? 'idle' : entity.entityType);
+  /** Reset every section to its empty state (nothing selected). */
+  private clearPanel(): void {
+    this.nameEl.textContent = 'No entity selected';
+    this.wieldedEl.classList.add('hidden');
+    this.wieldedEl.replaceChildren();
+    this.modeEl.textContent = 'idle';
+    this.modeEl.className = 'mode-badge idle';
+    this.statusEl.classList.add('hidden');
+    this.statsEl.replaceChildren();
+    this.setText(this.briefEl, '');
+    this.jevEl.replaceChildren();
+    this.briefMetaEl.replaceChildren();
+    this.setText(this.thoughtEl, '');
+    this.journalEl.replaceChildren(mutedDiv('no journal yet'));
+    this.setText(this.inventoryEl, '');
+    this.logEl.replaceChildren(mutedItem('-'));
+    this.debugEl.replaceChildren();
+    this.jevStateEl.replaceChildren();
+    this.plannerEl.replaceChildren();
+    this.memoryEl.replaceChildren();
+    this.conversationEl.classList.add('hidden');
+  }
+
+  /** Name, the wielded tool's icon and tier, the mode badge and a status chip. */
+  private renderHeader(entityId: string, entity: InterpolatedEntity, mode: string): void {
+    this.nameEl.textContent = entityId;
+
+    const icon = createItemIcon(this.spriteIndex, entity.wielded);
+    if (icon) {
+      const children: HTMLElement[] = [icon.element];
+      if (icon.tier) {
+        const tier = document.createElement('span');
+        tier.className = 'tier';
+        tier.textContent = icon.tier;
+        children.unshift(tier);
+      }
+      this.wieldedEl.replaceChildren(...children);
+      this.wieldedEl.classList.remove('hidden');
+    } else {
+      this.wieldedEl.replaceChildren();
+      this.wieldedEl.classList.add('hidden');
+    }
+
     this.modeEl.textContent = mode;
     this.modeEl.className = `mode-badge ${KNOWN_MODES.includes(mode) ? mode : ''}`;
 
-    this.renderStats(entity, entity.entityType === PLAYER_TYPE);
-
-    const stint = detail?.record ?? status?.stint ?? null;
-    this.renderBrief(status?.brief ?? '', stint, detail);
-    this.renderConversation(entityId);
-    this.setText(this.thoughtEl, status?.planner_thought ?? detail?.planner_turn?.thought ?? '');
-    this.renderJev(stint);
-    this.renderInventory(entity.inventory);
-    this.renderLog(entityId);
-    this.renderReplaySections(detail);
+    const chip = statusChip(entity);
+    if (chip) {
+      this.statusEl.textContent = chip.text;
+      this.statusEl.className = `status-chip ${chip.kind}`;
+    } else {
+      this.statusEl.className = 'status-chip hidden';
+      this.statusEl.textContent = '';
+    }
   }
 
   /** Find the conversation object, if any, this entity currently sits in. */
@@ -341,18 +410,15 @@ export class OverlayUI {
     const transcript = parseConversationTranscript(conversation.state.transcript);
 
     const rows: HTMLElement[] = [
-      this.kvRow('Participants', participants.join(', ') || '-'),
-      this.kvRow('Speaker', speaker || '-'),
+      kvRow('Participants', participants.join(', ') || '-'),
+      kvRow('Speaker', speaker || '-'),
     ];
 
     if (transcript.length === 0) {
-      rows.push(this.mutedDiv('no lines yet'));
+      rows.push(mutedDiv('no lines yet'));
     } else {
       for (const line of transcript) {
-        const row = document.createElement('div');
-        row.className = 'text';
-        row.textContent = `t${line.tick} ${line.speaker}: ${line.text}`;
-        rows.push(row);
+        rows.push(textDiv(`t${line.tick} ${line.speaker}: ${line.text}`));
       }
     }
     this.conversationBodyEl.replaceChildren(...rows);
@@ -360,12 +426,11 @@ export class OverlayUI {
 
   /**
    * Ask the server for the detail at the current entity and tick, at most once
-   * per entity/tick pair, debounced while playback is running. Returns the
-   * cached detail for the current tick if it has already arrived.
+   * per entity/tick pair and debounced whenever the tick keeps moving on its
+   * own (replay playback, or a live world ticking). Returns the cached detail
+   * for the current tick if it has already arrived.
    */
   private requestDetail(entityId: string): AgentDetailMessage | null {
-    if (!this.worldState.isReplay()) return null;
-
     const status = this.worldState.getReplayStatus();
     const tickId = status ? status.tick_id : this.worldState.getCurrentTick();
     const key = `${entityId}@${tickId}`;
@@ -375,12 +440,13 @@ export class OverlayUI {
 
     if (this.requestedDetailKey === key) return null;
 
-    if (status?.playing) {
+    const movingOnItsOwn = status ? status.playing : true;
+    if (movingOnItsOwn) {
       if (this.detailTimer !== null) return null;
       this.detailTimer = window.setTimeout(() => {
         this.detailTimer = null;
         const now = this.worldState.getReplayStatus();
-        const latestTick = now ? now.tick_id : tickId;
+        const latestTick = now ? now.tick_id : this.worldState.getCurrentTick();
         const latestId = this.worldState.getSelectedEntityId();
         if (!latestId) return;
         this.requestedDetailKey = `${latestId}@${latestTick}`;
@@ -394,39 +460,33 @@ export class OverlayUI {
     return null;
   }
 
+  /** Health, food and tiredness as compact bars. */
   private renderStats(entity: InterpolatedEntity, isPlayer: boolean): void {
-    const rows: HTMLElement[] = [];
-    rows.push(this.barRow('Health', entity.health, entity.maxHealth, '#d35f5f'));
+    const rows: HTMLElement[] = [
+      barRow('Health', entity.health, entity.maxHealth, '#d35f5f'),
+    ];
     if (isPlayer) {
-      rows.push(this.barRow('Hunger', entity.hunger, entity.maxHunger, '#e0913a'));
+      rows.push(barRow('Food', entity.food, entity.maxFood, '#e0913a'));
       const state = fatigueState(entity.fatigue, entity.maxFatigue);
       rows.push(
-        this.barRow(
-          'Fatigue',
+        barRow(
+          'Tiredness',
           entity.fatigue,
           entity.maxFatigue,
           state === 'fresh' ? '#5f8dd3' : '#b07fd3',
-          `${Math.round(entity.fatigue)}/${Math.round(entity.maxFatigue)} ${state}`
+          state
         )
       );
-      if (entity.asleep) {
-        rows.push(this.kvRow('Asleep', state === 'exhausted' ? 'collapsed' : 'yes'));
-      }
-      if (entity.openToTalk) {
-        rows.push(this.kvRow('Open to talk', 'yes'));
-      }
-    }
-    rows.push(this.kvRow('Wielded', entity.wielded || 'nothing'));
-    rows.push(this.kvRow('Alive', entity.alive ? 'yes' : 'no'));
-    const cost = this.worldState.getAgentCost(entity.entityId);
-    if (cost) {
-      rows.push(this.kvRow('Spend', formatAgentCost(cost)));
     }
     this.statsEl.replaceChildren(...rows);
   }
 
-  /** The brief: instruction, success condition, ticks used of max, notes. */
-  private renderBrief(
+  /**
+   * "Doing now": the planner's instruction as the headline, then Jev's last
+   * chosen action and the criterion it was chosen on, then the small print
+   * (ticks used, success condition, travel target, notes).
+   */
+  private renderDoingNow(
     statusBrief: string,
     stint: AgentStint | null,
     detail: AgentDetailMessage | null
@@ -434,42 +494,119 @@ export class OverlayUI {
     const brief: StintBrief = detail?.stint?.brief ?? {};
     const fallbackBrief = typeof stint?.brief === 'string' ? stint.brief : '';
     this.setText(this.briefEl, brief.instruction || statusBrief || fallbackBrief);
+    this.jevEl.replaceChildren(...this.jevNowParts(stint, detail));
+    this.briefMetaEl.replaceChildren(...this.briefNoteLines(brief, stint));
+  }
 
-    const rows: HTMLElement[] = [];
-    const success = brief.success_condition ?? stint?.success_condition;
-    if (typeof success === 'string' && success) {
-      rows.push(this.kvRow('Success when', success));
-    }
+  /** Jev's chosen action in plain words, plus the reason it was offered on. */
+  private jevNowParts(
+    stint: AgentStint | null,
+    detail: AgentDetailMessage | null
+  ): HTMLElement[] {
+    const chosen = typeof stint?.action === 'string' ? stint.action : '';
+    if (!chosen) return [];
+
+    const confidence =
+      typeof stint?.confidence === 'number' ? ` · ${formatPercent(stint.confidence)} sure` : '';
+    const parts: HTMLElement[] = [textDiv(`${actionInWords(chosen)}${confidence}`, 'doing')];
+
+    const reason = detail?.criteria?.[chosen] ?? '';
+    if (reason) parts.push(textDiv(reason, 'reason'));
+    return parts;
+  }
+
+  /** The brief's small print, demoted to muted lines under the action. */
+  private briefNoteLines(brief: StintBrief, stint: AgentStint | null): HTMLElement[] {
+    const lines: HTMLElement[] = [];
     const maxTicks = stint?.max_ticks ?? brief.max_ticks;
     if (typeof stint?.ticks_used === 'number') {
-      rows.push(this.kvRow('Ticks used', `${stint.ticks_used}/${maxTicks ?? '?'}`));
+      lines.push(noteLine(`tick ${stint.ticks_used} of ${maxTicks ?? '?'}`));
     } else if (typeof maxTicks === 'number') {
-      rows.push(this.kvRow('Max ticks', String(maxTicks)));
+      lines.push(noteLine(`up to ${maxTicks} ticks`));
     }
-    const notes = brief.notes ?? stint?.notes;
-    if (typeof notes === 'string' && notes) {
-      rows.push(this.kvRow('Notes', notes));
+    const success = brief.success_condition ?? stint?.success_condition;
+    if (typeof success === 'string' && success) {
+      lines.push(noteLine(`done when: ${success}`));
     }
     const travel = brief.travel;
     if (travel && Array.isArray(travel.target)) {
-      const label = travel.label ? ` (${travel.label})` : '';
-      rows.push(this.kvRow('Travel', `(${travel.target[0]}, ${travel.target[1]})${label}`));
+      const suffix = travel.label ? ` (${travel.label})` : '';
+      lines.push(noteLine(`heading for (${travel.target[0]}, ${travel.target[1]})${suffix}`));
     }
-    this.briefMetaEl.replaceChildren(...rows);
+    const notes = brief.notes ?? stint?.notes;
+    if (typeof notes === 'string' && notes) {
+      lines.push(noteLine(`notes: ${notes}`));
+    }
+    return lines;
   }
 
-  private renderJev(stint: AgentStint | null): void {
-    if (!stint) {
-      this.setText(this.jevEl, '');
+  /** The settler's journal, the way it wrote it (docs/12_sleep_journal.md). */
+  private renderJournal(detail: AgentDetailMessage | null): void {
+    if (!detail) {
+      this.journalEl.replaceChildren(mutedDiv('loading...'));
+      return;
+    }
+    this.journalEl.replaceChildren(...journalParts(detail.journal));
+  }
+
+  /**
+   * The collapsed Details block: the numbers behind the Jev decision, its
+   * spend, the state Jev was given, the planner turn and the journal text.
+   */
+  private renderDetails(
+    entity: InterpolatedEntity,
+    stint: AgentStint | null,
+    detail: AgentDetailMessage | null
+  ): void {
+    this.debugEl.replaceChildren(...this.debugParts(entity, stint));
+
+    if (!detail) {
+      const waiting = 'no detail for this tick (is the replay server running?)';
+      this.jevStateEl.replaceChildren(mutedDiv(waiting));
+      this.plannerEl.replaceChildren(mutedDiv(waiting));
+      this.memoryEl.replaceChildren(mutedDiv(waiting));
       return;
     }
 
-    const parts: HTMLElement[] = [];
-    const chosen = typeof stint.action === 'string' ? stint.action : '';
-    parts.push(this.kvRow('Action', chosen || '-'));
+    // What Jev saw: the state it was asked about, plus every option's criterion.
+    const jevParts: HTMLElement[] = [];
+    if (detail.jev_state) {
+      jevParts.push(pre(JSON.stringify(detail.jev_state, null, 2)));
+    } else {
+      jevParts.push(mutedDiv('no Jev call at this tick'));
+    }
+    if (detail.criteria && Object.keys(detail.criteria).length > 0) {
+      jevParts.push(label('Criteria'));
+      for (const [option, description] of Object.entries(detail.criteria)) {
+        jevParts.push(kvRow(option, description));
+      }
+    }
+    this.jevStateEl.replaceChildren(...jevParts);
 
+    this.plannerEl.replaceChildren(...this.plannerParts(detail));
+
+    const raw = journalRawText(detail.journal) || (detail.memory ?? '');
+    this.memoryEl.replaceChildren(
+      raw.trim() ? pre(raw) : mutedDiv('no journal text at this tick')
+    );
+  }
+
+  /** Every option's probability plus the Jev call's numbers and this agent's spend. */
+  private debugParts(entity: InterpolatedEntity, stint: AgentStint | null): HTMLElement[] {
+    const parts: HTMLElement[] = [];
+    parts.push(kvRow('Wielded', entity.wielded || 'nothing'));
+    const cost = this.worldState.getAgentCost(entity.entityId);
+    if (cost) parts.push(kvRow('Spend', formatAgentCost(cost)));
+
+    if (!stint) {
+      parts.push(mutedDiv('no Jev decision recorded'));
+      return parts;
+    }
+
+    const chosen = typeof stint.action === 'string' ? stint.action : '';
+    parts.push(kvRow('Action', chosen || '-'));
     for (const item of readProbabilities(stint)) {
-      const row = this.barRow(
+      const row = barRow(
         item.option,
         item.probability,
         1,
@@ -479,83 +616,40 @@ export class OverlayUI {
       if (item.option === chosen) row.classList.add('chosen');
       parts.push(row);
     }
-
     if (typeof stint.confidence === 'number') {
-      parts.push(this.kvRow('Confidence', formatPercent(stint.confidence)));
+      parts.push(kvRow('Confidence', formatPercent(stint.confidence)));
     }
-    parts.push(this.kvRow('Eject', formatPercent(stint.eject)));
-    parts.push(this.kvRow('Danger', formatPercent(stint.danger)));
+    parts.push(kvRow('Eject', formatPercent(stint.eject)));
+    parts.push(kvRow('Danger', formatPercent(stint.danger)));
     if (typeof stint.latency_ms === 'number') {
-      parts.push(this.kvRow('Latency', `${Math.round(stint.latency_ms)} ms`));
+      parts.push(kvRow('Latency', `${Math.round(stint.latency_ms)} ms`));
     }
     if (typeof stint.input_tokens === 'number') {
-      parts.push(this.kvRow('Input tokens', String(stint.input_tokens)));
+      parts.push(kvRow('Input tokens', String(stint.input_tokens)));
     }
     if (typeof stint.ticks_left === 'number') {
-      parts.push(this.kvRow('Ticks left', String(stint.ticks_left)));
+      parts.push(kvRow('Ticks left', String(stint.ticks_left)));
     }
     const result = stint.intent_result ?? stint.result;
     if (typeof result === 'string' && result) {
-      parts.push(this.kvRow('Result', result));
+      parts.push(kvRow('Result', result));
     }
     if (typeof stint.options === 'number') {
-      parts.push(this.kvRow('Options', String(stint.options)));
+      parts.push(kvRow('Options', String(stint.options)));
     }
-
-    this.jevEl.classList.remove('muted');
-    this.jevEl.replaceChildren(...parts);
-  }
-
-  /** The replay-only sections, hidden entirely in live mode. */
-  private renderReplaySections(detail: AgentDetailMessage | null): void {
-    if (!this.worldState.isReplay()) {
-      this.replayEl.classList.add('hidden');
-      return;
-    }
-    this.replayEl.classList.remove('hidden');
-
-    if (!detail) {
-      this.jevStateEl.replaceChildren(this.mutedDiv('loading...'));
-      this.plannerEl.replaceChildren(this.mutedDiv('loading...'));
-      this.memoryEl.replaceChildren(this.mutedDiv('loading...'));
-      return;
-    }
-
-    // What Jev saw.
-    const jevParts: HTMLElement[] = [];
-    if (detail.jev_state) {
-      jevParts.push(this.pre(JSON.stringify(detail.jev_state, null, 2)));
-    } else {
-      jevParts.push(this.mutedDiv('no Jev call at this tick'));
-    }
-    if (detail.criteria && Object.keys(detail.criteria).length > 0) {
-      jevParts.push(this.label('Criteria'));
-      for (const [option, description] of Object.entries(detail.criteria)) {
-        jevParts.push(this.kvRow(option, description));
-      }
-    }
-    this.jevStateEl.replaceChildren(...jevParts);
-
-    // Planner turn.
-    this.plannerEl.replaceChildren(...this.plannerParts(detail));
-
-    // Memory.
-    const memory = detail.memory ?? '';
-    this.memoryEl.replaceChildren(
-      memory.trim() ? this.pre(memory) : this.mutedDiv('no memory notes')
-    );
+    return parts;
   }
 
   private plannerParts(detail: AgentDetailMessage): HTMLElement[] {
     const turn = detail.planner_turn;
-    if (!turn) return [this.mutedDiv('no planner turn at this tick')];
+    if (!turn) return [mutedDiv('no planner turn at this tick')];
 
     const parts: HTMLElement[] = [];
     const range = turn.ended_tick == null ? 'in progress' : `ended t${turn.ended_tick}`;
-    parts.push(this.kvRow(`Turn ${turn.turn}`, `t${turn.started_tick ?? '?'} - ${range}`));
+    parts.push(kvRow(`Turn ${turn.turn}`, `t${turn.started_tick ?? '?'} - ${range}`));
 
     if (turn.prompt) {
-      parts.push(this.details('Prompt', [this.pre(turn.prompt)]));
+      parts.push(details('Prompt', [pre(turn.prompt)]));
     }
 
     for (const event of turn.events ?? []) {
@@ -563,8 +657,8 @@ export class OverlayUI {
     }
 
     if (turn.thought) {
-      parts.push(this.label('Reflection'));
-      parts.push(this.pre(turn.thought));
+      parts.push(label('Reflection'));
+      parts.push(pre(turn.thought));
     }
     return parts;
   }
@@ -572,12 +666,12 @@ export class OverlayUI {
   private plannerEventPart(event: PlannerTurnEvent): HTMLElement {
     if (event.event === 'tool_call') {
       const args = event.args ? JSON.stringify(event.args, null, 2) : '{}';
-      return this.details(`call ${event.tool ?? '?'}`, [this.pre(args)]);
+      return details(`call ${event.tool ?? '?'}`, [pre(args)]);
     }
     if (event.event === 'tool_result') {
-      return this.details(`result ${event.tool ?? '?'}`, [this.pre(event.result ?? '')]);
+      return details(`result ${event.tool ?? '?'}`, [pre(event.result ?? '')]);
     }
-    return this.mutedDiv(`${event.event}${event.tool ? ` ${event.tool}` : ''}`);
+    return mutedDiv(`${event.event}${event.tool ? ` ${event.tool}` : ''}`);
   }
 
   private renderInventory(inventory: Record<string, number>): void {
@@ -589,14 +683,14 @@ export class OverlayUI {
     entries.sort((a, b) => a[0].localeCompare(b[0]));
     this.inventoryEl.classList.remove('muted');
     this.inventoryEl.replaceChildren(
-      ...entries.map(([kind, count]) => this.kvRow(kind, String(count)))
+      ...entries.map(([kind, count]) => kvRow(kind, String(count)))
     );
   }
 
   private renderLog(entityId: string): void {
     const log = this.worldState.getEntityLog(entityId);
     if (log.length === 0) {
-      this.logEl.replaceChildren(this.mutedItem('-'));
+      this.logEl.replaceChildren(mutedItem('-'));
       return;
     }
     const items = log.map((entry) => {
@@ -618,85 +712,5 @@ export class OverlayUI {
     const text = value.trim();
     element.textContent = text || '-';
     element.classList.toggle('muted', text.length === 0);
-  }
-
-  private mutedItem(text: string): HTMLElement {
-    const li = document.createElement('li');
-    li.className = 'muted';
-    li.textContent = text;
-    return li;
-  }
-
-  private mutedDiv(text: string): HTMLElement {
-    const div = document.createElement('div');
-    div.className = 'muted';
-    div.textContent = text;
-    return div;
-  }
-
-  private label(text: string): HTMLElement {
-    const div = document.createElement('div');
-    div.className = 'label';
-    div.textContent = text;
-    return div;
-  }
-
-  private pre(text: string): HTMLElement {
-    const pre = document.createElement('pre');
-    pre.className = 'json';
-    pre.textContent = text;
-    return pre;
-  }
-
-  private details(summaryText: string, children: HTMLElement[]): HTMLElement {
-    const details = document.createElement('details');
-    details.className = 'sub';
-    const summary = document.createElement('summary');
-    summary.textContent = summaryText;
-    details.append(summary, ...children);
-    return details;
-  }
-
-  private kvRow(label: string, value: string): HTMLElement {
-    const row = document.createElement('div');
-    row.className = 'kv';
-    const left = document.createElement('span');
-    left.textContent = label;
-    const right = document.createElement('span');
-    right.textContent = value;
-    row.append(left, right);
-    return row;
-  }
-
-  private barRow(
-    label: string,
-    value: number,
-    max: number,
-    color: string,
-    valueText?: string
-  ): HTMLElement {
-    const row = document.createElement('div');
-    row.className = 'bar-row';
-
-    const labelEl = document.createElement('span');
-    labelEl.className = 'bar-label';
-    labelEl.textContent = label;
-    labelEl.title = label;
-
-    const track = document.createElement('div');
-    track.className = 'bar-track';
-    const fill = document.createElement('div');
-    fill.className = 'bar-fill';
-    const ratio = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0;
-    fill.style.width = `${(ratio * 100).toFixed(1)}%`;
-    fill.style.background = color;
-    track.appendChild(fill);
-
-    const valueEl = document.createElement('span');
-    valueEl.className = 'bar-value';
-    valueEl.textContent = valueText ?? `${Math.round(value)}/${Math.round(max)}`;
-
-    row.append(labelEl, track, valueEl);
-    return row;
   }
 }

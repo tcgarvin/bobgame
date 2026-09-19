@@ -60,3 +60,7 @@ runs/
 
 # Generated terrain renders (tools/visualize_world.py)
 world_map*.png
+
+# Live Jev eval results (agents/evals/README.md)
+agents/evals/results/*
+!agents/evals/results/.gitkeep

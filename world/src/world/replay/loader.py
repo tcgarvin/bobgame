@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
@@ -26,6 +27,25 @@ MAX_INDEX_EVENTS = 3000
 # Kinds dropped first when the index is over the cap, least useful first.
 DROPPABLE_KINDS = ("say", "stint_start")
 
+# A live run is still writing its planner trace while the viewer watches it, so
+# the trace is re-read when the file's size or mtime has changed - at most this
+# often, because the file holds every prompt and is the big one.
+PLANNER_REFRESH_INTERVAL_S = 1.0
+
+# The journal's headings, in file order (docs/12_sleep_journal.md). Only used to
+# read `memory.md` for runs recorded before the journal was traced.
+JOURNAL_SECTIONS = (
+    "Story so far",
+    "Me",
+    "Others",
+    "Learnings",
+    "Tomorrow",
+    "Today's notes",
+)
+
+# Planner events that carry a `journal` block.
+JOURNAL_EVENTS = ("turn_start", "journal_rewrite")
+
 
 class RunLoadError(Exception):
     """A run directory is missing or unusable."""
@@ -42,6 +62,72 @@ class AgentTraces:
     # tick -> byte offset of that tick's line in the decompressed jev file
     jev_offsets: dict[int, int] = field(default_factory=dict)
     jev_path: Path | None = None
+    # Where the planner trace and the journal came from, for the live re-read.
+    planner_path: Path | None = None
+    memory_path: Path | None = None
+    # (size, mtime_ns) of the planner trace as it was last read, and when it
+    # was last stat-ed.
+    planner_stat: tuple[int, int] = (0, 0)
+    checked_at: float = 0.0
+
+    def refresh(self) -> None:
+        """Re-read the planner trace and the journal file if they have changed.
+
+        A run directory being written by a live run keeps growing, and a loader
+        is otherwise read once. Stat-ing is cheap, so the file is only re-read
+        when its size or mtime moved, and at most every
+        `PLANNER_REFRESH_INTERVAL_S`. The stint and Jev files are left as they
+        were loaded: the panel's journal and planner turn are what a live run
+        needs fresh.
+        """
+        if self.planner_path is None:
+            return
+        now = time.monotonic()
+        if now - self.checked_at < PLANNER_REFRESH_INTERVAL_S:
+            return
+        self.checked_at = now
+        try:
+            stat = self.planner_path.stat()
+        except OSError as exc:
+            logger.warning(
+                "planner_trace_stat_failed", path=str(self.planner_path), error=str(exc)
+            )
+            return
+        key = (stat.st_size, stat.st_mtime_ns)
+        if key == self.planner_stat:
+            return
+        self.planner_stat = key
+        self.planner = read_trace_lines(self.planner_path)
+        self.memory = read_memory_file(self.memory_path)
+
+    def journal_at(self, tick_id: int) -> dict[str, Any]:
+        """The journal as the traces show it at `tick_id`, or {}.
+
+        The latest `turn_start` or `journal_rewrite` at or before `tick_id`
+        wins; when the run has no traced journal at all, `memory.md` on disk is
+        the fallback for older recordings.
+        """
+        found: dict[str, Any] = {}
+        traced = False
+        for line in self.planner:
+            sections = line.get("journal")
+            if not isinstance(sections, dict):
+                continue
+            traced = True
+            tick = int(line.get("tick", -1))
+            if tick > tick_id:
+                break
+            found = {
+                "sections": {str(k): str(v) for k, v in sections.items()},
+                "tick": tick,
+                "source": str(line.get("event", "")),
+            }
+        if found or traced:
+            return found
+        sections = sections_from_markdown(self.memory)
+        if not sections:
+            return {}
+        return {"sections": sections, "tick": None, "source": "memory.md"}
 
     def jev_state(self, tick_id: int) -> dict[str, Any]:
         """The Jev state line at `tick_id`, or {} when there is none.
@@ -144,6 +230,41 @@ class AgentTraces:
         return chosen
 
 
+def read_trace_lines(path: Path) -> list[dict[str, Any]]:
+    """Every JSON record in a gzip JSONL trace; [] when it cannot be read."""
+    try:
+        return list(read_jsonl_gz(path))
+    except OSError as exc:
+        logger.warning("agent_file_unreadable", path=str(path), error=str(exc))
+        return []
+
+
+def read_memory_file(path: Path | None) -> str:
+    """The journal file's text, or "" when there is none to read."""
+    if path is None or not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("memory_unreadable", path=str(path), error=str(exc))
+        return ""
+
+
+def sections_from_markdown(text: str) -> dict[str, str]:
+    """`memory.md` split into its `## ` sections, for runs with no traced journal."""
+    if not text.strip():
+        return {}
+    bodies: dict[str, list[str]] = {name: [] for name in JOURNAL_SECTIONS}
+    current = ""
+    for line in text.splitlines():
+        if line.startswith("## "):
+            current = line[3:].strip()
+            continue
+        if current in bodies:
+            bodies[current].append(line)
+    return {name: "\n".join(lines).strip() for name, lines in bodies.items()}
+
+
 class RunLoader:
     """All the recorded data for one run, loaded once and kept in memory."""
 
@@ -229,8 +350,13 @@ class RunLoader:
         return sorted(ids)
 
     def agent_detail(self, entity_id: str, tick_id: int) -> dict[str, Any]:
-        """The `agent_detail` payload for one entity at one tick."""
-        traces = self.agents.get(entity_id)
+        """The `agent_detail` payload for one entity at one tick.
+
+        The traces are re-read first when the run is still being written, so a
+        live run's newest turns and journal rewrites are included
+        (docs/07_replay.md).
+        """
+        traces = self.traces_for(entity_id)
         if traces is None:
             return {
                 "stint": None,
@@ -239,7 +365,9 @@ class RunLoader:
                 "criteria": None,
                 "planner_turn": None,
                 "memory": "",
+                "journal": None,
             }
+        traces.refresh()
         jev = traces.jev_state(tick_id)
         return {
             "stint": traces.stint_at(tick_id) or None,
@@ -248,7 +376,25 @@ class RunLoader:
             "criteria": jev.get("criteria") or None,
             "planner_turn": traces.planner_turn_at(tick_id) or None,
             "memory": traces.memory,
+            "journal": traces.journal_at(tick_id) or None,
         }
+
+    def traces_for(self, entity_id: str) -> AgentTraces | None:
+        """The traces for `entity_id`, picking up a directory a live run just made.
+
+        Returns None when the entity has no trace directory at all.
+        """
+        traces = self.agents.get(entity_id)
+        if traces is not None:
+            return traces
+        if not entity_id or "/" in entity_id or entity_id in (".", ".."):
+            return None
+        agent_dir = self.run_dir / "agents" / f"agent-{entity_id}"
+        if not agent_dir.is_dir():
+            return None
+        traces = self._load_agent(entity_id, agent_dir)
+        self.agents[entity_id] = traces
+        return traces
 
     def run_index(self) -> dict[str, Any]:
         """Notable moments across the run, built once and cached."""
@@ -302,7 +448,7 @@ class RunLoader:
                 if kind == "tick":
                     if tick_id not in self.tick_records:
                         self.tick_ids.append(tick_id)
-                    self.tick_records[tick_id] = record
+                    self.tick_records[tick_id] = _upgrade_food_keys(record)
                 elif kind == "agent_status":
                     self.agent_status.setdefault(tick_id, []).append(record)
         except OSError as exc:
@@ -344,30 +490,21 @@ class RunLoader:
         traces = AgentTraces(entity_id=entity_id)
         stints_path = agent_dir / "stints.jsonl.gz"
         if stints_path.exists():
-            traces.stints = self._safe_lines(stints_path)
+            traces.stints = read_trace_lines(stints_path)
         planner_path = agent_dir / "planner.jsonl.gz"
+        traces.planner_path = planner_path
+        traces.memory_path = agent_dir / "memory.md"
         if planner_path.exists():
-            traces.planner = self._safe_lines(planner_path)
-        memory_path = agent_dir / "memory.md"
-        if memory_path.exists():
-            try:
-                traces.memory = memory_path.read_text(encoding="utf-8")
-            except OSError as exc:
-                logger.warning(
-                    "memory_unreadable", path=str(memory_path), error=str(exc)
-                )
+            traces.planner = read_trace_lines(planner_path)
+            stat = planner_path.stat()
+            traces.planner_stat = (stat.st_size, stat.st_mtime_ns)
+        traces.checked_at = time.monotonic()
+        traces.memory = read_memory_file(traces.memory_path)
         jev_path = agent_dir / "jev_states.jsonl.gz"
         if jev_path.exists():
             traces.jev_path = jev_path
             traces.jev_offsets = _index_jev_states(jev_path)
         return traces
-
-    def _safe_lines(self, path: Path) -> list[dict[str, Any]]:
-        try:
-            return list(read_jsonl_gz(path))
-        except OSError as exc:
-            logger.warning("agent_file_unreadable", path=str(path), error=str(exc))
-            return []
 
     def _build_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -462,6 +599,23 @@ class RunLoader:
                 break
             events = [item for item in events if item["kind"] != kind]
         return events[:MAX_INDEX_EVENTS]
+
+
+def _upgrade_food_keys(record: dict[str, Any]) -> dict[str, Any]:
+    """Rename the legacy `hunger` stat to `food` in a tick's entity updates.
+
+    Runs recorded before 2026-09-18 call the food stat `hunger`/`max_hunger`.
+    Entity updates are forwarded to the viewer verbatim, so they are upgraded
+    in place as the recording is loaded; the record is returned for chaining.
+    """
+    for update in record.get("entity_updates", []):
+        if not isinstance(update, dict):
+            continue
+        for legacy, current in (("hunger", "food"), ("max_hunger", "max_food")):
+            if legacy in update:
+                value = update.pop(legacy)
+                update.setdefault(current, value)
+    return record
 
 
 def _index_jev_states(path: Path) -> dict[int, int]:

@@ -133,9 +133,11 @@ what makes seeking cheap: entity state at tick N is just that list. Objects are
 deltas over `world/objects.jsonl.gz`.
 
 Each entity state carries `entity_id`, `position`, `entity_type`, `tags`,
-`health`, `max_health`, `hunger`, `max_hunger`, `wielded`, `alive`, `fatigue`,
+`health`, `max_health`, `food`, `max_food`, `wielded`, `alive`, `fatigue`,
 `max_fatigue`, `asleep`, `sleeping_on`, `collapsed` and `inventory`
-(docs/10_metal_and_sleep.md adds the last five). `clock` is the world clock at
+(docs/10_metal_and_sleep.md adds the last five). Runs recorded before
+2026-09-18 call the food stat `hunger`/`max_hunger`; the loader renames those
+keys as it reads the tick stream, so old runs still replay. `clock` is the world clock at
 that tick and appears on the `tick` record, on the viewer's `tick_completed`
 and `snapshot` messages, and on the replay server's copies of both; the replay
 server falls back to computing it from `day_length_ticks` for runs recorded
@@ -232,7 +234,7 @@ object ids so a rollback never rebuilds all 60k island objects.
 | `{"type": "step", "delta"}` | seek to current + delta (negative allowed) |
 | `{"type": "play", "speed"}` | advance one tick every `tick_duration_ms / speed` ms until `last_tick`, then pause. `speed` > 0, default 1 |
 | `{"type": "pause"}` | stop advancing |
-| `{"type": "get_agent_detail", "entity_id", "tick_id"}` | reply `agent_detail` |
+| `{"type": "get_agent_detail", "entity_id", "tick_id", "run_id"?}` | reply `agent_detail`. With `run_id` it answers about that run without an `open_run`, and no session is built - this is how the *live* viewer reads agent detail (see "Live-mode detail" below) |
 | `{"type": "get_run_index"}` | reply `run_index` |
 
 ### Server → client
@@ -279,9 +281,18 @@ divided by `speed`, so interpolation matches the pace), `tick_completed`,
   line or null…}, "record": {…per-tick Jev record at that tick or the latest
   before it, or null…}, "jev_state": {…} | null, "criteria": {…} | null,
   "planner_turn": {"turn", "started_tick", "ended_tick", "prompt", "thought",
-  "events": [tool_call / tool_result lines in order]} | null, "memory": "…"}`.
+  "events": [tool_call / tool_result lines in order]} | null, "memory": "…",
+  "journal": {"sections": {"Story so far": "…", "Me": "…", "Others": "…",
+  "Learnings": "…", "Tomorrow": "…", "Today's notes": "…"}, "tick": 612,
+  "source": "turn_start" | "journal_rewrite"} | null}`.
   `planner_turn` is the turn in progress at `tick_id`, else the last one that
-  ended before it. `memory` is the memory file's full text (it is small).
+  ended before it. `journal` is the journal *as it stood at `tick_id`*, taken
+  from the latest `turn_start` or `journal_rewrite` planner-trace line at or
+  before it (docs/12_sleep_journal.md), with `tick` naming that line; it is
+  null when the entity has none that early. A run recorded before the journal
+  was traced falls back to `memory.md` on disk, with `"source": "memory.md"`
+  and `"tick": null`. `memory` is still the memory file's full text as it is
+  now (it is small), kept for older viewers.
 - `{"type": "error", "message"}` for unknown runs or bad requests.
 
 ## Viewer
@@ -326,11 +337,31 @@ entity). Keys: space play/pause, `,` and `.` step ±1, `[` and `]` step ±10.
 - The agent panel grows: the brief with its success condition, ticks used of
   max, and notes; the planner reflection; the Jev decision with every option
   and its probability, plus confidence, eject, danger, latency and input
-  tokens; and, in replay mode only (from `agent_detail`), collapsible "what
-  Jev saw" (pretty-printed state JSON), the current planner turn (prompt, tool
-  calls with args, results, in order) and the planner's memory notes. The
-  detail is requested when the selection or tick changes (debounced while
-  playing).
+  tokens; and, from `agent_detail`, collapsible "what Jev saw" (pretty-printed
+  state JSON), the current planner turn (prompt, tool calls with args, results,
+  in order) and the settler's journal. The detail is requested when the
+  selection or tick changes (debounced while playing).
+
+### Live-mode detail
+
+`agent_detail` is not a replay-only payload. In live mode the viewer keeps its
+world socket on `ws://localhost:8765` and opens a *second*, detail-only socket
+to the replay server on `ws://localhost:8766`, over which it sends
+`get_agent_detail` with the `run_id` from the live snapshot. No `open_run` is
+sent, so the replay server answers from the `RunLoader` alone and never builds
+a session (no map, no object baseline). The socket is best-effort: it reconnects
+with the ordinary backoff and, when no replay server is running, every request
+is dropped and the panel simply has no detail. `dev.sh` starts the replay
+server for live runs, so this works out of the box.
+
+A run that is still being written keeps growing under the loader, which is
+otherwise read once. `AgentTraces.refresh()` therefore stats the agent's
+`planner.jsonl.gz` before every `agent_detail` and re-reads it (and `memory.md`)
+when the size or mtime has moved, at most once every
+`PLANNER_REFRESH_INTERVAL_S` (1 s). An agent directory that did not exist when
+the run was loaded is picked up the same way. The stint and Jev-state files are
+*not* re-read: the journal and the planner turn are what a live panel needs
+fresh, and the heavy files would cost more than they are worth.
 
 ## Tooling
 

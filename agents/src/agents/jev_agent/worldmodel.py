@@ -128,8 +128,8 @@ class EntityInfo:
     position: Coord
     health: int
     max_health: int
-    hunger: int
-    max_hunger: int
+    food: int
+    max_food: int
     wielded: str
     alive: bool
     inventory: Mapping[str, int]
@@ -362,8 +362,8 @@ class WorldModel:
             position=(0, 0),
             health=0,
             max_health=0,
-            hunger=0,
-            max_hunger=0,
+            food=0,
+            max_food=0,
             wielded="",
             alive=True,
             inventory={},
@@ -821,8 +821,8 @@ def _entity_info(entity: pb.Entity, tick: int) -> EntityInfo:
         position=(entity.position.x, entity.position.y),
         health=entity.health,
         max_health=entity.max_health,
-        hunger=entity.hunger,
-        max_hunger=entity.max_hunger,
+        food=entity.food,
+        max_food=entity.max_food,
         wielded=entity.wielded,
         alive=entity.alive,
         inventory=inventory_to_dict(entity.inventory),

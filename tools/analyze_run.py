@@ -51,6 +51,11 @@ JEV_USD_PER_MILLION_INPUT_TOKENS = 0.042
 # Planner turn records that carry a `usage` block (docs/11, "Trace records").
 PLANNER_USAGE_EVENTS = frozenset({"turn_end", "tool_budget_reached"})
 
+# The sleep-time journal (docs/12_sleep_journal.md) is traced in the same file
+# as the planner's turns, with its own `usage` block.
+JOURNAL_EVENT = "journal_rewrite"
+JOURNAL_FAILED_EVENT = "journal_rewrite_failed"
+
 # Notable moment kinds, most interesting first. The cap keeps the rarest kinds.
 MOMENT_PRIORITY = (
     "death",
@@ -145,8 +150,8 @@ CONVERSE_JOIN_RE = re.compile(r"^join (conv_\S+)$")
 CONVERSE_ACCEPT_RE = re.compile(r"^accept (conv_\S+) (\S+)$")
 GAVE_RE = re.compile(r"^gave (\d+) (\S+) to (\S+)$")
 
-# The stint report's stats line, e.g. "stats: hp 12/20, hunger 5/10 -> hp
-# 8/20, hunger 3/10" (agents/src/agents/jev_agent/stint.py StintReport.to_text).
+# The stint report's stats line, e.g. "stats: hp 12/20, food 5/10 -> hp
+# 8/20, food 3/10" (agents/src/agents/jev_agent/stint.py StintReport.to_text).
 STINT_HEALTH_RE = re.compile(r"stats: hp (\d+)/\d+.*? -> hp (\d+)/\d+")
 
 REFLEX_KIND = "reflex"
@@ -359,6 +364,41 @@ def summarise_planner_cost(rows: list[dict]) -> dict:
     }
 
 
+def summarise_journal(rows: list[dict]) -> dict:
+    """Journal rewrites, their cost and their failures, for one agent.
+
+    The rewrite records sit in `planner.jsonl.gz` beside the turns
+    (docs/12_sleep_journal.md) and carry the same `usage` block, so a rewrite
+    that reported no cost simply contributes nothing.
+    """
+    cost = 0.0
+    rewrites = 0
+    failures = 0
+    truncations: Counter[str] = Counter()
+    triggers: Counter[str] = Counter()
+    for row in rows:
+        event = row.get("event")
+        if event == JOURNAL_FAILED_EVENT:
+            failures += 1
+            continue
+        if event != JOURNAL_EVENT:
+            continue
+        rewrites += 1
+        triggers[str(row.get("trigger", "?"))] += 1
+        for section in row.get("truncated") or ():
+            truncations[str(section)] += 1
+        usage = row.get("usage") or {}
+        if "cost_usd" in usage:
+            cost += float(usage["cost_usd"])
+    return {
+        "journal_usd": cost,
+        "journal_rewrites": rewrites,
+        "journal_failures": failures,
+        "journal_truncations": dict(truncations.most_common()),
+        "journal_triggers": dict(triggers.most_common()),
+    }
+
+
 def converser_cost_usd(path: Path | None) -> float:
     """Converser spend: every ``usage`` block in conversations.jsonl.gz.
 
@@ -386,11 +426,19 @@ def summarise_cost(
         )
     )
     jev = jev_cost_usd(tick_rows, load_jev_price(agent_dir))
+    journal = summarise_journal(planner_rows)
     return {
         "planner_usd": planner["planner_usd"],
         "converser_usd": converser,
+        "journal_usd": journal["journal_usd"],
         "jev_usd": jev,
-        "total_usd": planner["planner_usd"] + converser + jev,
+        "total_usd": (
+            planner["planner_usd"] + converser + journal["journal_usd"] + jev
+        ),
+        "journal_rewrites": journal["journal_rewrites"],
+        "journal_failures": journal["journal_failures"],
+        "journal_truncations": journal["journal_truncations"],
+        "journal_triggers": journal["journal_triggers"],
         "planner_cost_available": planner["planner_cost_available"],
         "cost_missing": planner["cost_missing"],
         "turns_with_usage": planner["turns_with_usage"],
@@ -428,13 +476,17 @@ def aggregate_cost(summaries: list[dict], meta: dict) -> dict:
     costs = [s["cost"] for s in summaries]
     planner = sum(c["planner_usd"] for c in costs)
     converser = sum(c["converser_usd"] for c in costs)
+    journal = sum(c["journal_usd"] for c in costs)
     jev = sum(c["jev_usd"] for c in costs)
-    total = planner + converser + jev
+    total = planner + converser + journal + jev
     result = {
         "planner_usd": planner,
         "converser_usd": converser,
+        "journal_usd": journal,
         "jev_usd": jev,
         "total_usd": total,
+        "journal_rewrites": sum(c["journal_rewrites"] for c in costs),
+        "journal_failures": sum(c["journal_failures"] for c in costs),
         "planner_cost_available": any(c["planner_cost_available"] for c in costs),
         "planner_cost_is_lower_bound": any(c["cost_missing"] for c in costs),
         "planner_turns": sum(c["turns_with_usage"] for c in costs),
@@ -1413,6 +1465,7 @@ def print_cost_section(run_cost: dict, summaries: list[dict]) -> None:
         f"total: {format_usd(run_cost['total_usd'])}  "
         f"planner: {planner_text}  "
         f"converser: {format_usd(run_cost['converser_usd'])}  "
+        f"journal: {format_usd(run_cost['journal_usd'])}  "
         f"jev: {format_usd(run_cost['jev_usd'])}"
     )
     if run_cost["planner_cost_is_lower_bound"]:
@@ -1425,7 +1478,8 @@ def print_cost_section(run_cost: dict, summaries: list[dict]) -> None:
     print(f"rates: {', '.join(rate_parts) if rate_parts else 'unavailable'}")
 
     print(
-        f"{'agent':7s} {'planner':>9s} {'convers':>9s} {'jev':>9s} {'total':>9s} "
+        f"{'agent':7s} {'planner':>9s} {'convers':>9s} {'journal':>9s} "
+        f"{'jev':>9s} {'total':>9s} "
         f"{'turns':>5s} {'$/turn':>9s} {'req/turn':>8s} {'cached':>7s}"
     )
     for s in summaries:
@@ -1438,11 +1492,45 @@ def print_cost_section(run_cost: dict, summaries: list[dict]) -> None:
         print(
             f"{s['agent']:7s} {planner_cell:>9s} "
             f"{format_usd(cost['converser_usd']):>9s} "
+            f"{format_usd(cost['journal_usd']):>9s} "
             f"{format_usd(cost['jev_usd']):>9s} "
             f"{format_usd(cost['total_usd']):>9s} "
             f"{cost['turns_with_usage']:5d} {per_turn_cell:>9s} "
             f"{cost['requests_per_turn_mean']:8.1f} "
             f"{cost['cached_token_share'] * 100:6.1f}%"
+        )
+
+
+def print_journal_section(summaries: list[dict]) -> None:
+    """The "journal" section: rewrites, failures and truncations per settler."""
+    print("== journal (docs/12_sleep_journal.md) ==")
+    rewrites = sum(s["cost"]["journal_rewrites"] for s in summaries)
+    failures = sum(s["cost"]["journal_failures"] for s in summaries)
+    if not rewrites and not failures:
+        print("no journal rewrites recorded (run predates docs/12)")
+        return
+    print(f"rewrites: {rewrites}  failures: {failures}")
+    print(
+        f"{'agent':7s} {'rewrites':>8s} {'failed':>6s}  "
+        f"{'triggers':22s} truncated sections"
+    )
+    for s in summaries:
+        cost = s["cost"]
+        if not cost["journal_rewrites"] and not cost["journal_failures"]:
+            continue
+        triggers = ", ".join(
+            f"{name} x{count}" for name, count in cost["journal_triggers"].items()
+        )
+        truncated = (
+            ", ".join(
+                f"{name} x{count}"
+                for name, count in cost["journal_truncations"].items()
+            )
+            or "none"
+        )
+        print(
+            f"{s['agent']:7s} {cost['journal_rewrites']:8d} "
+            f"{cost['journal_failures']:6d}  {triggers or 'none':22s} {truncated}"
         )
 
 
@@ -1504,6 +1592,8 @@ def print_report(
 
     print()
     print_cost_section(totals["cost"], summaries)
+    print()
+    print_journal_section(summaries)
 
     if facts is not None:
         print()

@@ -46,7 +46,7 @@ from .movement import MoveResult, process_movement_phase
 from .sleep import process_fatigue_phase, process_sleep_phase
 from .stats import (
     process_health_regen,
-    process_hunger_phase,
+    process_food_phase,
     process_respawns,
     process_rest_phase,
 )
@@ -367,7 +367,7 @@ def process_tick(
     )
 
     # Phase 14: Bookkeeping
-    process_hunger_phase(world, events)
+    process_food_phase(world, events)
     process_fatigue_phase(world, events)
     process_health_regen(world)
     events.object_changes.extend(process_regeneration(world, regen_rate=regen_rate))

@@ -459,9 +459,9 @@ class TestResting:
         assert not events.action_results[0].success
         assert events.action_results[0].details == "chair_1 is not a bed"
 
-    def test_resting_with_no_hunger_left_fails(self) -> None:
+    def test_resting_with_no_food_left_fails(self) -> None:
         world = _world()
-        world.set_entity(world.get_entity("bob").with_hunger(0).with_health(5))
+        world.set_entity(world.get_entity("bob").with_food(0).with_health(5))
         _add_object(world, "bed_1", "bed", 6, 5)
 
         events = self._rest(world, "bed_1", "bob")
@@ -514,7 +514,7 @@ class TestRestPhaseWiring:
         world = _world()
         world.set_entity(world.get_entity("bob").with_health(10))
         _add_object(world, "bed_1", "bed", 6, 5)
-        # Tick 1 runs neither hunger nor health regeneration, so the health
+        # Tick 1 runs neither food nor health regeneration, so the health
         # change below is the rest alone.
         world.tick = 1
         ctx = TickContext(

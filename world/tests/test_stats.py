@@ -1,4 +1,4 @@
-"""Tests for hunger, starvation and health regeneration."""
+"""Tests for food, starvation and health regeneration."""
 
 from world.events import TickEvents
 from world.foraging import process_eat_phase
@@ -6,7 +6,7 @@ from world.state import Entity, Inventory, World
 from world.stats import (
     find_free_tile,
     process_health_regen,
-    process_hunger_phase,
+    process_food_phase,
 )
 from world.types import EatIntent, Position
 
@@ -19,15 +19,15 @@ def _world_with_entity(**entity_kwargs: object) -> World:
     return world
 
 
-class TestHunger:
-    def test_hunger_drops_every_fourth_tick(self) -> None:
-        world = _world_with_entity(hunger=80)
+class TestFood:
+    def test_food_drops_every_fourth_tick(self) -> None:
+        world = _world_with_entity(food=80)
         world.tick = 1
-        process_hunger_phase(world, TickEvents())
-        assert world.get_entity("bob").hunger == 80
+        process_food_phase(world, TickEvents())
+        assert world.get_entity("bob").food == 80
         world.tick = 4
-        process_hunger_phase(world, TickEvents())
-        assert world.get_entity("bob").hunger == 79
+        process_food_phase(world, TickEvents())
+        assert world.get_entity("bob").food == 79
 
     def test_wolves_do_not_starve(self) -> None:
         world = World(width=10, height=10)
@@ -38,34 +38,34 @@ class TestHunger:
                 entity_type="wolf",
                 health=10,
                 max_health=10,
-                hunger=100,
+                food=100,
             )
         )
         world.tick = 2
-        process_hunger_phase(world, TickEvents())
+        process_food_phase(world, TickEvents())
         wolf = world.get_entity("wolf_1")
-        assert wolf.hunger == 100
+        assert wolf.food == 100
         assert wolf.health == 10
 
     def test_starvation_damages_every_fourth_tick(self) -> None:
-        world = _world_with_entity(hunger=0)
+        world = _world_with_entity(food=0)
         events = TickEvents()
 
         world.tick = 3  # off interval: no starvation damage
-        process_hunger_phase(world, events)
+        process_food_phase(world, events)
         assert world.get_entity("bob").health == 20
 
         world.tick = 4
-        process_hunger_phase(world, events)
+        process_food_phase(world, events)
         assert world.get_entity("bob").health == 19
         assert events.damage_events[-1].attacker_id == ""
 
     def test_starvation_can_kill(self) -> None:
-        world = _world_with_entity(hunger=0, health=1)
+        world = _world_with_entity(food=0, health=1)
         events = TickEvents()
         world.tick = 4
 
-        process_hunger_phase(world, events)
+        process_food_phase(world, events)
 
         assert not world.get_entity("bob").alive
         assert events.deaths[0].entity_id == "bob"
@@ -73,49 +73,49 @@ class TestHunger:
 
 class TestRegeneration:
     def test_regen_when_well_fed(self) -> None:
-        world = _world_with_entity(health=10, hunger=80)
+        world = _world_with_entity(health=10, food=80)
         world.tick = 5
         process_health_regen(world)
         assert world.get_entity("bob").health == 11
 
     def test_no_regen_when_hungry(self) -> None:
-        world = _world_with_entity(health=10, hunger=50)
+        world = _world_with_entity(health=10, food=50)
         world.tick = 5
         process_health_regen(world)
         assert world.get_entity("bob").health == 10
 
     def test_no_regen_off_interval(self) -> None:
-        world = _world_with_entity(health=10, hunger=90)
+        world = _world_with_entity(health=10, food=90)
         world.tick = 6
         process_health_regen(world)
         assert world.get_entity("bob").health == 10
 
     def test_regen_capped_at_max(self) -> None:
-        world = _world_with_entity(health=20, hunger=90)
+        world = _world_with_entity(health=20, food=90)
         world.tick = 5
         process_health_regen(world)
         assert world.get_entity("bob").health == 20
 
 
 class TestEating:
-    def test_berry_restores_hunger(self) -> None:
-        world = _world_with_entity(hunger=40, inventory=Inventory().add("berry", 2))
+    def test_berry_restores_food(self) -> None:
+        world = _world_with_entity(food=40, inventory=Inventory().add("berry", 2))
 
         results = process_eat_phase(
             world, {"bob": EatIntent(entity_id="bob", item_type="berry", amount=1)}
         )
 
         assert results[0].success
-        assert world.get_entity("bob").hunger == 60
+        assert world.get_entity("bob").food == 60
 
-    def test_hunger_capped_at_max(self) -> None:
-        world = _world_with_entity(hunger=95, inventory=Inventory().add("berry", 1))
+    def test_food_capped_at_max(self) -> None:
+        world = _world_with_entity(food=95, inventory=Inventory().add("berry", 1))
 
         process_eat_phase(
             world, {"bob": EatIntent(entity_id="bob", item_type="berry", amount=1)}
         )
 
-        assert world.get_entity("bob").hunger == 100
+        assert world.get_entity("bob").food == 100
 
     def test_eating_wood_fails(self) -> None:
         world = _world_with_entity(inventory=Inventory().add("wood", 1))

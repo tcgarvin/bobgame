@@ -5,12 +5,30 @@ Quick reference for AI agents working on this codebase.
 ## Current Status
 
 **Current experiment**: the "settlement" scenario: 12 planner+Jev actors (pydantic-ai on OpenRouter for slow thinking, TypeSafe's Jev for per-tick action) building a settlement on the big island while wolves roam. Design and contract: [docs/05_jev_agents_design.md](docs/05_jev_agents_design.md).
-**Completed milestones**: 0, 1, 2, 3, 4, 5a, 5b, 6, procedural terrain generation, chunked terrain streaming, and the settlement mechanics (stats, hunger, combat, wolves, extraction, crafting, chests, message boards, say).
+**Completed milestones**: 0, 1, 2, 3, 4, 5a, 5b, 6, procedural terrain generation, chunked terrain streaming, and the settlement mechanics (stats, food, combat, wolves, extraction, crafting, chests, message boards, say).
 **Building update**: settlers can gather fiber (reeds) and clay, craft planks, rope, roads, walls, floors, doors, beds, chairs, tables and a workshop table (which gates the advanced recipes), place them on two object layers, dismantle them, and rest on beds. Walls block everyone, doors block wolves. The planner has a deterministic `build` tool for lines and rectangles. The island was regenerated with groves, outcrops, reeds and clay; the settlement site is a lakeside clearing at (1539, 974). Contract: [docs/08_building.md](docs/08_building.md).
 **Cooperation update**: wolves are tuned so nobody beats them alone (16 health, bite 3, simultaneous damage: a lone swordsman loses 12 of 20 health, two armed settlers lose 6 between them). Settlers have a 60-tile `shout` channel whose events carry the speaker's position, Jev shouts when a wolf is in view and is offered a walk to anyone it hears shouting, Jev's state has a `threat` block and the actor's own name, and the planner's `look` lists every settler met. The planner is told it runs in real time: every tool result shows the tick, the ticks the turn has cost, and a `!!` alert when a wolf is near or biting that tells it to hand back to Jev with a fighting `start_stint`. The planner's tool budget is 20 per turn and soft: every tool result says what is left, and a spent budget refuses calls instead of discarding the turn. Details: "Implementation notes" in [docs/05_jev_agents_design.md](docs/05_jev_agents_design.md).
 **Conversation and reflex update**: settlers can open a conversation on a tile (`ConverseIntent`: up to 4 seats adjacent to the anchor, world-enforced round-robin turns, closes on a full round of passes), hand items to each other (`GiveIntent`), and register a reflex brief with `set_reflex` that the agent drops into without the planner when a wolf comes within the chosen distance or bites, during planning, conversations and code-driven stints. In conversation mode a small "converser" model call takes each turn and a closing call writes a note to `memory.md`. Contract: [docs/09_conversation_and_reflex.md](docs/09_conversation_and_reflex.md).
 **Invitations update (2026-09-18)**: `say(open_to_talk=True)` keeps a settler open to talk for 40 ticks; a settler standing next to an open inviter can `accept` (planner tool `talk_to`, Jev option `talk_to:<id>`) and the world creates the conversation on a free tile next to both. Briefs carry `invitations` (lines Jev may say with the flag). A conversation can now start while the planner is mid-turn: in-flight single-tick tools return "interrupted: conversation conv_N started", stints wait, and the report arrives in the next tool result. The planner no longer has `move`, `attack`, `extract` or `collect` tools (Jev, `travel_to` and `build` cover them) and its budget is 20 calls. Contract: docs/09 section 8.
+**Jev context update (2026-09-18)**: Jev's walk options are `step_towards:<object id | entity id | place name | shout:<speaker>>` with a per-type quota (nearest 2 of each object group, every wolf, nearest 3 settlers) instead of one shared top 6, plus a step toward every object id the brief names; briefs carry `places` (`{"river": [x, y]}`) so Jev never sees an absolute coordinate; the state has one always-present `facts` list (food, wolves, fatigue, day), a `so_far` block (ticks, inventory change, action counts, net movement this stint), `B`/`b` map glyphs for bushes with and without berries, and "arrived" instead of "blocked" on a finished walk. Jev is asked a `lost` question and a stint that scores it twice ends with reason `lost` and a report line telling the planner to name the target or move closer. `agents/evals/` is a live functional suite against the real Jev API (`cd agents && uv run pytest evals -q`, needs `TYPESAFE_API_KEY`) for prompt and model-version drift; `evals/replay_states.py` re-asks recorded states. The planner prompt has a "What Jev sees, and how to write for it" section. Contract: docs/05 "Stint (Jev executor)".
 **Metal and sleep update**: recipes have a station (`workshop_table`, `furnace`, `anvil`) and a work count; station recipes with work > 1 take one craft action per tick with progress kept on the station. Copper and iron veins sit in inland outcrops (never within 60 tiles of the site) and need a pickaxe of a high enough tier; ore + charcoal smelt to ingots at a furnace, copper tools are made at the workshop table, iron tools and the iron sword at an anvil. The world has a 300-tick day (night is the last third), settlers have fatigue (tired at 60: tool work halved, hits 1 softer, no regen; collapse at 100), and sleep on beds or the ground with `SleepIntent`/`WakeIntent`; the planner has `sleep` and `wake` tools and `craft` loops multi-tick recipes. Contract: [docs/10_metal_and_sleep.md](docs/10_metal_and_sleep.md).
+**Journal update**: `memory.md` is no longer an append-only note file. It is a
+five-section journal (`Story so far`, `Me`, `Others`, `Learnings`, `Tomorrow`)
+plus a `Today's notes` scratch section, and the settler rewrites the five
+sections itself in one background model call when it falls asleep or dies, from
+a de-duplicated log of the day's tool calls, results, reflections and events.
+Each section is capped at 600 tiktoken tokens (one retry, then hard
+truncation). Falling asleep or dying ends the planner's turn (the budget is
+spent) and the turn after a wake or a respawn starts with an empty message
+history and the fresh journal. The model is `--journal-model` / `JOURNAL_MODEL`,
+defaulting to the planner's. Contract: [docs/12_sleep_journal.md](docs/12_sleep_journal.md).
+**Week-run fixes (2026-09-18)**: after the first 7-day run (`runs/20260918-165534-settlement`,
+credit-limited at tick 1919) the planner no longer takes a turn while the body
+is asleep, collapsed or dead (`await_active`), any sleep ends the turn, `build`
+refuses an empty pack and names the shortfall and recipe, `look` lists item
+piles with contents, a failed `pickup` names the nearest piles, and the prompt
+states the physics of dying (pile, respawn place and state, no permanent death,
+no armor).
 **In progress**: milestone 7, run recording & replay — every run is recorded to `runs/<run_id>/` as gzip JSONL (not Parquet) and a replay server serves it to the viewer with seeking, playback and deep links. Contract: [docs/07_replay.md](docs/07_replay.md).
 **Not done**: milestone 8 (LLM agents) is superseded by `agents.jev_agent`.
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)
@@ -132,6 +150,7 @@ uv run --with pillow python tools/visualize_world.py <map.npz> [out] [--crop X,Y
 **Agents** (`agents/src/agents/`):
 - `random_agent.py` - SimpleAgent with state machine (WANDER/SEEK/COLLECT/EAT)
 - `jev_agent/` - Planner (pydantic-ai, OpenRouter) + Jev stint executor; see `agents/CLAUDE.md`
+- `jev_agent/journal.py` - the sleep-time journal: file format, token cap, day log, writer (docs/12)
 - `jev_agent/tracelog.py` - gzip JSONL traces (`stints`, `jev_states`, `planner`) under `$BOBGAME_RUN_DIR/agents`
 
 **Tooling** (repo root, `tools/`):
@@ -169,6 +188,7 @@ See component CLAUDE.md files for detailed architecture decisions:
 - `docs/07_replay.md` - Run recording formats, replay protocol, deep links
 - `docs/08_building.md` - Materials, recipes, layers, blocking, dismantling, resting, site thresholds
 - `docs/09_conversation_and_reflex.md` - Conversations, giving, the reflex brief, converser, traces
+- `docs/12_sleep_journal.md` - The five-section journal, its triggers, the day log and the history reset
 
 ## Sprite Index
 

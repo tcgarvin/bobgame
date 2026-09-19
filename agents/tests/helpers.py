@@ -21,8 +21,8 @@ def make_entity(
     entity_type: str = "player",
     health: int = 20,
     max_health: int = 20,
-    hunger: int = 80,
-    max_hunger: int = 100,
+    food: int = 80,
+    max_food: int = 100,
     wielded: str = "",
     alive: bool = True,
     inventory: Mapping[str, int] | None = None,
@@ -42,8 +42,8 @@ def make_entity(
         entity_type=entity_type,
         health=health,
         max_health=max_health,
-        hunger=hunger,
-        max_hunger=max_hunger,
+        food=food,
+        max_food=max_food,
         wielded=wielded,
         alive=alive,
         inventory=pb.Inventory(items=items),
@@ -283,3 +283,21 @@ class FakeConverser:
         """Return the fixed note text."""
         self.note_prompts.append(prompt)
         return NoteCall(self.note_text, self.usage)
+
+
+def died_event(entity_id: str, killer_id: str = "") -> pb.ObservationEvent:
+    """An `EntityDied` observation event."""
+    return pb.ObservationEvent(
+        entity_died=pb.EntityDied(entity_id=entity_id, killer_id=killer_id)
+    )
+
+
+def respawned_event(
+    entity_id: str, position: tuple[int, int] = (10, 10)
+) -> pb.ObservationEvent:
+    """An `EntityRespawned` observation event."""
+    return pb.ObservationEvent(
+        entity_respawned=pb.EntityRespawned(
+            entity_id=entity_id, position=pb.Position(x=position[0], y=position[1])
+        )
+    )

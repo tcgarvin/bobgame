@@ -35,8 +35,8 @@ message Entity {
   Inventory inventory = 6;
   int32 health = 7;
   int32 max_health = 8;
-  int32 hunger = 9;         // 0 = starving, max_hunger = full
-  int32 max_hunger = 10;
+  int32 food = 9;         // 0 = starving, max_food = well fed
+  int32 max_food = 10;
   string wielded = 11;      // item kind currently wielded, "" if none
   bool alive = 12;
   int32 fatigue = 13;       // 0 = fresh, max_fatigue = exhausted (docs/10)
@@ -199,14 +199,14 @@ message ObservationEvent {
 
 message EntityDamaged {
   string entity_id = 1;
-  string attacker_id = 2;   // "" for hunger/environment
+  string attacker_id = 2;   // "" for starvation
   int32 amount = 3;
   int32 remaining_health = 4;
 }
 
 message EntityDied {
   string entity_id = 1;
-  string killer_id = 2;     // "" for hunger/environment
+  string killer_id = 2;     // "" for starvation
   Position position = 3;
 }
 

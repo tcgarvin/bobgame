@@ -21,7 +21,7 @@ from .items import (
 )
 from .state import World, WorldObject
 from .sleep import is_tired
-from .stats import hunger_restored
+from .stats import food_restored
 from .types import CollectIntent, EatIntent, ExtractIntent, is_same_or_adjacent
 
 logger = structlog.get_logger()
@@ -192,7 +192,7 @@ def process_eat_phase(
     world: World,
     intents: Mapping[str, EatIntent],
 ) -> list[EatResult]:
-    """Process eat intents for a tick, restoring hunger."""
+    """Process eat intents for a tick, restoring food."""
     results: list[EatResult] = []
 
     for entity_id in sorted(intents):
@@ -221,7 +221,7 @@ def process_eat_phase(
             )
             continue
 
-        restored = hunger_restored(intent.item_type, intent.amount)
+        restored = food_restored(intent.item_type, intent.amount)
         if restored <= 0:
             results.append(
                 EatResult(
@@ -247,7 +247,7 @@ def process_eat_phase(
         updated = entity.with_inventory(
             entity.inventory.remove(intent.item_type, intent.amount)
         )
-        updated = updated.with_hunger(updated.hunger + restored)
+        updated = updated.with_food(updated.food + restored)
         if updated.wielded == intent.item_type and not updated.inventory.has(
             intent.item_type
         ):
@@ -268,7 +268,7 @@ def process_eat_phase(
             entity_id=entity_id,
             item_type=intent.item_type,
             amount=intent.amount,
-            hunger=updated.hunger,
+            food=updated.food,
         )
 
     return results

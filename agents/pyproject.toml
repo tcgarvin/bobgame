@@ -15,6 +15,7 @@ dependencies = [
     "typesafe-sdk>=0.6.0",
     "pydantic>=2.0",
     "pydantic-ai-slim[openai]>=2.43.0",
+    "tiktoken>=0.14",
 ]
 
 [build-system]
@@ -33,7 +34,13 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# `evals/` is deliberately outside testpaths: those tests call the real Jev API
+# and cost money, so `uv run pytest -q` must never reach them. Run them with
+# `uv run pytest evals -q`.
 testpaths = ["tests"]
+markers = [
+    "jev_live: calls the live TypeSafe Jev API (evals/, needs TYPESAFE_API_KEY)",
+]
 
 [tool.mypy]
 python_version = "3.13"

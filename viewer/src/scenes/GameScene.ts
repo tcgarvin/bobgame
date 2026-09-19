@@ -12,7 +12,7 @@ import { getSpriteFrame } from '../sprites';
 import { ChunkManager, ViewportTracker } from '../terrain';
 import { Hud, INSPECTABLE_TYPES, ObjectPanel, OverlayUI, ReplayBar } from '../ui';
 import type { DeepLinkParams, DeepLinkState } from '../DeepLink';
-import { buildQuery, buildUrl, parseDeepLink, resolveWsUrl } from '../DeepLink';
+import { REPLAY_WS_URL, buildQuery, buildUrl, parseDeepLink, resolveWsUrl } from '../DeepLink';
 import { CONVERSATION_TYPE, parseConversationParticipants } from '../conversation';
 
 const TILE_SIZE = 16;
@@ -125,7 +125,7 @@ const BUSH_SPRITE_EMPTY = 'berry-bush-empty';
 
 const BAR_WIDTH = TILE_SIZE * SCALE - 8;
 const HEALTH_BAR_HEIGHT = 4;
-const HUNGER_BAR_HEIGHT = 2;
+const FOOD_BAR_HEIGHT = 2;
 const SPEECH_BUBBLE_MS = 3000;
 /** How long each step of the thinking-bubble dot animation lasts. */
 const THOUGHT_DOT_MS = 500;
@@ -215,6 +215,13 @@ export class GameScene extends Phaser.Scene {
 
   // Network state
   private wsClient?: WebSocketClient;
+  /**
+   * Live mode only: a second socket to the replay server, used for nothing but
+   * `get_agent_detail`, so the panel can show the journal and the planner turn
+   * of the run being watched (docs/07_replay.md). Absent in replay mode, where
+   * `wsClient` already talks to the replay server.
+   */
+  private detailClient?: WebSocketClient;
   private worldState: WorldState = new WorldState();
   private entitySprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private objectSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
@@ -288,7 +295,7 @@ export class GameScene extends Phaser.Scene {
     );
     this.hud.setConnection(this.connectionLabel, this.connectionColor);
 
-    // Graphics layer for health/hunger bars and the selection ring
+    // Graphics layer for health/food bars and the selection ring
     this.statusBars = this.add.graphics();
     this.statusBars.setDepth(15);
 
@@ -320,9 +327,14 @@ export class GameScene extends Phaser.Scene {
     this.overlay = new OverlayUI(this.worldState, {
       onSelectEntity: (entityId) => this.selectEntity(entityId),
       onRequestAgentDetail: (entityId, tickId) => {
-        this.wsClient?.getAgentDetail(entityId, tickId);
+        if (this.detailClient) {
+          // Live mode: the replay server serves the run this world is writing.
+          this.detailClient.getAgentDetail(entityId, tickId, this.worldState.getRunId());
+        } else {
+          this.wsClient?.getAgentDetail(entityId, tickId);
+        }
       },
-    });
+    }, this.spriteIndex);
     this.overlay.setFollowing(this.cameraFollowing);
     if (this.deepLink.panel === false) {
       this.overlay.setPanelVisible(false);
@@ -618,6 +630,17 @@ export class GameScene extends Phaser.Scene {
 
     // Connect
     this.wsClient.connect();
+
+    // Live mode: agent detail comes from the replay server reading this run's
+    // traces. It is a best-effort extra - when no replay server is running,
+    // every request is simply dropped.
+    if (!this.deepLink.run) {
+      this.detailClient = new WebSocketClient(
+        (message) => this.worldState.handleMessage(message),
+        { url: REPLAY_WS_URL }
+      );
+      this.detailClient.connect();
+    }
   }
 
   private initializeWorld(): void {
@@ -1337,7 +1360,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * Draw the health bar (and, for players, the thin hunger bar) above an
+   * Draw the health bar (and, for players, the thin food bar) above an
    * entity, plus a selection outline for the currently selected one.
    */
   private drawEntityBars(
@@ -1361,13 +1384,13 @@ export class GameScene extends Phaser.Scene {
     g.fillRect(left, top, BAR_WIDTH * healthRatio, HEALTH_BAR_HEIGHT);
 
     if (entity.entityType === PLAYER_TYPE) {
-      const hungerRatio =
-        entity.maxHunger > 0 ? Math.max(0, Math.min(1, entity.hunger / entity.maxHunger)) : 0;
-      const hungerTop = top + HEALTH_BAR_HEIGHT + 1;
+      const foodRatio =
+        entity.maxFood > 0 ? Math.max(0, Math.min(1, entity.food / entity.maxFood)) : 0;
+      const foodTop = top + HEALTH_BAR_HEIGHT + 1;
       g.fillStyle(0x3a2a14, 1);
-      g.fillRect(left, hungerTop, BAR_WIDTH, HUNGER_BAR_HEIGHT);
+      g.fillRect(left, foodTop, BAR_WIDTH, FOOD_BAR_HEIGHT);
       g.fillStyle(0xe0913a, 1);
-      g.fillRect(left, hungerTop, BAR_WIDTH * hungerRatio, HUNGER_BAR_HEIGHT);
+      g.fillRect(left, foodTop, BAR_WIDTH * foodRatio, FOOD_BAR_HEIGHT);
     }
 
     if (selected) {
@@ -1385,6 +1408,10 @@ export class GameScene extends Phaser.Scene {
     // Cleanup network on scene shutdown
     if (this.wsClient) {
       this.wsClient.disconnect();
+    }
+    if (this.detailClient) {
+      this.detailClient.disconnect();
+      this.detailClient = undefined;
     }
     // Cleanup terrain chunks
     if (this.chunkManager) {

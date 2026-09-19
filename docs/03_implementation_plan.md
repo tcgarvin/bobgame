@@ -314,7 +314,7 @@ These can be added incrementally as needed:
 - **Chests**: Contain items, open to loot
 - **Trees**: Multi-tick chopping, yield wood
 - **Say Action**: Speech bubbles, local communication
-- **Hunger/Health**: Stats affected by eating
+- **Food/Health**: Stats affected by eating
 - **Crafting**: Combine items
 
 ---

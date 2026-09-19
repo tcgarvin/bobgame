@@ -150,8 +150,8 @@ WIELDABLE_KINDS: frozenset[str] = frozenset(WIELD_DAMAGE_BONUS)
 
 # --- Food -----------------------------------------------------------------
 
-# kind -> hunger restored per unit eaten
-FOOD_HUNGER_RESTORE: Mapping[str, int] = {BERRY: 20}
+# kind -> food restored per unit eaten
+FOOD_RESTORE: Mapping[str, int] = {BERRY: 20}
 
 # --- Object kinds ---------------------------------------------------------
 

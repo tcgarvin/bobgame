@@ -27,7 +27,7 @@ GUARD = ReflexBrief(
     success_condition="you are next to the workshop table",
     max_ticks=20,
     trigger_distance=4,
-    notes="eat a berry below hunger 40",
+    notes="eat a berry below food 40",
     shouts=("Someone come to the table.",),
 )
 
@@ -164,3 +164,27 @@ def test_the_report_line_has_the_shape_the_planner_is_promised() -> None:
     assert line == (
         "[reflex ran ticks 10-18: ended because threat_gone; health 20 -> 14]"
     )
+
+
+def test_named_places_survive_a_save_and_an_old_file_still_loads(
+    tmp_path: Path,
+) -> None:
+    """`reflex.json` written before places existed must keep working."""
+    store = ReflexStore(tmp_path / "reflex.json")
+    with_places = ReflexBrief(
+        instruction="Run to the gate.",
+        success_condition="you are at the gate",
+        max_ticks=10,
+        trigger_distance=4,
+        places={"the_gate": (1539, 974)},
+    )
+    store.save(with_places)
+    assert store.load() == with_places
+    assert store.load().to_brief().places == {"the_gate": (1539, 974)}
+
+    (tmp_path / "reflex.json").write_text(
+        '{"instruction": "Run.", "success_condition": "safe", "max_ticks": 5, '
+        '"trigger_distance": 3}',
+        encoding="utf-8",
+    )
+    assert store.load().places == {}

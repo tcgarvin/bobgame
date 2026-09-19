@@ -387,8 +387,8 @@ def _entity_proto(entity: Entity, tick: int) -> pb.Entity:
     proto = entity_to_proto(entity, tick)
     proto.health = entity.health
     proto.max_health = entity.max_health
-    proto.hunger = entity.hunger
-    proto.max_hunger = entity.max_hunger
+    proto.food = entity.food
+    proto.max_food = entity.max_food
     proto.wielded = entity.wielded
     proto.alive = entity.alive
     return proto

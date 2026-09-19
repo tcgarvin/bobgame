@@ -1,6 +1,7 @@
 """Tests for the replay session and the replay WebSocket service."""
 
 import asyncio
+import gzip
 import json
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from world.events import (
 )
 from world.movement import MoveResult
 from world.recording import RunRecorder
+from world.replay import loader as loader_module
 from world.replay.loader import RunLoader, RunLoadError
 from world.replay.service import ReplayWebSocketService
 from world.replay.session import ReplaySession
@@ -192,6 +194,54 @@ def build_run(runs_dir: Path) -> Path:
     return run_dir
 
 
+def _downgrade_food_to_hunger(ticks_path: Path) -> None:
+    """Rewrite a recording to the pre-2026-09-18 `hunger` stat names."""
+    with gzip.open(ticks_path, "rt", encoding="utf-8") as stream:
+        lines = [line for line in stream if line.strip()]
+    with gzip.open(ticks_path, "wt", encoding="utf-8") as stream:
+        for line in lines:
+            record = json.loads(line)
+            for update in record.get("entity_updates", []):
+                for current, legacy in (("food", "hunger"), ("max_food", "max_hunger")):
+                    if current in update:
+                        update[legacy] = update.pop(current)
+            stream.write(json.dumps(record) + "\n")
+
+
+def write_planner_trace(
+    run_dir: Path, entity_id: str, lines: list[dict[str, Any]]
+) -> Path:
+    """Append planner trace records for one agent, as the agent process would."""
+    directory = run_dir / "agents" / f"agent-{entity_id}"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "planner.jsonl.gz"
+    with gzip.open(path, "at", encoding="utf-8") as stream:
+        for line in lines:
+            stream.write(json.dumps(line) + "\n")
+    return path
+
+
+def journal_line(event: str, tick: int, story: str) -> dict[str, Any]:
+    """One journal-bearing planner record (docs/12_sleep_journal.md)."""
+    line: dict[str, Any] = {
+        "event": event,
+        "entity_id": "alice",
+        "tick": tick,
+        "journal": {
+            "Story so far": story,
+            "Me": "A gatherer.",
+            "Others": "",
+            "Learnings": "",
+            "Tomorrow": "",
+            "Today's notes": "- a note",
+        },
+    }
+    if event == "turn_start":
+        line["turn"] = tick
+        line["prompt"] = "Your name is alice."
+    return line
+
+
 @pytest.fixture
 def runs_dir(tmp_path: Path) -> Path:
     directory = tmp_path / "runs"
@@ -225,6 +275,103 @@ class TestRunLoader:
 
         with pytest.raises(RunLoadError):
             RunLoader(run_dir)
+
+    def test_legacy_hunger_keys_load_as_food(
+        self, runs_dir: Path, tmp_path: Path
+    ) -> None:
+        """Runs recorded before 2026-09-18 name the food stat `hunger`."""
+        _downgrade_food_to_hunger(runs_dir / RUN_ID / "world" / "ticks.jsonl.gz")
+
+        loader = RunLoader(runs_dir / RUN_ID)
+        updates = loader.tick_record(1)["entity_updates"]
+        alice = next(eu for eu in updates if eu["entity_id"] == "alice")
+        assert "hunger" not in alice and "max_hunger" not in alice
+        assert alice["food"] == 80
+        assert alice["max_food"] == 100
+
+        session = ReplaySession(loader, tmp_path)
+        session.seek(1)
+        assert session.world.get_entity("alice").food == 80
+
+    def test_journal_comes_from_the_latest_traced_event_at_or_before_the_tick(
+        self, runs_dir: Path
+    ) -> None:
+        write_planner_trace(
+            runs_dir / RUN_ID,
+            "alice",
+            [
+                journal_line("turn_start", 1, "Day one."),
+                journal_line("journal_rewrite", 3, "Day one, then I slept."),
+                journal_line("turn_start", 5, "Day two."),
+            ],
+        )
+        loader = RunLoader(runs_dir / RUN_ID)
+
+        assert loader.agent_detail("alice", 0)["journal"] is None
+        at_two = loader.agent_detail("alice", 2)["journal"]
+        assert at_two["tick"] == 1
+        assert at_two["source"] == "turn_start"
+        assert at_two["sections"]["Story so far"] == "Day one."
+        at_four = loader.agent_detail("alice", 4)["journal"]
+        assert at_four["tick"] == 3
+        assert at_four["source"] == "journal_rewrite"
+        assert at_four["sections"]["Today's notes"] == "- a note"
+        assert loader.agent_detail("alice", 99)["journal"]["tick"] == 5
+
+    def test_a_run_with_no_traced_journal_falls_back_to_memory_md(
+        self, runs_dir: Path
+    ) -> None:
+        agent_dir = runs_dir / RUN_ID / "agents" / "agent-alice"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "memory.md").write_text(
+            "## Story so far\nDay one.\n\n## Me\n\n## Others\n\n"
+            "## Learnings\n\n## Tomorrow\nChop wood.\n\n## Today's notes\n- a note\n",
+            encoding="utf-8",
+        )
+
+        journal = RunLoader(runs_dir / RUN_ID).agent_detail("alice", 2)["journal"]
+
+        assert journal["source"] == "memory.md"
+        assert journal["tick"] is None
+        assert journal["sections"]["Story so far"] == "Day one."
+        assert journal["sections"]["Tomorrow"] == "Chop wood."
+
+    def test_a_live_runs_new_turns_appear_without_reloading_the_run(
+        self, runs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(loader_module, "PLANNER_REFRESH_INTERVAL_S", 0.0)
+        loader = RunLoader(runs_dir / RUN_ID)
+        # The agent directory only appears once the agent process starts.
+        assert loader.agent_detail("alice", 5)["journal"] is None
+
+        write_planner_trace(
+            runs_dir / RUN_ID, "alice", [journal_line("turn_start", 1, "Day one.")]
+        )
+        assert loader.agent_detail("alice", 5)["journal"]["tick"] == 1
+
+        write_planner_trace(
+            runs_dir / RUN_ID,
+            "alice",
+            [journal_line("journal_rewrite", 4, "Day one, then I slept.")],
+        )
+        journal = loader.agent_detail("alice", 5)["journal"]
+        assert journal["tick"] == 4
+        assert journal["sections"]["Story so far"] == "Day one, then I slept."
+
+    def test_the_planner_trace_is_not_re_read_inside_the_refresh_interval(
+        self, runs_dir: Path
+    ) -> None:
+        write_planner_trace(
+            runs_dir / RUN_ID, "alice", [journal_line("turn_start", 1, "Day one.")]
+        )
+        loader = RunLoader(runs_dir / RUN_ID)
+        write_planner_trace(
+            runs_dir / RUN_ID, "alice", [journal_line("turn_start", 2, "Day two.")]
+        )
+
+        # The default interval has not elapsed since the load, so the new line
+        # is not picked up yet.
+        assert loader.agent_detail("alice", 5)["journal"]["tick"] == 1
 
     def test_run_index_lists_notable_moments(self, runs_dir: Path) -> None:
         index = RunLoader(runs_dir / RUN_ID).run_index()
@@ -466,6 +613,40 @@ class TestReplayWebSocketService:
         assert detail["jev_state"] is None
         assert detail["planner_turn"] is None
         assert detail["memory"] == ""
+        assert detail["journal"] is None
+
+    async def test_get_agent_detail_by_run_id_needs_no_open_run(
+        self, replay_client: Any, runs_dir: Path
+    ) -> None:
+        """How the live viewer reads agent detail: no session, just a run id."""
+        write_planner_trace(
+            runs_dir / RUN_ID, "alice", [journal_line("turn_start", 2, "Day one.")]
+        )
+
+        await replay_client.send(
+            {
+                "type": "get_agent_detail",
+                "run_id": RUN_ID,
+                "entity_id": "alice",
+                "tick_id": 4,
+            }
+        )
+        detail = (await replay_client.collect_until("agent_detail"))[-1]
+
+        assert detail["entity_id"] == "alice"
+        assert detail["tick_id"] == 4
+        assert detail["journal"]["tick"] == 2
+        assert detail["journal"]["source"] == "turn_start"
+        assert detail["journal"]["sections"]["Story so far"] == "Day one."
+
+    async def test_get_agent_detail_for_an_unknown_run_id_is_an_error(
+        self, replay_client: Any
+    ) -> None:
+        await replay_client.send(
+            {"type": "get_agent_detail", "run_id": "nope", "entity_id": "alice"}
+        )
+        messages = await replay_client.collect_until("error")
+        assert "nope" in messages[-1]["message"]
 
     async def test_get_run_index(self, replay_client: Any) -> None:
         await replay_client.send({"type": "open_run", "run_id": RUN_ID})

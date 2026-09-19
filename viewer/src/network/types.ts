@@ -15,8 +15,8 @@ export interface Position {
 export interface EntityStats {
   health?: number;
   max_health?: number;
-  hunger?: number;
-  max_hunger?: number;
+  food?: number;
+  max_food?: number;
   wielded?: string;
   alive?: boolean;
   /** Tiredness, 0 = fresh (docs/10_metal_and_sleep.md, section 4). */
@@ -355,6 +355,18 @@ export interface PlannerTurn {
   events?: PlannerTurnEvent[];
 }
 
+/**
+ * The settler's journal as it stood at the requested tick, taken from the
+ * planner trace (docs/12_sleep_journal.md). `tick` is the tick of the
+ * `turn_start` or `journal_rewrite` it came from, and is null for the
+ * `memory.md` fallback used by runs recorded before the journal was traced.
+ */
+export interface AgentJournal {
+  sections: Record<string, string>;
+  tick: number | null;
+  source: 'turn_start' | 'journal_rewrite' | 'memory.md';
+}
+
 export interface AgentDetailMessage {
   type: 'agent_detail';
   entity_id: string;
@@ -365,6 +377,8 @@ export interface AgentDetailMessage {
   criteria: Record<string, string> | null;
   planner_turn: PlannerTurn | null;
   memory?: string;
+  /** null when the run has no journal for this entity at or before the tick. */
+  journal?: AgentJournal | null;
 }
 
 export interface ErrorMessage {

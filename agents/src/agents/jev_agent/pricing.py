@@ -104,8 +104,10 @@ class CostLedger:
 
     planner_usd: float = 0.0
     converser_usd: float = 0.0
+    journal_usd: float = 0.0
     jev_usd: float = 0.0
     planner_turns: int = 0
+    journal_rewrites: int = 0
     jev_calls: int = 0
 
     def add_planner(self, usage: Mapping[str, Any]) -> None:
@@ -117,6 +119,11 @@ class CostLedger:
         """Record one converser call (a move or a closing note)."""
         self.converser_usd += _usage_cost(usage)
 
+    def add_journal(self, usage: Mapping[str, Any]) -> None:
+        """Record one journal rewrite (docs/12_sleep_journal.md)."""
+        self.journal_usd += _usage_cost(usage)
+        self.journal_rewrites += 1
+
     def add_jev(self, input_tokens: int) -> None:
         """Record one Jev call from its input token count."""
         self.jev_usd += jev_cost_usd(input_tokens)
@@ -124,7 +131,7 @@ class CostLedger:
 
     def total_usd(self) -> float:
         """Everything spent so far."""
-        return self.planner_usd + self.converser_usd + self.jev_usd
+        return self.planner_usd + self.converser_usd + self.journal_usd + self.jev_usd
 
     def as_json(self) -> str:
         """The ledger as the JSON the status report carries."""
@@ -132,9 +139,11 @@ class CostLedger:
             {
                 "planner_usd": round(self.planner_usd, COST_DECIMALS),
                 "converser_usd": round(self.converser_usd, COST_DECIMALS),
+                "journal_usd": round(self.journal_usd, COST_DECIMALS),
                 "jev_usd": round(self.jev_usd, COST_DECIMALS),
                 "total_usd": round(self.total_usd(), COST_DECIMALS),
                 "planner_turns": self.planner_turns,
+                "journal_rewrites": self.journal_rewrites,
                 "jev_calls": self.jev_calls,
             }
         )

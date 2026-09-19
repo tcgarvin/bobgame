@@ -222,12 +222,18 @@ export class WebSocketClient {
     return this.send({ type: 'pause' });
   }
 
-  /** Request the full agent detail for one entity at one tick. */
-  getAgentDetail(entityId: string, tickId: number): boolean {
+  /**
+   * Request the full agent detail for one entity at one tick.
+   *
+   * `runId` asks the replay server about a run this connection has not opened,
+   * which is how the live viewer reads agent detail (docs/07_replay.md).
+   */
+  getAgentDetail(entityId: string, tickId: number, runId: string = ''): boolean {
     return this.send({
       type: 'get_agent_detail',
       entity_id: entityId,
       tick_id: Math.round(tickId),
+      ...(runId ? { run_id: runId } : {}),
     });
   }
 

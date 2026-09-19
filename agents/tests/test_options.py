@@ -7,6 +7,8 @@ from typing import Sequence
 from agents.jev_agent.geometry import NAME_TO_DIRECTION
 from agents.jev_agent.options import (
     CRAFT_OPTION_LIMIT,
+    STEP_KEY_PREFIX,
+    STEP_TARGETS_PER_GROUP,
     MAX_OPTIONS,
     HEARD_SHOUT_KEY_PREFIX,
     HEARD_SHOUT_MAX_AGE_TICKS,
@@ -81,7 +83,7 @@ def test_extract_is_offered_only_for_adjacent_trees_and_rocks() -> None:
     assert "extract:tree_near" in offered
     assert "extract:rock_1" in offered
     assert "extract:tree_far" not in offered
-    assert "travel_to:tree_far" in offered
+    assert "step_towards:tree_far" in offered
 
 
 def test_collect_needs_a_berry_bush_on_your_own_tile() -> None:
@@ -175,21 +177,122 @@ def test_pickup_lists_what_is_in_the_pile_underfoot() -> None:
 
 def test_travel_controls_appear_only_while_a_travel_is_active() -> None:
     model = build_model()
-    assert "follow_travel" not in keys(model)
-    assert "stop_travel" not in keys(model)
+    assert "keep_going" not in keys(model)
+    assert "stop_going" not in keys(model)
 
     travel = TravelState(target=(16, 10), label="the clearing")
     offered = keys(model, travel)
-    assert "follow_travel" in offered
-    assert "stop_travel" in offered
+    assert "keep_going" in offered
+    assert "stop_going" in offered
 
 
-def test_travel_to_is_capped_at_six_candidates() -> None:
-    model = build_model(
-        objects=[make_object(f"tree_{i}", "tree", (10 + i, 12)) for i in range(2, 12)]
+def test_keep_going_names_the_target_the_step_and_the_distance() -> None:
+    model = build_model()
+    travel = TravelState(target=(14, 10), label="the clearing")
+    criteria = options_to_criteria(enumerate_options(model, travel))
+    assert criteria["keep_going"] == (
+        "keep going toward the clearing (next step E, 4 steps left)"
     )
-    travel_keys = [key for key in keys(model) if key.startswith("travel_to:")]
-    assert len(travel_keys) == 6
+
+
+# --- step_towards: one step per tick, with a per-type quota -----------------
+
+
+def step_keys(model: WorldModel, **kwargs: object) -> list[str]:
+    """Just the walk options, in the order they are offered."""
+    return [
+        key for key in keys_with(model, **kwargs) if key.startswith(STEP_KEY_PREFIX)
+    ]
+
+
+def test_each_object_group_gets_its_own_two_slots() -> None:
+    model = build_model(
+        objects=[make_object(f"tree_{i}", "tree", (10 + i, 12)) for i in range(2, 22)]
+        + [
+            make_object("bush_1", "bush", (4, 10), {"berry_count": "1"}),
+            make_object("rock_1", "rock_small", (3, 14)),
+        ]
+    )
+    offered = step_keys(model)
+    trees = [key for key in offered if key.startswith(f"{STEP_KEY_PREFIX}tree_")]
+    assert len(trees) == STEP_TARGETS_PER_GROUP
+    # A grove no longer crowds out the one bush and the one rock.
+    assert f"{STEP_KEY_PREFIX}bush_1" in offered
+    assert f"{STEP_KEY_PREFIX}rock_1" in offered
+
+
+def test_a_step_option_describes_the_target_offset_and_distance() -> None:
+    model = build_model(objects=[make_object("tree_9", "tree", (13, 8))])
+    criteria = options_to_criteria(enumerate_options(model))
+    assert criteria[f"{STEP_KEY_PREFIX}tree_9"] == (
+        "one step toward tree_9 (tree) at dx 3 dy -2, 3 tiles away"
+    )
+
+
+def test_an_empty_bush_is_not_worth_walking_to() -> None:
+    model = build_model(
+        objects=[make_object("bush_1", "bush", (14, 10), {"berry_count": "0"})]
+    )
+    assert f"{STEP_KEY_PREFIX}bush_1" not in step_keys(model)
+
+
+def test_every_wolf_and_the_nearest_settlers_get_a_step_option() -> None:
+    model = build_model(
+        entities=[
+            make_entity("wolf_1", (14, 10), entity_type="wolf"),
+            make_entity("wolf_2", (10, 15), entity_type="wolf"),
+            make_entity("wolf_3", (6, 6), entity_type="wolf", alive=False),
+            make_entity("bram", (13, 13)),
+            make_entity("cleo", (7, 7)),
+        ]
+    )
+    offered = step_keys(model)
+    assert f"{STEP_KEY_PREFIX}wolf_1" in offered
+    assert f"{STEP_KEY_PREFIX}wolf_2" in offered
+    assert f"{STEP_KEY_PREFIX}wolf_3" not in offered, "a dead wolf is not a target"
+    assert f"{STEP_KEY_PREFIX}bram" in offered
+    assert f"{STEP_KEY_PREFIX}cleo" in offered
+
+
+def test_an_object_the_brief_names_is_always_offered_and_comes_first() -> None:
+    model = build_model(
+        objects=[make_object(f"tree_{i}", "tree", (10 + i, 12)) for i in range(2, 22)]
+        + [make_object("rock_77", "rock_small", (4, 4))]
+    )
+    offered = step_keys(model, brief_text="Mine rock_77 until it is gone.")
+    assert offered[0] == f"{STEP_KEY_PREFIX}rock_77"
+
+
+def test_a_brief_id_that_names_nothing_known_is_ignored() -> None:
+    model = build_model()
+    assert step_keys(model, brief_text="Go to tree_404.") == []
+
+
+# --- named places ----------------------------------------------------------
+
+
+def test_a_named_place_is_offered_with_a_relative_offset() -> None:
+    model = build_model()
+    criteria = options_to_criteria(
+        enumerate_options(model, places={"the_lake": (14, 7)})
+    )
+    assert criteria[f"{STEP_KEY_PREFIX}the_lake"] == (
+        "one step toward the_lake at dx 4 dy -3, 4 tiles away"
+    )
+
+
+def test_a_place_with_no_known_path_still_gets_a_hopeful_step() -> None:
+    model = build_model()
+    criteria = options_to_criteria(
+        enumerate_options(model, places={"far_away": (900, 900)})
+    )
+    description = criteria[f"{STEP_KEY_PREFIX}far_away"]
+    assert "beyond what you can see, so keep stepping" in description
+
+
+def test_a_place_you_are_standing_on_is_not_offered() -> None:
+    model = build_model()
+    assert f"{STEP_KEY_PREFIX}here" not in keys_with(model, places={"here": (10, 10)})
 
 
 def test_option_list_is_capped_and_unique() -> None:

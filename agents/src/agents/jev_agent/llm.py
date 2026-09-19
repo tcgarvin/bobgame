@@ -13,6 +13,7 @@ from pydantic_ai.models.openrouter import OpenRouterModelSettings
 
 DEFAULT_PLANNER_MODEL = "qwen/qwen3.7-flash"
 PLANNER_MODEL_ENV = "PLANNER_MODEL"
+JOURNAL_MODEL_ENV = "JOURNAL_MODEL"
 
 
 def resolve_model_name(model_name: str = "") -> str:
@@ -47,3 +48,29 @@ def planner_model_settings(model_name: str) -> OpenRouterModelSettings:
         temperature=0.7,
         timeout=90.0,
     )
+
+
+def resolve_journal_model_name(
+    model_name: str = "", planner_model_name: str = ""
+) -> str:
+    """The model the sleep-time journal runs on (docs/12_sleep_journal.md).
+
+    An explicit `--journal-model`, else `$JOURNAL_MODEL`, else whatever the
+    planner already resolved to, so a run that only sets `--planner-model`
+    keeps both halves on one model.
+    """
+    explicit = model_name or os.environ.get(JOURNAL_MODEL_ENV, "")
+    if explicit:
+        return resolve_model_name(explicit)
+    return planner_model_name or resolve_model_name()
+
+
+def journal_model_settings(model_name: str) -> OpenRouterModelSettings:
+    """The planner's settings with reasoning always on at low effort.
+
+    The journal is written once a day and its quality matters more than its
+    latency, so unlike the planner it always gets to think a little.
+    """
+    settings = planner_model_settings(model_name)
+    settings["openrouter_reasoning"] = {"effort": "low"}
+    return settings

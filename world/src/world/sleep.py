@@ -4,7 +4,7 @@ Two phases run each tick:
 
 - `process_sleep_phase` turns `SleepIntent` and `WakeIntent` into state changes.
   It runs after the movement and action phases.
-- `process_fatigue_phase` runs beside the hunger phase: it accumulates fatigue
+- `process_fatigue_phase` runs beside the food phase: it accumulates fatigue
   for awake players, recovers it for sleepers, heals bed sleepers, collapses
   the exhausted and wakes sleepers whose reason to sleep has gone.
 
@@ -151,7 +151,7 @@ def _apply_sleep_intents(
         place = _sleep_place(world, entity, intents[entity_id].object_id, taken, events)
         if place is None:
             continue
-        if entity.hunger <= 0:
+        if entity.food <= 0:
             events.acted(entity_id, "sleep", False, "too hungry to sleep")
             continue
         if entity.fatigue <= 0:
@@ -252,7 +252,7 @@ def _recover_fatigue(world: World, night: bool) -> None:
 
 
 def _heal_bed_sleepers(world: World) -> None:
-    """Heal bed sleepers regardless of hunger and fatigue (docs/10).
+    """Heal bed sleepers regardless of food and fatigue (docs/10).
 
     The regen constants are imported here rather than at module level:
     `stats` imports this module for `is_tired` and `RESPAWN_FATIGUE`, and a
@@ -284,7 +284,7 @@ def _wake_sleepers(world: World, damaged: set[str], events: TickEvents) -> None:
 def _wake_reason(world: World, entity: Entity, damaged: set[str]) -> str:
     """Why this sleeper should wake, or "" to sleep on.
 
-    A collapsed sleeper ignores damage and hunger; it sleeps until its fatigue
+    A collapsed sleeper ignores damage and starvation; it sleeps until its fatigue
     has fallen to COLLAPSE_WAKE_FATIGUE.
     """
     if entity.collapsed:
@@ -296,7 +296,7 @@ def _wake_reason(world: World, entity: Entity, damaged: set[str]) -> str:
         return WAKE_RESTED
     if entity.entity_id in damaged:
         return WAKE_DAMAGED
-    if entity.hunger <= 0:
+    if entity.food <= 0:
         return WAKE_HUNGRY
     if entity.sleeping_on != GROUND and not _bed_exists(world, entity.sleeping_on):
         return WAKE_BED_REMOVED

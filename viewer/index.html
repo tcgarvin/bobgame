@@ -137,6 +137,88 @@
       #agent-panel .muted {
         color: #6c6c80;
       }
+      /* Header: name, wielded tool, then the mode and status chips. */
+      #ap-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      #ap-badges {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 2px;
+      }
+      #ap-wielded {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-left: auto;
+      }
+      #ap-wielded .tier {
+        color: #c8b28a;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      /* A 16x16 DawnLike tile, scaled from its top-left corner (see ItemIcon.ts). */
+      .item-icon-box {
+        display: inline-block;
+        overflow: hidden;
+        flex: none;
+      }
+      .item-icon {
+        display: block;
+        width: 16px;
+        height: 16px;
+        transform-origin: top left;
+        background-repeat: no-repeat;
+        image-rendering: pixelated;
+      }
+      /* Only shown when it is worth saying: dead, asleep, collapsed, open to talk. */
+      .status-chip {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 8px;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        background: #4a3a5c;
+        color: #e6d8ff;
+      }
+      .status-chip.dead {
+        background: #6b2222;
+        color: #ffd8d8;
+      }
+      .status-chip.talk {
+        background: #3a5d6b;
+        color: #cdeef7;
+      }
+      /* What Jev is doing, in plain words, under the brief instruction. */
+      #agent-panel .doing {
+        color: #ffffff;
+        overflow-wrap: anywhere;
+        margin-top: 2px;
+      }
+      #agent-panel .reason {
+        color: #9a9ab0;
+        overflow-wrap: anywhere;
+      }
+      /* The demoted brief details and other small asides. */
+      #agent-panel .note-line {
+        color: #7c7c92;
+        font-size: 11px;
+        overflow-wrap: anywhere;
+      }
+      #ap-journal ul {
+        margin-top: 2px;
+      }
+      #ap-journal li {
+        color: #c2c2d2;
+      }
+      #ap-journal .text {
+        margin-bottom: 2px;
+      }
       .mode-badge {
         display: inline-block;
         padding: 1px 6px;
@@ -191,7 +273,7 @@
         background: #5f8dd3;
       }
       .bar-row .bar-value {
-        flex: 0 0 40px;
+        flex: 0 0 62px;
         text-align: right;
         color: #9a9ab0;
       }
@@ -380,17 +462,23 @@
         <span id="cost-readout" class="muted">-</span>
       </div>
       <div id="agent-panel" class="panel">
-        <h2 id="ap-name">No entity selected</h2>
-        <div><span id="ap-mode" class="mode-badge">idle</span></div>
+        <div id="ap-header">
+          <h2 id="ap-name">No entity selected</h2>
+          <span id="ap-wielded" class="wielded hidden"></span>
+        </div>
+        <div id="ap-badges">
+          <span id="ap-mode" class="mode-badge">idle</span>
+          <span id="ap-status" class="status-chip hidden"></span>
+        </div>
 
         <div class="section">
-          <div class="label">Stats</div>
           <div id="ap-stats"></div>
         </div>
 
         <div class="section">
-          <div class="label">Brief</div>
+          <div class="label">Doing now</div>
           <div id="ap-brief" class="text muted">-</div>
+          <div id="ap-jev"></div>
           <div id="ap-brief-meta"></div>
         </div>
 
@@ -405,8 +493,8 @@
         </div>
 
         <div class="section">
-          <div class="label">Last Jev decision</div>
-          <div id="ap-jev" class="text muted">-</div>
+          <div class="label">Journal</div>
+          <div id="ap-journal"></div>
         </div>
 
         <div class="section">
@@ -421,18 +509,22 @@
           </ul>
         </div>
 
-        <div id="ap-replay" class="section hidden">
-          <details>
-            <summary>What Jev saw</summary>
-            <div id="ap-jev-state"></div>
-          </details>
-          <details>
-            <summary>Planner turn</summary>
-            <div id="ap-planner"></div>
-          </details>
-          <details>
-            <summary>Memory</summary>
-            <div id="ap-memory"></div>
+        <div class="section">
+          <details id="ap-details">
+            <summary>Details</summary>
+            <div id="ap-debug"></div>
+            <details class="sub">
+              <summary>What Jev saw</summary>
+              <div id="ap-jev-state"></div>
+            </details>
+            <details class="sub">
+              <summary>Planner turn</summary>
+              <div id="ap-planner"></div>
+            </details>
+            <details class="sub">
+              <summary>Journal text</summary>
+              <div id="ap-memory"></div>
+            </details>
           </details>
         </div>
       </div>

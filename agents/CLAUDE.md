@@ -208,14 +208,20 @@ rendered `StintReport`. A tick driven by code instead of Jev (the `build` tool)
 writes the same row with `"driver": "build"` and without Jev's numbers. `jev_states.jsonl.gz` is the heavy one: the exact state
 and criteria sent to Jev, one line per real call (repeats under `check_every`
 make no call and write no line; a timed-out call still wrote its state).
-`planner.jsonl.gz` holds the planner's turns: `turn_start` with the full prompt,
+`planner.jsonl.gz` holds the planner's turns: `turn_start` with the full prompt
+and a `journal` block (the six journal sections as text, so the viewer can show
+the journal at any tick - docs/12),
 `tool_call` and `tool_result` with untruncated args and results, `turn_end` with
 the reflection, tool count, duration and token usage, plus `turn_failed`,
 `tool_budget_spent` (the soft 20-call budget ran out and the turn ended
 normally), `tool_budget_reached` (the hard backstop fired) and `history_reset`. `conversations.jsonl.gz` holds one
 conversation per `conversation_start`/`turn`/`conversation_end` triple.
-`memory.md`, the planner's persistent notes, and `reflex.json`, the registered
-reflex brief, sit in the same directory. A file that cannot be opened or written
+`memory.md`, the settler's journal (five sections it rewrites itself at the end
+of every day, plus today's notes - docs/12_sleep_journal.md), and
+`reflex.json`, the registered reflex brief, sit in the same directory. The
+journal's rewrites are traced in `planner.jsonl.gz` as `journal_rewrite`
+(carrying the same `journal` block, with the scratch section cleared) and
+`journal_rewrite_failed`. A file that cannot be opened or written
 complains once and then goes inert - tracing never stops the agent.
 
 `tracelog.py` owns this: `JsonlGzWriter`, the per-entity `AgentTrace` (created
@@ -237,15 +243,16 @@ written at startup with the prices the run is billed at (`pricing.py`). Contract
 | `build.py` | Shape geometry and the `BuildExecutor` that drives the planner's `build` tool |
 | `pathfinding.py` | 8-connected A* with the world's diagonal-blocking rule; unknown tiles cost 3 |
 | `worldmodel.py` | Everything ever observed: tiles, objects, entities, own history, settlement |
-| `options.py` | The legal actions for this tick, each carrying its proto Intent |
-| `jevstate.py` | The compact JSON state (with the 17x17 ASCII map) Jev sees |
+| `options.py` | The legal actions for this tick, each carrying its proto Intent; walking is `step_towards:<target>` with a per-type quota (`STEP_GROUPS`), and `OPTION_SECTIONS` fixes what gets truncated first |
+| `jevstate.py` | The compact JSON state (17x17 ASCII map, one `facts` list, the `so_far` block, a `nearby` list of only what the map cannot say) Jev sees |
 | `jevclient.py` | The TypeSafe System One call; `JevClient` protocol for fakes |
-| `stint.py` | `Brief` -> one Jev call per tick -> Intent, plus the code rules and `StintReport` |
+| `stint.py` | `Brief` (instruction, success condition, notes, shouts, invitations, `places`) -> one Jev call per tick -> Intent, plus the code rules, `StintProgress` and `StintReport` |
 | `reflex.py` | The pre-registered reflex brief: persistence, trigger, cooldown, end rule |
 | `conversation.py` | Conversation mode: the converser, the per-turn session, the report and the note |
 | `llm.py` | Model id resolution and model settings shared by the planner and the converser |
 | `pricing.py` | What a call cost: the Jev price constant and the `usage` block built from a run's model responses |
 | `tracelog.py` | The gzip JSONL trace files, the `AgentTrace` that owns them, and the log-root rules |
+| `journal.py` | The sleep-time journal: sections, token cap, the day log and the writer (docs/12) |
 | `planner.py` | The pydantic-ai agent, its tools, and the turn loop |
 | `agent.py` | The tick loop and the planner handshake |
 
@@ -257,8 +264,9 @@ on the status channel.
 
 - **Stint**: Jev picks one action per tick from the code-enumerated options.
   The stint ends on two consecutive ticks with `done` or `stuck` at or above
-  `DONE_OR_STUCK_THRESHOLD` (0.6), an exhausted tick budget, death, or the same
-  failed action three times running.
+  `DONE_OR_STUCK_THRESHOLD` (0.6) (reason `eject`), or with `lost` at or above
+  `LOST_THRESHOLD` (0.6) (reason `lost`), on an exhausted tick budget, death,
+  or the same failed action three times running.
 - **Planning**: the tick loop submits `Wait` (or one `Say` on the `thought`
   channel when the planner produces a new reflection) while the planner task
   thinks. Planner tools reach the tick loop through asyncio Futures, so
@@ -359,15 +367,30 @@ report has no tool waiting for it, so it goes to the planner as a note:
 conversation reports alike. `conversation_start` records `via`: `open`, `join`,
 `accept`, or `accepted` for the inviter.
 
-### The eject question, split (docs/05)
+### The eject question, split in three (docs/05)
 
-Jev is asked `done` ("is the success condition met right now") and `stuck`
-("has the brief become impossible, or does this need a judgement the brief does
-not cover") as two Nouls every tick, and the stint ends when either reaches 0.6
-on two consecutive ticks. `JevDecision.eject` is a derived property,
-`max(done, stuck)`, so the traces, the report line (which now prints
-`(done X, stuck Y, danger Z)`), the viewer panel and
-`tools/analyze_run.py`'s eject column keep working unchanged.
+Jev is asked `done` ("is the success condition met right now"), `stuck` ("has
+the brief become impossible, or does this need a judgement the brief does not
+cover") and `lost` ("is progress impossible because something the brief needs
+is missing from this state: a target not on the map or with no step option
+toward it, or an item or station you cannot get here; a named place with a
+step option is not missing however far away")
+as three Nouls every tick. `done` or `stuck` at 0.6 on two consecutive ticks
+ends the stint with reason `eject`; `lost` at 0.6 on two consecutive ticks ends
+it with reason `lost`, and the report adds a line telling the planner to name
+the target by id or as a place, or to move closer. `lost` was added on
+2026-09-18 after a settler starved stepping north and south for thirty ticks
+toward a bush it had no option to reach while `stuck` sat at 0.4.
+`JevDecision.eject` is a derived property, `max(done, stuck, lost)`, so the
+traces, the report line (`(done X, stuck Y, lost L, danger Z)`), the viewer
+panel and `tools/analyze_run.py`'s eject column keep working unchanged.
+
+The live evaluation suite for these judgements is `agents/evals/` (run with
+`uv run pytest evals -q`, needs `TYPESAFE_API_KEY`; see its README). It builds
+hand-made states through the real `enumerate_options` and `build_state`, asks
+the live model, records every answer under `evals/results/`, and asserts on
+generous thresholds. `evals/replay_states.py` re-asks the current questions on
+a recorded `jev_states.jsonl.gz`.
 
 ### Stations, metal and sleep (docs/10_metal_and_sleep.md)
 
@@ -395,6 +418,22 @@ Falling asleep and waking are written to `stints.jsonl.gz` as `sleep_start` and
 `JevAgent.await_wake` until then; `craft` repeats the craft action until the
 recipe completes or an action fails.
 
+### The journal (docs/12_sleep_journal.md)
+
+`memory.md` is the settler's journal: `## Story so far`, `## Me`, `## Others`,
+`## Learnings`, `## Tomorrow` and `## Today's notes`. `remember` and the
+closing note of a conversation append bullets to the scratch section only; the
+five above are rewritten wholesale by one model call (`ModelJournalWriter`,
+behind the `JournalWriter` protocol) when the actor falls asleep or dies. The
+call runs in the background - one at a time per agent - from a snapshot of the
+planner's `DayLog`, which holds every tool call, bare tool result, reflection,
+bridge note and life event since the last rewrite, de-duplicated at render time
+(last `look` only, no `recall`, consecutive duplicates collapsed, 60k chars).
+Each section is capped at 600 tokens: a `ModelRetry` first, then a hard cut.
+Falling asleep or dying spends the tool budget so the turn ends, and the turn
+after a wake or a respawn drops `Planner.history`; `build_prompt` waits (up to
+`JOURNAL_WAIT_SECONDS`) for a rewrite in flight before reading the file.
+
 ### Building (docs/08_building.md)
 
 `items.py` restates the world's contract for the agent: the full recipe table
@@ -417,7 +456,7 @@ What Jev may choose (`options.py`):
 - **shout:<n>**: one option per phrase in `Brief.shouts`, which the planner
   writes in `start_stint` (at most `MAX_BRIEF_SHOUTS`, with a cooldown). Jev
   has no shout of its own and none is tied to wolves.
-  **travel_to:shout:<speaker>** walks to where a shout came from for
+  **step_towards:shout:<speaker>** walks to where a shout came from for
   `HEARD_SHOUT_MAX_AGE_TICKS` after hearing it, whatever it said.
   `jevstate.py` adds a `threat` block with wolf counts and wolf physics (no
   tactics) whenever a wolf is in view.
@@ -464,6 +503,36 @@ turns into a `ModelRetry`), and a `BuildExecutor` runs it as a **driven stint**:
   `build_place:<kind>:<x>,<y>`. They carry no `latency_ms`, `eject`, `danger`,
   `confidence` or token count, because there was no Jev call and averaging
   zeros would poison `tools/analyze_run.py`.
+
+### Walking, and what Jev is told (2026-09-18)
+
+- **`step_towards:<target>`** is the one walking option: one A* step, and it
+  sets the travel state so `keep_going` (was `follow_travel`) carries on and
+  `stop_going` (was `stop_travel`) abandons it. Targets are the brief's own
+  (`Brief.places` and every object id the instruction or notes name, matched by
+  `OBJECT_ID_PATTERN`), then a per-group quota: `STEP_TARGETS_PER_GROUP` (2) per
+  `STEP_GROUPS` entry, every living wolf in view, and the nearest
+  `STEP_SETTLER_LIMIT` (3) settlers. Before this the six nearest objects of any
+  type shared one budget, so in a grove all six were trees and nothing else was
+  reachable. `OPTION_SECTIONS` is the order the sections are offered in;
+  `MAX_OPTIONS` (40) cuts the tail, which is always the quota list.
+- **Named places**: `start_stint(places={"the_lake": [x, y]})`, validated in
+  `_validated_places` (1-24 chars of `[a-z0-9_]`, at most
+  `MAX_BRIEF_PLACES`, never an object or entity id). Jev sees them under
+  `brief.places` as offsets, never coordinates; `travel_to(x, y)` is just a
+  brief with `places={"destination": (x, y)}`. `ReflexBrief` carries them too
+  and `reflex.json` persists them.
+- **The state**: one `facts` list (food, wolves, fatigue, the day) always
+  present instead of three fields hidden in three blocks; a `so_far` block
+  (`StintProgress`) with ticks used and left, inventory change, action counts
+  and net movement, because Jev has no memory between ticks; `nearby` shrunk to
+  what the map cannot express; `B`/`b` on the map for a bush with and without a
+  berry (the message board moved to `M`); and `travel.next_step` says `arrived`
+  rather than `blocked` when the actor is already there.
+- **Trace**: a tick row is written at the *start of the next* `decide`, after
+  `_detect_blocked_move` has had its say, and `finish` flushes the last one. It
+  used to be written immediately, so a silently blocked move was never in
+  `stints.jsonl.gz`.
 
 ### Testing
 

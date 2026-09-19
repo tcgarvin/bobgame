@@ -309,6 +309,7 @@ class BuildExecutor:
         self._stop_reason = ""
         self._step_tick = -1
         self._step: _Step | None = None
+        self._carried = -1
 
     # -- StintDriver --------------------------------------------------------
 
@@ -319,7 +320,8 @@ class BuildExecutor:
             return BUILD_DONE
         if self._in_danger(model):
             return BUILD_DANGER
-        if model.self_info.inventory.get(self.plan.kind, 0) <= 0:
+        self._carried = model.self_info.inventory.get(self.plan.kind, 0)
+        if self._carried <= 0:
             return BUILD_OUT_OF_ITEMS
         if self._current_step(model) is None:
             if self._sealing:
@@ -358,6 +360,7 @@ class BuildExecutor:
         if progress.remaining:
             preview = ", ".join(str(tile) for tile in progress.remaining[:6])
             lines.append(f"  next tiles: {preview}")
+            lines.extend(self._supply_lines(len(progress.remaining)))
         if progress.skipped:
             lines.append("  skipped:")
             lines.extend(
@@ -375,6 +378,21 @@ class BuildExecutor:
         )
 
     # -- internals ----------------------------------------------------------
+
+    def _supply_lines(self, remaining: int) -> list[str]:
+        """What the builder carries against what is left, and how to make more.
+
+        The report is the planner's only view of why a build stopped; a build
+        that ends on an empty pack must say so in pieces and in recipe, or the
+        planner calls it again with the same pack.
+        """
+        if self._carried < 0:
+            return []
+        lines = [f"  carrying now: {self._carried} {self.plan.kind}"]
+        short = remaining - self._carried
+        if short > 0:
+            lines.append(f"  short by {short}: {supply_text(self.plan.kind, short)}")
+        return lines
 
     def _refresh(self, model: WorldModel) -> None:
         """Drop tiles that are done or impossible, based on what we can now see."""
@@ -538,3 +556,32 @@ def build_brief_text(plan: BuildPlan) -> tuple[str, str]:
 def inventory_shortfall(plan: BuildPlan, inventory: Mapping[str, int]) -> int:
     """How many more pieces of `plan.kind` the builder needs for the whole plan."""
     return max(0, len(plan.tiles) - inventory.get(plan.kind, 0))
+
+
+def supply_text(kind: str, count: int) -> str:
+    """How to come by `count` more pieces of `kind`: the recipe, scaled.
+
+    `"craft wood_wall 8 times (2 plank each, by hand): 16 plank in all"`.
+    """
+    recipe = items.RECIPES.get(kind)
+    if recipe is None:
+        return f"{kind} cannot be crafted"
+    crafts = -(-count // recipe.output_count)
+    totals = " + ".join(
+        f"{amount * crafts} {name}" for name, amount in recipe.inputs.items()
+    )
+    where = f"at a {recipe.station}" if recipe.station else "by hand"
+    each = f"{recipe.cost_text()} each" + (
+        f", yields {recipe.output_count}" if recipe.output_count > 1 else ""
+    )
+    return f"craft {kind} {crafts} time{'s' if crafts != 1 else ''} ({each}, {where}): {totals} in all"
+
+
+def missing_pieces_text(plan: BuildPlan, inventory: Mapping[str, int]) -> str:
+    """The refusal for a build called with an empty pack: pieces and recipe."""
+    needed = len(plan.tiles)
+    return (
+        f"build not started: you carry no {plan.kind} and the shape needs "
+        f"{needed}. {supply_text(plan.kind, needed)}. Craft them, then call "
+        f"build again."
+    )

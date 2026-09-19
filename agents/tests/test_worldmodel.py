@@ -20,7 +20,7 @@ def test_first_observation_sets_position_settlement_and_stats() -> None:
     model = WorldModel("ada")
     model.update(
         make_observation(
-            7, make_entity("ada", (5, 6), health=14, hunger=35, inventory={"wood": 3})
+            7, make_entity("ada", (5, 6), health=14, food=35, inventory={"wood": 3})
         )
     )
     assert model.position == (5, 6)

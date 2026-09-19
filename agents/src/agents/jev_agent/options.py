@@ -14,6 +14,7 @@ planner tool, where a coordinate and a reason are available.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -30,11 +31,30 @@ from .geometry import (
     same_or_adjacent,
 )
 from .pathfinding import find_path, legal_directions
-from .worldmodel import EXTRACTABLE_TYPES, EntityInfo, ObjectInfo, WorldModel
+from .worldmodel import (
+    EXTRACTABLE_TYPES,
+    VIEW_RADIUS,
+    EntityInfo,
+    ObjectInfo,
+    WorldModel,
+)
 
 MAX_OPTIONS = 40
-TRAVEL_CANDIDATES = 6
 WAIT = "wait"
+
+# Walking. Every walk option is a single A* step that also sets the travel
+# state, so following a target is "pick the same key again" or `KEEP_GOING`.
+STEP_KEY_PREFIX = "step_towards:"
+KEEP_GOING = "keep_going"
+STOP_GOING = "stop_going"
+
+# How many walk targets each object group may contribute. A per-group quota
+# replaces the old shared top-6: in a grove the six nearest objects were all
+# trees, so the berry bush eight tiles away and the rock the brief named were
+# never offered and Jev could only flip move_N/move_S.
+STEP_TARGETS_PER_GROUP = 2
+# Other settlers worth a walk option; every living wolf in view gets one.
+STEP_SETTLER_LIMIT = 3
 
 # Jev sees a capped list, so the rich categories get their own budget: without
 # these caps a settler carrying planks and stone would drown the move options
@@ -106,7 +126,7 @@ MAX_BRIEF_SHOUTS = 4
 MAX_SHOUT_LENGTH = 120
 SHOUT_KEY_PREFIX = "shout:"
 HEARD_SHOUT_MAX_AGE_TICKS = 20
-HEARD_SHOUT_KEY_PREFIX = "travel_to:shout:"
+HEARD_SHOUT_KEY_PREFIX = f"{STEP_KEY_PREFIX}shout:"
 
 # Conversations. Joining one is a seat at a turn-taking table; the walk to a
 # free tile next to the anchor is code-owned, like the heard-shout walk.
@@ -119,19 +139,58 @@ JOIN_CONVERSATION_OPTION_LIMIT = 2
 TALK_TO_KEY_PREFIX = "talk_to:"
 INVITE_KEY_PREFIX = "invite:"
 
-# Object types worth walking across the map for.
-TRAVEL_TARGET_TYPES: frozenset[str] = (
-    frozenset(
-        {
-            "bush",
-            "chest",
-            "message_board",
-            "item_pile",
-        }
-    )
-    | items.STATION_KINDS
-    | EXTRACTABLE_TYPES
+# Object groups worth walking across the map for, each with its own quota, in
+# the order they are offered. Grouping is what stops one dense resource from
+# owning every walk option: a grove of trees now spends two slots, not six.
+STEP_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("berry bush", frozenset({items.BUSH})),
+    ("tree", frozenset({items.TREE})),
+    ("rock", items.ROCK_TYPES),
+    ("reeds", frozenset({items.REEDS})),
+    ("clay", frozenset({items.CLAY_DEPOSIT})),
+    ("copper vein", frozenset({items.COPPER_VEIN})),
+    ("iron vein", frozenset({items.IRON_VEIN})),
+    ("chest", frozenset({items.CHEST})),
+    ("item pile", frozenset({items.ITEM_PILE})),
+    ("message board", frozenset({items.MESSAGE_BOARD})),
+    ("workshop table", frozenset({items.WORKSHOP_TABLE})),
+    ("furnace", frozenset({items.FURNACE})),
+    ("anvil", frozenset({items.ANVIL})),
+    ("bed", frozenset({items.BED})),
 )
+
+# Every object type any group covers; used to look candidates up in one pass.
+STEP_TARGET_TYPES: frozenset[str] = frozenset(
+    object_type for _, types in STEP_GROUPS for object_type in types
+)
+
+# The sections an option list is made of, in the order they are offered.
+# `MAX_OPTIONS` truncates the tail, so the quota walk targets come last: they
+# are the only section that may be cut. A target the brief named, a survival
+# action and an interaction with something underfoot always survive.
+OPTION_SECTIONS: tuple[str, ...] = (
+    "wait",
+    "brief_steps",
+    "survival",
+    "conversation",
+    "invitation",
+    "travel_control",
+    "interaction",
+    "craft",
+    "move",
+    "say",
+    "quota_steps",
+)
+
+# World object ids look like `bush_17247`; this is how one is spotted in the
+# free text of a brief so the named object always gets a walk option.
+OBJECT_ID_PATTERN = re.compile(r"\b[a-z][a-z_]*_\d+\b")
+
+# Place names the planner may attach to a brief (docs/05, "named places").
+PLACE_NAME_PATTERN = re.compile(r"^[a-z0-9_]{1,24}$")
+MAX_BRIEF_PLACES = 6
+
+EMPTY_PLACES: Mapping[str, Coord] = {}
 
 
 @dataclass(frozen=True)
@@ -189,36 +248,66 @@ def enumerate_options(
     *,
     shouts: Sequence[str] = (),
     invitations: Sequence[str] = (),
+    places: Mapping[str, Coord] = EMPTY_PLACES,
+    brief_text: str = "",
     max_options: int = MAX_OPTIONS,
 ) -> list[Option]:
     """Every action that is legal for this actor on this tick, best-first.
 
     `shouts` are the phrases the planner put in the brief; Jev may shout those
     and nothing else. `invitations` are the phrases it may say with the
-    `open_to_talk` flag, the same way.
+    `open_to_talk` flag, the same way. `places` are the brief's named
+    destinations, and `brief_text` is the instruction and notes, scanned for
+    object ids so that whatever the brief names is always walkable-to.
     """
-    options: list[Option] = [_wait_option()]
     position = model.position
     inventory = dict(model.self_info.inventory)
 
-    options.extend(_survival_options(model, inventory, position, travel, shouts))
-    options.extend(_conversation_options(model, position, travel))
-    options.extend(_invitation_options(model, position, travel, invitations))
-    options.extend(_travel_control_options(model, travel))
-    options.extend(_interaction_options(model, inventory, position))
-    options.extend(_crafting_options(model, inventory))
-    options.extend(_move_options(model, position))
-    options.extend(_travel_to_options(model, position, travel))
-    options.extend(_say_options())
+    sections: dict[str, list[Option]] = {
+        "wait": [_wait_option()],
+        "brief_steps": _brief_step_options(model, position, places, brief_text),
+        "survival": _survival_options(model, inventory, position, travel, shouts),
+        "conversation": _conversation_options(model, position, travel),
+        "invitation": _invitation_options(model, position, travel, invitations),
+        "travel_control": _travel_control_options(model, travel),
+        "interaction": _interaction_options(model, inventory, position),
+        "craft": _crafting_options(model, inventory),
+        "move": _move_options(model, position),
+        "say": _say_options(),
+        "quota_steps": _quota_step_options(model, position, travel),
+    }
 
     seen: set[str] = set()
     unique: list[Option] = []
-    for option in options:
-        if option.key in seen:
-            continue
-        seen.add(option.key)
-        unique.append(option)
+    for section in OPTION_SECTIONS:
+        for option in sections[section]:
+            if option.key in seen:
+                continue
+            seen.add(option.key)
+            unique.append(option)
     return unique[:max_options]
+
+
+def brief_object_ids(model: WorldModel, brief_text: str) -> list[str]:
+    """Object ids the brief's own words name, in the order they appear.
+
+    The planner writes ids like `bush_17247` into an instruction all the time,
+    and a target Jev cannot walk to is a brief it cannot carry out.
+    """
+    found: list[str] = []
+    for token in OBJECT_ID_PATTERN.findall(brief_text):
+        if token in model.objects and token not in found:
+            found.append(token)
+    return found
+
+
+def step_target_ids(options: Sequence[Option]) -> frozenset[str]:
+    """The object or place names every `step_towards` option in `options` aims at."""
+    return frozenset(
+        option.key[len(STEP_KEY_PREFIX) :]
+        for option in options
+        if option.key.startswith(STEP_KEY_PREFIX)
+    )
 
 
 def _survival_options(
@@ -230,11 +319,11 @@ def _survival_options(
 ) -> list[Option]:
     options: list[Option] = []
     if inventory.get("berry", 0) > 0:
-        hunger = model.self_info.hunger
+        food = model.self_info.food
         options.append(
             Option(
                 key="eat:berry",
-                description=f"eat a berry to restore 20 hunger (hunger now {hunger})",
+                description=f"eat a berry to restore 20 food (food now {food})",
                 intent=pb.Intent(eat=pb.EatIntent(item_type="berry", amount=1)),
             )
         )
@@ -500,7 +589,7 @@ def _invite_options(model: WorldModel, invitations: Sequence[str]) -> list[Optio
 def _rest_options(model: WorldModel) -> list[Option]:
     """Resting on a bed, offered only to a wounded actor standing by one."""
     info = model.self_info
-    if info.health >= info.max_health or info.hunger <= 0:
+    if info.health >= info.max_health or info.food <= 0:
         return []
     for obj in model.objects_near(1):
         if obj.object_type != items.BED:
@@ -551,7 +640,7 @@ def _sleep_options(model: WorldModel) -> list[Option]:
                     f"{items.sleep_recovery_text(True, night)} and heals 1 health "
                     f"every {items.REGEN_INTERVAL_TICKS} ticks while you sleep "
                     f"(fatigue {info.fatigue}/{info.max_fatigue}). You wake at "
-                    "fatigue 0, on damage, at hunger 0, or on a wake action"
+                    "fatigue 0, on damage, at food 0, or on a wake action"
                 ),
                 intent=pb.Intent(sleep=pb.SleepIntent(object_id=obj.object_id)),
             )
@@ -564,7 +653,7 @@ def _sleep_options(model: WorldModel) -> list[Option]:
                 f"sleep on the ground where you stand: it recovers "
                 f"{items.sleep_recovery_text(False, night)} while you sleep "
                 f"(fatigue {info.fatigue}/{info.max_fatigue}). You wake at "
-                "fatigue 0, on damage, at hunger 0, or on a wake action"
+                "fatigue 0, on damage, at food 0, or on a wake action"
             ),
             intent=pb.Intent(sleep=pb.SleepIntent()),
         )
@@ -583,20 +672,19 @@ def _travel_control_options(
     options: list[Option] = []
     if path:
         direction = direction_between(model.position, path[0])
-        steps_text = str(len(path))
         options.append(
             Option(
-                key="follow_travel",
+                key=KEEP_GOING,
                 description=(
-                    f"take the next step ({direction_name(direction)}) toward "
-                    f"{travel.label}, {steps_text} steps left"
+                    f"keep going toward {travel.label} (next step "
+                    f"{direction_name(direction)}, {len(path)} steps left)"
                 ),
                 intent=_move(direction),
             )
         )
     options.append(
         Option(
-            key="stop_travel",
+            key=STOP_GOING,
             description=f"abandon the journey to {travel.label} and stand still",
             intent=pb.Intent(wait=pb.WaitIntent()),
             clears_travel=True,
@@ -859,42 +947,174 @@ def _move_options(model: WorldModel, position: Coord) -> list[Option]:
     return options
 
 
-def _travel_to_options(
+def _step_option_for_object(
+    model: WorldModel, obj: ObjectInfo, position: Coord
+) -> Option | None:
+    """One A* step toward `obj`, or None when it is underfoot or unreachable."""
+    distance = chebyshev(obj.position, position)
+    if distance <= 1:
+        return None
+    state = travel_state_for(obj)
+    path = find_path(model, position, state.target, stop_adjacent=state.stop_adjacent)
+    if not path:
+        return None
+    dx = obj.position[0] - position[0]
+    dy = obj.position[1] - position[1]
+    return Option(
+        key=f"{STEP_KEY_PREFIX}{obj.object_id}",
+        description=(
+            f"one step toward {obj.object_id} ({obj.object_type}) at "
+            f"dx {dx} dy {dy}, {distance} tiles away"
+        ),
+        intent=_move(direction_between(position, path[0])),
+        travel_target=state,
+    )
+
+
+def _step_option_for_entity(
+    model: WorldModel, entity: EntityInfo, position: Coord
+) -> Option | None:
+    """One A* step toward another entity, stopping on the tile beside it."""
+    distance = chebyshev(entity.position, position)
+    if distance <= 1:
+        return None
+    path = find_path(model, position, entity.position, stop_adjacent=True)
+    if not path:
+        return None
+    dx = entity.position[0] - position[0]
+    dy = entity.position[1] - position[1]
+    return Option(
+        key=f"{STEP_KEY_PREFIX}{entity.entity_id}",
+        description=(
+            f"one step toward {entity.entity_id} ({entity.entity_type}) at "
+            f"dx {dx} dy {dy}, {distance} tiles away"
+        ),
+        intent=_move(direction_between(position, path[0])),
+        travel_target=TravelState(
+            target=entity.position,
+            label=f"{entity.entity_id} ({entity.entity_type})",
+            stop_adjacent=True,
+        ),
+    )
+
+
+def _greedy_step(model: WorldModel, position: Coord, target: Coord) -> pb.Direction:
+    """The legal step that gets closest to `target`, or `NO_DIRECTION`.
+
+    Used only when A* has failed: the actor may be standing at the edge of what
+    it remembers, and walking hopefully into unknown ground is what turns a
+    coordinate the planner named into a place the actor can reach.
+    """
+    current = chebyshev(position, target)
+    best = NO_DIRECTION
+    best_gap = current
+    for direction in legal_directions(model, position):
+        gap = chebyshev(offset(position, direction), target)
+        if gap < best_gap:
+            best_gap = gap
+            best = direction
+    return best
+
+
+def _step_option_for_place(
+    model: WorldModel, name: str, target: Coord, position: Coord
+) -> Option | None:
+    """One step toward a named place, by path if there is one and by nose if not."""
+    distance = chebyshev(target, position)
+    if distance == 0:
+        return None
+    dx = target[0] - position[0]
+    dy = target[1] - position[1]
+    where = f"at dx {dx} dy {dy}, {distance} tiles away"
+    state = TravelState(target=target, label=name)
+    path = find_path(model, position, target)
+    if path:
+        direction = direction_between(position, path[0])
+        description = f"one step toward {name} {where}"
+    else:
+        direction = _greedy_step(model, position, target)
+        if direction == NO_DIRECTION:
+            return None
+        # Said with confidence on purpose: a named place beyond the view is
+        # ordinary walking, and Jev must not read "unknown" as "lost".
+        description = (
+            f"one step toward {name} {where}; it is beyond what you can see, "
+            "so keep stepping and it comes into view"
+        )
+    return Option(
+        key=f"{STEP_KEY_PREFIX}{name}",
+        description=description,
+        intent=_move(direction),
+        travel_target=state,
+    )
+
+
+def _brief_step_options(
+    model: WorldModel,
+    position: Coord,
+    places: Mapping[str, Coord],
+    brief_text: str,
+) -> list[Option]:
+    """Walk options for everything the brief itself names.
+
+    These come before the quota list and are never truncated: a brief that
+    names a target Jev is not offered is a brief that cannot be carried out.
+    """
+    options: list[Option] = []
+    for name, target in places.items():
+        option = _step_option_for_place(model, name, target, position)
+        if option is not None:
+            options.append(option)
+    for object_id in brief_object_ids(model, brief_text):
+        obj = model.objects.get(object_id)
+        if obj is None:
+            continue
+        option = _step_option_for_object(model, obj, position)
+        if option is not None:
+            options.append(option)
+    return options
+
+
+def _quota_step_options(
     model: WorldModel, position: Coord, travel: TravelState | None
 ) -> list[Option]:
-    candidates: list[ObjectInfo] = []
-    for obj in model.objects_by_type(TRAVEL_TARGET_TYPES):
-        if chebyshev(obj.position, position) <= 1:
+    """Walk options for the nearest few of each kind of thing worth walking to.
+
+    Each object group gets `STEP_TARGETS_PER_GROUP` slots, every living wolf in
+    view gets one, and the nearest `STEP_SETTLER_LIMIT` settlers get one each.
+    """
+    by_group: dict[str, list[ObjectInfo]] = {name: [] for name, _ in STEP_GROUPS}
+    group_of = {
+        object_type: name for name, types in STEP_GROUPS for object_type in types
+    }
+    for obj in model.objects_by_type(STEP_TARGET_TYPES):
+        if obj.object_type == items.BUSH and not obj.has_berry:
             continue
         if travel is not None and obj.position == travel.target:
             continue
-        if obj.object_type == "bush" and not obj.has_berry:
-            continue
-        candidates.append(obj)
-        if len(candidates) >= TRAVEL_CANDIDATES:
-            break
+        bucket = by_group[group_of[obj.object_type]]
+        if len(bucket) < STEP_TARGETS_PER_GROUP:
+            bucket.append(obj)
 
     options: list[Option] = []
-    for obj in candidates:
-        state = travel_state_for(obj)
-        path = find_path(
-            model, position, state.target, stop_adjacent=state.stop_adjacent
-        )
-        if not path:
+    for name, _ in STEP_GROUPS:
+        for obj in by_group[name]:
+            option = _step_option_for_object(model, obj, position)
+            if option is not None:
+                options.append(option)
+
+    settlers = 0
+    for entity in model.entities_near(VIEW_RADIUS):
+        if not entity.alive:
             continue
-        direction = direction_between(position, path[0])
-        distance = chebyshev(obj.position, position)
-        options.append(
-            Option(
-                key=f"travel_to:{obj.object_id}",
-                description=(
-                    f"start walking to the {_object_label(obj, position)}, "
-                    f"{distance} tiles away"
-                ),
-                intent=_move(direction),
-                travel_target=state,
-            )
-        )
+        is_wolf = entity.entity_type == "wolf"
+        if not is_wolf:
+            if settlers >= STEP_SETTLER_LIMIT:
+                continue
+            settlers += 1
+        option = _step_option_for_entity(model, entity, position)
+        if option is not None:
+            options.append(option)
     return options
 
 

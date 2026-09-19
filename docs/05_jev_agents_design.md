@@ -32,13 +32,13 @@ track needs to deviate, note it in the "Deviations" section at the bottom.
 | Field | Player | Wolf |
 | --- | --- | --- |
 | `max_health` | 20 | 16 |
-| `max_hunger` | 100 | n/a (hunger stays at max) |
+| `max_food` | 100 | n/a (food stays at max) |
 | base attack damage | 2 | 3 |
 
-- Hunger drops by 1 every 4 ticks. At hunger 0 the entity loses 1 health every 4 ticks.
-- Health regenerates 1 per 5 ticks while hunger > 50 and health < max.
-- Eating one berry restores 20 hunger (capped at max). Eating anything else fails.
-- New players spawn with health 20, hunger 80.
+- Food drops by 1 every 4 ticks. At food 0 the entity loses 1 health every 4 ticks.
+- Health regenerates 1 per 5 ticks while food > 50 and health < max.
+- Eating one berry restores 20 food (capped at max). Eating anything else fails.
+- New players spawn with health 20, food 80.
 
 ### Death and respawn
 
@@ -47,7 +47,7 @@ track needs to deviate, note it in the "Deviations" section at the bottom.
   pile there). The entity is removed from the position index and marked
   `alive=false`, `status_bits` bit 0 set. It stays in `all_entities()`.
 - Players respawn 10 ticks later at the settlement spawn (nearest free walkable
-  tile to the settlement centre), full health, hunger 50, empty inventory,
+  tile to the settlement centre), full health, food 50, empty inventory,
   nothing wielded. `EntityRespawned` event. Viewer gets `entity_spawned`.
   When a living wolf is within 10 tiles of that tile (wider than the wolves'
   chase radius of 8), the respawn moves to the nearest of sixteen candidate
@@ -106,14 +106,14 @@ accepts at most one intent per entity per tick (any type).
 9. **Write note**: board same or adjacent, slot 0..19, title <= 60 chars,
    text <= 500 chars; empty title and text clears the slot. Anyone may edit
    any slot. `ObjectChanged` event with field `notes`.
-10. **Eat** (existing, now affects hunger). **Say**: channel `local` produces
+10. **Eat** (existing, now affects food). **Say**: channel `local` produces
     an `Utterance` event for every entity within 10 tiles (including the
     speaker); channel `shout` does the same within 60 tiles, and the event
     carries the speaker's position so hearers can walk to it; channel
     `thought` produces nothing in observations and is forwarded to the viewer
     only.
 11. **Wait**: no-op but counts as a submitted intent.
-12. **Regeneration / hunger / wolves / respawn** bookkeeping.
+12. **Regeneration / food / wolves / respawn** bookkeeping.
 
 Failed actions produce an `EntityActed{success=false, details=<reason>}` event
 for the acting entity. Successful ones produce `EntityActed{success=true}` with
@@ -135,7 +135,7 @@ Behaviour each tick (deterministic, seeded RNG on the world):
 - Otherwise wander, moving on 50% of ticks; 60% of those steps drift toward the nearest living player (prowling), the rest are random.
 - If more than 50 tiles from every living player: despawn.
 
-Wolves have hunger fixed at max and never starve.
+Wolves have food fixed at max and never starve.
 
 ### Settlement site
 
@@ -162,7 +162,7 @@ The settlement config uses 2000 / 1200 for bad connections; tighten later.
 
 - View radius 8 (17x17 tiles) for tiles and objects. Visible entities: those
   within radius 8 only (no longer everyone).
-- `self` and `visible_entities` carry health, max_health, hunger, max_hunger,
+- `self` and `visible_entities` carry health, max_health, food, max_food,
   wielded, alive.
 - `events` holds the previous tick's events that this entity could see: moves
   and actions of entities within radius, utterances within 10 tiles, damage,
@@ -176,7 +176,7 @@ Existing messages are unchanged unless noted.
 - `snapshot`: add `settlement: {x, y}`.
 - `tick_completed`: add
   - `entity_updates`: list of `{entity_id, position, entity_type, health,
-    max_health, hunger, max_hunger, wielded, alive, inventory: {kind: count}}`
+    max_health, food, max_food, wielded, alive, inventory: {kind: count}}`
     for every entity, every tick.
   - `actions`: list of `{entity_id, action_type, success, details}`.
   - `utterances`: list of `{speaker_id, channel, text, position}` (both channels).
@@ -233,32 +233,63 @@ code builds a compact JSON state (target well under 8k tokens):
 
 ```
 {
-  "brief": {"instruction": str, "success_condition": str, "ticks_left": int},
-  "self": {"position": [x,y], "health": "14/20", "hunger": "35/100",
-           "wielded": "axe", "inventory": {"wood": 3}},
+  "brief": {"instruction": str, "success_condition": str,
+            "places": {"the_lake_shore": "dx 12 dy -4"}},
+  "self": {"name": "ada", "position": [x,y], "health": "14/20", "food": "35/100",
+           "fatigue": "12/100 (fresh)", "asleep": false,
+           "wielded": "axe", "inventory": {"wood": 3},
+           "at_workshop_table": false, "at_furnace": false, "at_anvil": false},
+  "so_far": {"ticks_used": 12, "ticks_left": 8, "inventory_change": {"wood": 2},
+             "actions": {"extract": 10, "move": 2}, "moved_from_start": "dx 0 dy -1",
+             "net_tiles_moved": 1},
+  "facts": ["Food falls 1 every 4 ticks...", "A wolf has 16 health...",
+            "Fatigue rises 1 every 4 ticks...", "A day is 300 ticks..."],
+  "clock": {"day": 2, "tick_of_day": "212/300", "night": true},
   "settlement": {"dx": -12, "dy": 4},
-  "travel": {"target": "tree_9 at dx 3 dy -2", "next_step": "NE", "steps_left": 4} | null,
-  "nearby": [ {"id": "tree_9", "type": "tree", "dx": 3, "dy": -2, "remaining": 4}, ... up to ~25, nearest first ],
+  "travel": {"target": "tree_9 at dx 3 dy -2", "next_step": "NE" | "arrived" | "blocked",
+             "steps_left": 4} | null,
+  "nearby": [ {"id": "tree_9", "type": "tree", "dx": 3, "dy": -2, "remaining": 4}, ... up to 25, nearest first ],
   "entities": [ {"id": "wolf_1", "type": "wolf", "dx": -2, "dy": 0, "health": "10/10"}, ... ],
-  "map": "17 lines of 17 chars: . walkable, # blocked, ~ water, T tree, o rock, b bush, C chest, B board, i item pile, @ self, P player, W wolf, ? unknown",
+  "map": "17 lines of 17 chars: . walkable, # blocked, ~ water, T tree, o rock, B bush with a berry, b bush with no berry, C chest, M message board, i item pile, @ self, P player, W wolf, ? unknown",
   "recent": ["t41 move E ok", "t42 extract tree_9 ok (+1 wood)", "t43 attack wolf_1 failed: not adjacent", ... last 8],
   "notes": "free-text hints from the planner, e.g. 'wolves are dangerous below 8 health'"
 }
 ```
 
+`so_far` is measured by code, not by Jev: it has no memory between ticks, so
+without it a stint on its first tick looks exactly like one that has been
+flipping between two tiles for forty. `facts` is one list rather than three
+fields in three different blocks, and it is always present. `nearby` carries
+only what the map cannot express - what is underfoot, every built thing
+(chest, pile, board, station, bed, door, conversation), whatever the brief
+names or offers a walk to, and one example of each material in reach - because
+a grove of trees used to fill all 25 slots with lines the map had already
+drawn. `brief.places` are the planner's named destinations, always as an
+offset: Jev never sees a coordinate.
+
 Questions in one Jev request:
 
 - `action` (Choice): the legal actions this tick, enumerated by code. Options
-  are strings such as `move_N`, `move_NE`, `follow_travel`, `stop_travel`,
-  `travel_to:tree_9`, `extract:tree_9`, `collect:bush_3`, `attack:wolf_1`,
+  are strings such as `move_N`, `move_NE`, `keep_going`, `stop_going`,
+  `step_towards:tree_9`, `step_towards:wolf_1`, `step_towards:the_lake_shore`,
+  `step_towards:shout:bram`, `extract:tree_9`, `collect:bush_3`,
+  `attack:wolf_1`,
   `eat:berry`, `pickup:wood`, `deposit:chest_2:wood`, `withdraw:chest_2:berry`,
-  `craft:axe`, `equip:axe`, `place:chest:N`, `say:help`,
-  `say:wolf_here`,
+  `craft:axe`, `equip:axe`, `place:chest:N`, `rest:bed_2`, `sleep:ground`,
+  `wake`, `shout:0`, `invite:0`, `talk_to:bram`, `join_conversation:conv_3`,
   `say:come_here`, `say:all_good`, `wait`. Only include options that are
   currently legal (walkable directions, adjacent objects, affordable recipes,
-  items in inventory). Cap at 40 options; keep `travel_to:` options to the 6
-  nearest relevant objects. Each option's criteria text is a one-line
-  description.
+  items in inventory). Each option's criteria text is a one-line description.
+
+  A `step_towards:<target>` option is **one A* step**, and taking it sets the
+  travel state, so `keep_going` continues and `stop_going` abandons it.
+  Targets are, in this order: everything the brief itself names (its `places`
+  and every object id its instruction or notes mention), then a per-type
+  quota - the nearest 2 of each object group (berry bush, tree, rock, reeds,
+  clay, copper vein, iron vein, chest, item pile, message board, workshop
+  table, furnace, anvil, bed), every living wolf in view, and the nearest 3
+  other settlers. Cap at 40 options; the quota list is the only section that is
+  ever truncated.
 - `done` (Noul): "Is the brief's success condition met right now, as far as the
   state shows?"
 - `stuck` (Noul): "Has the brief become impossible, or does the situation need a
@@ -268,17 +299,28 @@ Questions in one Jev request:
   plainly finished job, so thirteen stints in one run ran to their tick budget
   with nothing left to do. `JevDecision.eject` survives as a derived field,
   `max(done, stuck)`, for the traces, the reports and the viewer.)
+- `lost` (Noul): "Is progress on the brief impossible from here because
+  something it needs is missing from this state: a target that is not on the
+  map or that no step option leads toward, or an item or station the brief
+  needs that is not here and cannot be got here? A named place with a step
+  option toward it is not missing, even when it is far away." Added 2026-09-18: with the
+  old shared top-6 walk options a settler spent thirty ticks stepping north and
+  south toward a bush it had no option to reach, and `stuck` sat at 0.4 the
+  whole time. `lost` names that case so the report can tell the planner to fix
+  the brief (name the target, add a place, move closer) instead of retrying.
 - `danger` (Noul): "Is this entity in immediate danger of dying within a few
   ticks?" (used for logging and for a hard rule: if danger > 0.8 and health
   < 6, prefer moving away from the nearest wolf toward the settlement).
 
 Code rules on top of Jev: the stint ends when `done` or `stuck` is >= 0.6 for
-two consecutive ticks (reason `eject`), when `ticks_left` hits 0, on death, or
-when the same failed action repeats 3 times. The final stint report says which.
+two consecutive ticks (reason `eject`), when `lost` is >= 0.6 for two
+consecutive ticks (reason `lost`, with an explanatory line in the report), when
+`ticks_left` hits 0, on death, or when the same failed action repeats 3 times.
+The final stint report says which.
 
 Per-tick log entry (JSONL, `logs/agent-<id>/stints.jsonl`): tick, position,
 stats, state size in tokens (as reported by Jev usage), options count, chosen
-action, top-3 probabilities, `done`, `stuck`, `eject`, danger, latency ms,
+action, top-3 probabilities, `done`, `stuck`, `lost`, `eject`, danger, latency ms,
 intent result.
 
 ### Stint report (code, no LLM)
@@ -300,7 +342,8 @@ is fast, cheap, and literal, while the planner is slow and expensive. Tools:
   → runs the stint to completion and returns the stint report. This is the
   main tool. The tool call resolves only when the stint ends.
 - `travel_to(x, y, max_ticks)` → a stint with a preset travel target and a
-  brief of "follow the path; react to danger; eject on arrival".
+  brief of "Walk to the destination", whose `places` hold the coordinate under
+  the name `destination`, so Jev works in offsets and never sees the numbers.
 - Direct single-tick actions (each waits one tick and returns the result):
   `eat(kind)`, `pickup(kind, amount)`, `drop(kind, amount)`,
   `deposit(object_id, kind, amount)`, `withdraw(object_id, kind, amount)`,
@@ -314,7 +357,8 @@ is fast, cheap, and literal, while the planner is slow and expensive. Tools:
 - `say(text)` → local speech (free text, 10 tiles). `shout(text)` → the
   `shout` channel (60 tiles); hearers see where it came from.
 - `write_note(board_id, slot, title, text)` and `read_board(board_id)`.
-- `remember(text)` / `recall()` → the agent's persistent notes file.
+- `remember(text)` / `recall()` → today's notes in the agent's journal
+  (docs/12_sleep_journal.md).
 
 The planner loop: each planner turn gets the latest `look()` and the last
 stint report in the prompt, thinks, calls tools, and ends its turn with a
@@ -324,8 +368,14 @@ budgeted at 20 (see "Per-turn tool budget" below). Conversation history keeps
 the first message plus as many whole recent turns as fit in 80 messages, cut
 only on turn boundaries, plus the persistent notes.
 
-Persistent memory: `logs/agent-<id>/memory.md` (planner notes) and the last 10
-stint reports.
+Persistent memory: `<run>/agents/agent-<id>/memory.md` and the last 10 stint
+reports. `memory.md` is no longer an append-only note file: it is the settler's
+journal, five sections (`Story so far`, `Me`, `Others`, `Learnings`,
+`Tomorrow`) that the settler rewrites itself in one model call when it falls
+asleep or dies, plus a `Today's notes` scratch section that `remember` and
+conversation notes append to during the day. Falling asleep and dying also end
+the planner's turn and reset its message history, so the next turn starts from
+the journal. Contract: [docs/12_sleep_journal.md](12_sleep_journal.md).
 
 Shared narrative: the system prompt tells every actor they are one of twelve
 settlers whose shared goal is to build a settlement at the spawn site:
@@ -345,7 +395,7 @@ observations. Planner tests mock the model with pydantic-ai's `TestModel`.
 - Render new object types: `chest`, `message_board`, `item_pile`, rocks
   (all sizes), and `wolf` entities. Add sprite keys to the Tiled TSX files
   and regenerate `sprite-index.json`.
-- Health bar above each entity; hunger as a thin second bar for players.
+- Health bar above each entity; food as a thin second bar for players.
 - Entity picker: a dropdown (HTML overlay) listing entities; selecting one
   makes the camera follow it. Clicking a sprite also selects it. `F` still
   toggles follow. Key `0` jumps to the settlement.
@@ -409,7 +459,7 @@ observation and viewer services: `move_results`, `action_results`
   fields the agent track adds are ignored rather than rejected.
 - **Tolerance for old servers.** Every field added to `snapshot` and
   `tick_completed` is optional in `viewer/src/network/types.ts`; stats default
-  to full health / full hunger / alive until the server reports them.
+  to full health / full food / alive until the server reports them.
 - **Entity creation from `entity_updates`.** An `entity_updates` entry for an
   unknown entity creates it, so wolves and respawns still appear if an
   `entity_spawned` message is missed.
@@ -447,7 +497,7 @@ observation and viewer services: `move_results`, `action_results`
 - `observation_service` sets the new `Entity` stat fields on the proto after
   `conversion.entity_to_proto`, in case the mechanics track has not mapped them
   yet. That local `_entity_proto` helper can be deleted once `conversion.py`
-  carries health/hunger/wielded/alive.
+  carries health/food/wielded/alive.
 - `TickResult.object_changes` (the existing foraging change list) is also
   replayed into observations as `ObjectChanged` events for objects currently
   within view radius.
@@ -484,7 +534,7 @@ observation and viewer services: `move_results`, `action_results`
   of that kind is there. Dropping or depositing the last copy of a wielded item
   unequips it.
 - Eating an item with no food value fails with `not_edible`; only `berry` is
-  edible (20 hunger per unit).
+  edible (20 food per unit).
 - `run_ticks()` accepts an optional `wolf_simulator`; `TickLoop` has
   `wolves_enabled: bool = False` plus `wolf_seed: int = 1337`.
 
@@ -514,7 +564,7 @@ observation and viewer services: `move_results`, `action_results`
   free-text speech stays a planner tool. Jev may shout only the phrases the
   planner lists in the brief's `shouts` (up to 4, offered as `shout:<n>`, 8
   tick cooldown); nothing about them is wolf-specific. For 20 ticks after
-  hearing anyone's shout it is offered `travel_to:shout:<speaker>`, a
+  hearing anyone's shout it is offered `step_towards:shout:<speaker>`, a
   code-owned walk to where the shout came from. Both sit in the survival
   group at the top of the list so truncation never drops them.
 - **The attack alert only looks back a few ticks.** `!! UNDER ATTACK` counts
@@ -573,3 +623,14 @@ observation and viewer services: `move_results`, `action_results`
   test models pass through unchanged.
 - **Status reporting** sends `(mode, brief, planner_thought, stint_json)` and
   skips the RPC when nothing changed, so it is at most once per tick.
+- **What Jev sees and can do, reworked (2026-09-18).** Run traces showed
+  settlers standing in a grove flipping `move_N`/`move_S` for a whole tick
+  budget: the six walk options were shared across all object types, so in a
+  grove every one of them was a tree and the bush six tiles away, the rock the
+  brief named and the coordinate the planner wrote were all unreachable. Every
+  move succeeded, so no code rule fired. Walking is now `step_towards:<target>`
+  with a per-type quota plus whatever the brief names (`Brief.places`, object
+  ids in the instruction), `follow_travel`/`stop_travel` became
+  `keep_going`/`stop_going`, and the state gained the food physics, a
+  code-measured `so_far` block and an `arrived` travel state that used to
+  report itself as `blocked`.

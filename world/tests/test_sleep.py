@@ -142,14 +142,14 @@ class TestFatigueAccumulation:
 
     def test_tired_settlers_do_not_regenerate(self) -> None:
         world = _world()
-        _with_settler(world, health=10, hunger=90, fatigue=TIRED_FATIGUE)
+        _with_settler(world, health=10, food=90, fatigue=TIRED_FATIGUE)
         world.tick = 5
         process_health_regen(world)
         assert world.get_entity("bob").health == 10
 
     def test_fresh_settlers_still_regenerate(self) -> None:
         world = _world()
-        _with_settler(world, health=10, hunger=90, fatigue=TIRED_FATIGUE - 1)
+        _with_settler(world, health=10, food=90, fatigue=TIRED_FATIGUE - 1)
         world.tick = 5
         process_health_regen(world)
         assert world.get_entity("bob").health == 11
@@ -204,7 +204,7 @@ class TestSleepIntent:
 
     def test_too_hungry_to_sleep(self) -> None:
         world = _world()
-        _with_settler(world, fatigue=40, hunger=0)
+        _with_settler(world, fatigue=40, food=0)
         events = _sleep(world, "bob")
         assert _details(events, "sleep") == ["too hungry to sleep"]
 
@@ -281,10 +281,10 @@ class TestRecovery:
         process_fatigue_phase(world, TickEvents())
         assert world.get_entity("bob").fatigue == expected
 
-    def test_bed_sleeper_heals_regardless_of_hunger(self) -> None:
+    def test_bed_sleeper_heals_regardless_of_food(self) -> None:
         world = _world()
         _with_settler(
-            world, fatigue=40, health=10, hunger=1, asleep=True, sleeping_on="bed_1"
+            world, fatigue=40, health=10, food=1, asleep=True, sleeping_on="bed_1"
         )
         _bed(world)
         world.tick = 105
@@ -294,7 +294,7 @@ class TestRecovery:
 
     def test_ground_sleeper_does_not_get_the_bed_heal(self) -> None:
         world = _world()
-        _with_settler(world, fatigue=40, health=10, hunger=1, asleep=True)
+        _with_settler(world, fatigue=40, health=10, food=1, asleep=True)
         world.tick = 105
         process_fatigue_phase(world, TickEvents())
         process_health_regen(world)
@@ -335,7 +335,7 @@ class TestWaking:
 
     def test_wake_hungry(self) -> None:
         world = _world()
-        _with_settler(world, fatigue=40, hunger=0, asleep=True)
+        _with_settler(world, fatigue=40, food=0, asleep=True)
         world.tick = 7
         events = TickEvents()
         process_fatigue_phase(world, events)
@@ -402,7 +402,7 @@ class TestCollapse:
 
     def test_collapsed_sleeper_ignores_starvation(self) -> None:
         world = _world()
-        _with_settler(world, fatigue=100, hunger=0, asleep=True, collapsed=True)
+        _with_settler(world, fatigue=100, food=0, asleep=True, collapsed=True)
         world.tick = 7
         events = TickEvents()
         process_fatigue_phase(world, events)
@@ -516,6 +516,17 @@ class TestPayloads:
         assert state["asleep"] is True
         assert state["sleeping_on"] == "bed_1"
         assert entity_from_state(state, tick=0) == entity
+
+    def test_entity_from_state_reads_the_legacy_hunger_keys(self) -> None:
+        """Payloads recorded before 2026-09-18 call the food stat `hunger`."""
+        entity = Entity(entity_id="bob", position=Position(x=1, y=2), food=37)
+        state = entity_state(entity, tick=0)
+        state["hunger"] = state.pop("food")
+        state["max_hunger"] = state.pop("max_food")
+
+        rebuilt = entity_from_state(state, tick=0)
+        assert rebuilt.food == 37
+        assert rebuilt.max_food == entity.max_food
 
     def test_clock_payload_shape(self) -> None:
         world = _world()

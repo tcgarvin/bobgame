@@ -23,7 +23,7 @@ class ActionResult:
 @dataclass(frozen=True)
 class DamageEvent:
     entity_id: str
-    attacker_id: str  # "" for hunger/environment
+    attacker_id: str  # "" for starvation
     amount: int
     remaining_health: int
     position: Position
@@ -32,7 +32,7 @@ class DamageEvent:
 @dataclass(frozen=True)
 class DeathEvent:
     entity_id: str
-    killer_id: str  # "" for hunger/environment
+    killer_id: str  # "" for starvation
     position: Position
 
 

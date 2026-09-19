@@ -1,4 +1,7 @@
-export { OverlayUI, readProbabilities } from './OverlayUI';
+export { OverlayUI, readProbabilities, statusChip } from './OverlayUI';
+export { createItemIcon, splitItemName } from './ItemIcon';
+export { journalParts, journalSourceLine } from './JournalView';
+export { actionInWords } from './ActionWords';
 export type { OverlayCallbacks } from './OverlayUI';
 export { ObjectPanel, INSPECTABLE_TYPES } from './ObjectPanel';
 export type { ObjectPanelCallbacks } from './ObjectPanel';

@@ -17,8 +17,10 @@ from agents.jev_agent.build import (
     BuildStateError,
     line_tiles,
     make_plan,
+    missing_pieces_text,
     plan_tiles,
     rect_filled_tiles,
+    supply_text,
     rect_outline_tiles,
 )
 from agents.jev_agent.stint import DriverChoice
@@ -281,6 +283,35 @@ def test_summary_counts_what_happened() -> None:
     text = executor.summary()
     assert "BUILD road" in text
     assert "left to do: 3" in text
+
+
+def test_a_summary_after_running_out_says_what_is_short_and_how_to_make_it() -> None:
+    plan = make_plan("wood_wall", "line", (12, 10), (12, 13))
+    executor = BuildExecutor(plan)
+    model = build_model(inventory={"wood_wall": 1})
+    assert executor.stop_reason(model) == ""
+    text = executor.summary()
+    assert "carrying now: 1 wood_wall" in text
+    assert (
+        "short by 3: craft wood_wall 3 times (2 plank each, by hand): 6 plank in all"
+        in text
+    )
+
+
+def test_supply_text_scales_a_recipe_that_yields_more_than_one() -> None:
+    assert supply_text("wood_floor", 5) == (
+        "craft wood_floor 3 times (1 plank each, yields 2, by hand): 3 plank in all"
+    )
+    assert "at a workshop_table" in supply_text("door", 1)
+
+
+def test_missing_pieces_text_counts_the_whole_shape() -> None:
+    plan = make_plan("road", "rect", (10, 10), (13, 13))
+    text = missing_pieces_text(plan, {"stone": 9})
+    assert text.startswith(
+        "build not started: you carry no road and the shape needs 12."
+    )
+    assert "craft road 3 times" in text
 
 
 def test_a_furnace_and_an_anvil_are_placeable_structures() -> None:

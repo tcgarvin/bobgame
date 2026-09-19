@@ -280,17 +280,30 @@ class ReplayWebSocketService:
     async def _handle_get_agent_detail(
         self, client: ReplayClient, message: dict[str, Any]
     ) -> None:
+        # A `run_id` asks about a run this connection has not opened, which is
+        # how the live viewer reads agent detail without building a session
+        # (docs/07_replay.md).
+        run_id = str(message.get("run_id", ""))
         session = client.session
-        if session is None:
+        if run_id:
+            try:
+                loader = self.load_run(run_id)
+            except RunLoadError as exc:
+                await self._error(client, str(exc))
+                return
+        elif session is not None:
+            loader = session.loader
+        else:
             await self._error(client, "no run open")
             return
         entity_id = str(message.get("entity_id", ""))
+        default_tick = session.tick_id if session is not None else loader.last_tick
         try:
-            tick_id = int(message.get("tick_id", session.tick_id))
+            tick_id = int(message.get("tick_id", default_tick))
         except (TypeError, ValueError):
             await self._error(client, "get_agent_detail needs an integer tick_id")
             return
-        detail = session.loader.agent_detail(entity_id, tick_id)
+        detail = loader.agent_detail(entity_id, tick_id)
         detail.update(
             {"type": "agent_detail", "entity_id": entity_id, "tick_id": tick_id}
         )

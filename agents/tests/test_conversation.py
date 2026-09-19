@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from agents import world_pb2 as pb
+from agents.jev_agent.journal import Journal
 from agents.jev_agent.conversation import (
     ACTION_EAT,
     ACTION_GIVE,
@@ -788,7 +789,7 @@ async def test_the_report_carries_the_transcript_gifts_and_note(
     assert "mira is short of planks" in text
 
 
-async def test_a_note_is_appended_to_the_memory_file(tmp_path: Path) -> None:
+async def test_a_note_lands_under_todays_notes_in_the_journal(tmp_path: Path) -> None:
     model = WorldModel("ada")
     converser = FakeConverser(note_text="bo will bring stone tomorrow")
     digest = observe(
@@ -800,10 +801,10 @@ async def test_a_note_is_appended_to_the_memory_file(tmp_path: Path) -> None:
 
     await session.write_report()
 
-    written = (tmp_path / "memory.md").read_text(encoding="utf-8")
-    assert written == (
-        "- [conversation, tick 4, with bo] bo will bring stone tomorrow\n"
-    )
+    journal = Journal.parse((tmp_path / "memory.md").read_text(encoding="utf-8"))
+    assert journal.scratch == [
+        "- [conversation, tick 4, with bo] bo will bring stone tomorrow"
+    ]
 
 
 async def test_an_empty_note_writes_nothing(tmp_path: Path) -> None:
@@ -817,7 +818,7 @@ async def test_an_empty_note_writes_nothing(tmp_path: Path) -> None:
 
     await session.write_report()
 
-    assert not (tmp_path / "memory.md").exists()
+    assert not (tmp_path / "memory.md").exists(), "nothing wrote, nothing seeded"
 
 
 async def test_a_turn_and_the_closing_note_carry_what_their_calls_cost(

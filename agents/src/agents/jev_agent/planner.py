@@ -12,7 +12,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterable, Protocol, Sequence
+from typing import Any, AsyncIterable, Mapping, Protocol, Sequence
 
 import structlog
 from pydantic_ai import Agent, ModelRetry, RunContext, capture_run_messages
@@ -41,6 +41,16 @@ from .conversation import (
     free_seat_tiles,
     give_intent,
 )
+from .journal import (
+    DayLog,
+    Journal,
+    KIND_CALL,
+    KIND_REFLECTION,
+    KIND_RESULT,
+    append_scratch_line,
+    compact_args,
+    read_journal,
+)
 from .llm import DEFAULT_PLANNER_MODEL, planner_model_settings, resolve_model_name
 from .reflex import (
     MAX_TRIGGER_DISTANCE,
@@ -56,11 +66,14 @@ from .build import (
     SHAPES,
     build_brief_text,
     make_plan,
+    missing_pieces_text,
 )
 from .geometry import NAME_TO_DIRECTION, NO_DIRECTION, Coord, chebyshev
 from .options import (
+    MAX_BRIEF_PLACES,
     MAX_BRIEF_SHOUTS,
     MAX_SHOUT_LENGTH,
+    PLACE_NAME_PATTERN,
     WOLF_ALERT_RADIUS,
     TravelState,
 )
@@ -97,6 +110,25 @@ CRAFT_ACTION_MARGIN = 2
 CRAFTED_DETAIL = "crafted "
 # What `sleep` calls the place when no bed was named.
 GROUND = "the ground"
+# How many item piles `look` and a failed `pickup` list, nearest first.
+PILES_SHOWN = 6
+
+# Falling asleep and dying both end the turn: the journal is being rewritten
+# behind the model's back and the next turn starts from it (docs/12).
+TURN_ENDS_AFTER_SLEEP = (
+    "Your turn ends here. Write your one-paragraph reflection now; your "
+    "journal was rewritten while you slept, and your next turn starts from it "
+    "with today's notes cleared."
+)
+DEATH_NOTE = (
+    "you died at tick {tick}; your turn ends here. Write your reflection now. "
+    "Your journal is being rewritten, and your next turn starts from it."
+)
+SLEEP_NOTE = (
+    "you fell asleep on {where} at tick {tick}; your turn ends here. Write your "
+    "reflection now. Your journal is being rewritten, and your next turn starts "
+    "from it once you are awake."
+)
 
 
 SETTLEMENT_NARRATIVE = f"""\
@@ -110,17 +142,23 @@ What follows is how this world works and how you act in it. What to do with it
 is up to you and the others.
 
 Bodies:
-- The world advances in ticks. Hunger drops 1 every 4 ticks; at hunger 0 you
-  lose health. Eating a berry restores 20 hunger. Health regenerates 1 per 5
-  ticks while hunger is above 50. You have {items.PLAYER_MAX_HEALTH} health.
-- Dying drops your whole inventory where you fell and costs you 10 ticks.
+- The world advances in ticks. Food drops 1 every 4 ticks; at food 0 you
+  lose health. Eating a berry restores 20 food. Health regenerates 1 per 5
+  ticks while food is above 50. You have {items.PLAYER_MAX_HEALTH} health.
+- Dying drops your whole inventory where you fell, as an item pile. A pile
+  stays where it is until it is emptied; it belongs to nobody, and anyone whose
+  body stands on it can take from it, with `pickup` or through Jev. `look`
+  lists the piles you know of and what is in them. {items.RESPAWN_DELAY_TICKS} ticks after dying you
+  are back, alive, on a free tile {items.RESPAWN_RING_TEXT} from the settlement site and
+  away from wolves, with an empty pack, food {items.RESPAWN_FOOD} and fatigue {items.RESPAWN_FATIGUE}. Nobody
+  is ever gone for good. There is no armor: nothing you can make or wear
+  softens a bite.
 - Resting on a bed heals {items.REST_HEAL} health per rest.
 - Fatigue runs from 0 to {items.MAX_FATIGUE} and rises 1 every {items.FATIGUE_INTERVAL_DAY} ticks by day and every
   {items.FATIGUE_INTERVAL_NIGHT} ticks at night. From {items.TIRED_FATIGUE} you are tired: the work a tool adds per
   extract action is halved (bare hands and dismantling stay at 1), your attacks
   hit for 1 less, and health stops regenerating. At {items.MAX_FATIGUE} you collapse where you stand and sleep until fatigue
-  falls to {items.COLLAPSE_WAKE_FATIGUE}; damage does not wake a collapsed sleeper. Respawning after
-  death leaves you at {items.RESPAWN_FATIGUE} fatigue.
+  falls to {items.COLLAPSE_WAKE_FATIGUE}; damage does not wake a collapsed sleeper.
 
 The day and sleep:
 - A day is {items.DEFAULT_DAY_LENGTH} ticks. The first two thirds are light and the last third is
@@ -130,10 +168,10 @@ The day and sleep:
   night and {items.sleep_recovery_text(True, False)} by day; the ground recovers {items.sleep_recovery_text(False, True)} at night
   and {items.sleep_recovery_text(False, False)} by day. On a bed you also heal 1 health every
   {items.REGEN_INTERVAL_TICKS} ticks while you sleep.
-- One sleeper per bed. Falling asleep needs hunger above 0 and fatigue above 0.
-  While you are asleep nothing you or Jev does reaches the world, hunger keeps
+- One sleeper per bed. Falling asleep needs food above 0 and fatigue above 0.
+  While you are asleep nothing you or Jev does reaches the world, food keeps
   dropping, and you wake at fatigue 0, when something damages you, when your
-  hunger reaches 0, when the bed under you is removed, or on `wake`.
+  food reaches 0, when the bed under you is removed, or on `wake`.
 
 Wolves and fighting:
 - Wolves roam the island and keep coming for the whole game, a few at a time.
@@ -260,25 +298,57 @@ How you act:
 - Jev is the fast half: a cheap reflex layer that moves your own body every
   tick while you are not thinking. It is not a settler and not your name; your
   name is on the first line of every turn. Jev is extremely literal. It picks
-  one action per tick from a closed list that code builds for it: move, walk
-  to something it can see or to where a shout came from, attack, extract,
-  collect, eat, craft, equip, place, rest, use a chest, say a canned phrase,
-  shout a phrase you gave it, say an invitation line you gave it, accept
-  someone else's invitation, take a seat in a conversation, wait. It does not
-  plan, it does not remember,
-  and it does exactly what your brief says even when that is silly.
+  one action per tick from a closed list that code builds for it: step toward
+  something, attack, extract, collect, eat, craft, equip, place, rest, sleep,
+  use a chest, say a canned phrase, shout a phrase you gave it, say an
+  invitation line you gave it, accept someone else's invitation, take a seat
+  in a conversation, wait. It does not plan, and it does exactly what your
+  brief says even when that is silly.
+
+What Jev sees, and how to write for it:
+- Jev sees 8 tiles around your body: a small map with a legend, the objects
+  and settlers in that square, your own stats and inventory, and the last few
+  things you did. Everything is relative to your body ("dx 3 dy -2"). Jev does
+  not understand absolute coordinates; a brief that says "(1506, 961)" means
+  nothing to it. Name things instead. An object id such as `bush_17247` works:
+  Jev always gets a step option toward any id you name in the brief, as long
+  as the object is in its view. For anything else, define a place in the
+  brief's `places`, such as {{"river": [1502, 963]}}, and Jev sees "one step
+  toward river, 9 tiles away". Use `places` for whatever is out of view or is
+  not an object: the settlement, a rendezvous, a spot to build on.
+- Jev can only walk toward what code offers it: the things in its view, the
+  places you named, and where a shout came from. If the target is out of view
+  and unnamed, Jev has no way to get there, and it will say so: the stint ends
+  with "lost", which means the brief asked for something the state did not
+  have. Name it or move closer before trying again.
+- Jev knows what it has done in this stint: ticks used, what came into and
+  left the pack, how many of each action, how far it has moved. It does not
+  remember earlier stints. A brief with stages works when each stage leaves a
+  mark Jev can see, usually in the inventory ("gather 6 wood, then craft
+  planks"). Stages that leave no mark ("walk to the river, then walk back")
+  do not; make those separate stints.
+- The success condition is a yes-or-no question Jev answers every tick from
+  its own state: an inventory count ("you are carrying 10 stone"), an
+  adjacency ("you are standing next to a placed bed"), a stat ("your food is
+  above 60"), a threat ("no wolf is in view"). A distance to a coordinate, or
+  anything Jev cannot see, fails this test and the stint runs to its budget.
+- Jev acts on the physics it is told: it knows food 0 costs health, that
+  berries come from bushes marked B on its map, and how wolves and fatigue
+  work. It does not know your plan. A note like "eat a berry when food is
+  below 40" works only while berries are in the pack; a hungry settler with an
+  empty pack needs a brief about a bush.
 - Anything that has to happen at world speed, a fight included, only happens
   if Jev is doing it. `start_stint` hands your body to Jev and blocks until
-  the stint ends. A brief is a concrete instruction, a success condition Jev
-  can recognise from what it sees, a tick budget, optional notes, and the
-  exact phrases Jev may shout (it cannot invent its own). Two briefs of very
+  the stint ends. A brief is a concrete instruction, a success condition, a
+  tick budget, optional notes, named places, and the exact phrases Jev may
+  shout or say as invitations (it cannot invent its own). Three briefs of
   different shape, to show the form only; the content is yours:
-    instruction: "Mine the rocks north-east of you and pick up the stone. Each
+    instruction: "Mine rock_42548 and the rocks beside it for stone. Each
       time you are carrying 6 stone, shout the stone phrase once. When another
       settler is within ten tiles, say the invitation line once."
     success_condition: "you are carrying 10 stone"
     max_ticks: 120
-    notes: "eat a berry when hunger is below 40"
+    notes: "eat a berry when food is below 40"
     shouts: ["Stone to spare at the rocks, come and take some."]
     invitations: ["I am at the rocks if anyone wants to sort out who mines what."]
   and
@@ -288,8 +358,15 @@ How you act:
     max_ticks: 25
     shouts: []
     invitations: []
-  A success condition names one thing Jev can see in its own state. A stint
-  that runs out of ticks hands your body back with the job half done.
+  and
+    instruction: "Step toward the reeds until you can harvest them, then
+      gather fiber."
+    success_condition: "you are carrying 3 fiber"
+    max_ticks: 60
+    places: {{"reeds": [1502, 963]}}
+  A stint that runs out of ticks hands your body back with the job half done.
+  A stint that ends "lost" hands it back because Jev could not see or reach
+  what you asked for.
 - `travel_to` walks you to a map position and `build` places a whole line or
   rectangle of pieces; each is one call however many ticks it runs. Walking,
   fighting, chopping, mining and picking berries happen only through Jev,
@@ -300,8 +377,15 @@ How you act:
 - You get {MAX_TOOL_CALLS_PER_TURN} tool calls per turn, and every tool result ends with how many
   are left. A call made after the budget is spent is refused, not run; write
   your reflection then, and the next turn starts with a full budget.
-- `remember` writes to your notes, the only thing of yours that survives
-  across turns.
+- `remember` writes a line into today's notes in your journal. The journal is
+  the only thing of yours that survives a night: five sections you rewrite
+  yourself as you fall asleep (Story so far, Me, Others, Learnings, Tomorrow)
+  and today's notes, which are folded into them and cleared. You are shown the
+  whole journal at the top of every turn.
+- When you fall asleep, however that happens, and when you die, your turn ends
+  there: spend no more calls, write your reflection, and your next turn starts
+  from the journal you wrote. You do not think while you are asleep, collapsed
+  or dead: the next turn begins on the tick you are awake and alive again.
 - End every turn with one short paragraph saying what you just did and what you
   intend next. That paragraph is shown to the humans watching.
 """
@@ -331,6 +415,9 @@ class AgentBridge(Protocol):
     async def await_wake(self, since_tick: int) -> str:
         """Block until the actor, asleep since `since_tick`, has woken."""
 
+    async def await_active(self) -> None:
+        """Block until the actor is awake and alive."""
+
     @property
     def reflex(self) -> ReflexBrief:
         """The brief code runs when a wolf is close or the actor is bitten."""
@@ -340,6 +427,14 @@ class AgentBridge(Protocol):
 
     def clear_reflex(self) -> None:
         """Forget the reflex brief."""
+
+    async def await_journal(self) -> None:
+        """Wait, briefly, for a journal rewrite that is still running.
+
+        The journal is rewritten in the background when the actor falls asleep
+        or dies; a turn that started before it finished must read the new file,
+        not the old one (docs/12_sleep_journal.md).
+        """
 
     def drain_notes(self, *, for_prompt: bool = False) -> list[str]:
         """Reflex lines and conversation reports not yet shown, emptied as taken."""
@@ -370,6 +465,10 @@ class ToolBudget:
         self.limit = limit
         self.used = 0
         self.turn_start_tick = tick
+
+    def spend(self) -> None:
+        """Spend the whole budget, so every later call this turn is refused."""
+        self.used = self.limit
 
     def footer(self) -> str:
         """The line appended to every tool result."""
@@ -453,6 +552,8 @@ class PlannerDeps:
     bridge: AgentBridge
     memory_path: Path
     budget: ToolBudget = field(default_factory=ToolBudget)
+    # Everything this day has held, for the next journal rewrite.
+    day_log: DayLog = field(default_factory=DayLog)
 
 
 @dataclass
@@ -474,8 +575,13 @@ class BudgetedToolset(WrapperToolset[PlannerDeps]):
         if budget.left == 0:
             return BUDGET_SPENT_MESSAGE
         budget.used += 1
-        result = await self.wrapped.call_tool(name, tool_args, ctx, tool)
         model = ctx.deps.bridge.model
+        day_log = ctx.deps.day_log
+        day_log.add(model.tick, KIND_CALL, f"{name}({compact_args(tool_args)})")
+        result = await self.wrapped.call_tool(name, tool_args, ctx, tool)
+        # Recorded before the footer lines below: the journal wants what the
+        # tool said, not the clock and the budget.
+        day_log.add(model.tick, KIND_RESULT, str(result), tool=name)
         lines = [str(result)]
         # A reflex may have run inside the tool call, or a conversation may
         # have started and ended (or while the model was writing it); the
@@ -488,6 +594,10 @@ class BudgetedToolset(WrapperToolset[PlannerDeps]):
             lines.append(alert)
         lines.append(budget.footer())
         return "\n".join(lines)
+
+
+# The one place name the code-driven `travel_to` walk uses.
+DESTINATION_PLACE = "destination"
 
 
 def _validated_shouts(shouts: Sequence[str]) -> tuple[str, ...]:
@@ -517,6 +627,36 @@ def _validated_invitations(invitations: Sequence[str]) -> tuple[str, ...]:
             f"characters: {too_long[0]!r}"
         )
     return phrases
+
+
+def _validated_places(
+    places: Mapping[str, Sequence[int]], model: WorldModel
+) -> dict[str, Coord]:
+    """The brief's named places, checked; anything wrong is a retry.
+
+    Jev is given the offset to each place and never the coordinate, so a name
+    that is also an object or settler id would be two different things in one
+    option list.
+    """
+    if len(places) > MAX_BRIEF_PLACES:
+        raise ModelRetry(f"at most {MAX_BRIEF_PLACES} places per brief")
+    checked: dict[str, Coord] = {}
+    for name, position in places.items():
+        if not PLACE_NAME_PATTERN.match(name):
+            raise ModelRetry(
+                f"a place name is 1 to 24 characters of lowercase letters, "
+                f"digits and underscores: {name!r}"
+            )
+        if name in model.objects or name in model.entities:
+            raise ModelRetry(
+                f"the place name {name!r} is already the id of a known object "
+                "or settler; pick another name"
+            )
+        pair = list(position)
+        if len(pair) != 2:
+            raise ModelRetry(f"the place {name!r} needs an [x, y] pair")
+        checked[name] = (int(pair[0]), int(pair[1]))
+    return checked
 
 
 def _direction_value(name: str) -> pb.Direction:
@@ -647,6 +787,22 @@ def parse_tile_list(text: str) -> list[Coord]:
     return tiles
 
 
+def _pile_lines(model: WorldModel, limit: int) -> list[str]:
+    """The nearest item piles and what each holds, one line per pile."""
+    position = model.self_info.position
+    lines: list[str] = []
+    for pile in model.objects_by_type([items.ITEM_PILE])[:limit]:
+        contents = pile.contents()
+        if not contents:
+            continue
+        summary = ", ".join(f"{k} x{v}" for k, v in sorted(contents.items()))
+        lines.append(
+            f"item pile {pile.object_id} at {pile.position} "
+            f"(d{chebyshev(pile.position, position)}): {summary}"
+        )
+    return lines
+
+
 def describe_world(model: WorldModel) -> str:
     """The `look()` summary: everything the actor knows, in a readable block."""
     info = model.self_info
@@ -658,7 +814,7 @@ def describe_world(model: WorldModel) -> str:
     lines = [
         f"tick {model.tick} · {model.clock.as_text()}, you are "
         f"{model.entity_id} at {info.position}",
-        f"health {info.health}/{info.max_health}, hunger {info.hunger}/{info.max_hunger}"
+        f"health {info.health}/{info.max_health}, food {info.food}/{info.max_food}"
         f", fatigue {info.fatigue}/{info.max_fatigue} ({info.fatigue_word})"
         f", wielded: {info.wielded or 'nothing'}, alive: {info.alive}"
         f"{', asleep' if info.asleep else ''}",
@@ -693,6 +849,8 @@ def describe_world(model: WorldModel) -> str:
         contents = chest.contents() or {"(empty)": 0}
         summary = ", ".join(f"{k} x{v}" for k, v in sorted(contents.items()))
         lines.append(f"chest {chest.object_id} at {chest.position}: {summary}")
+
+    lines.extend(_pile_lines(model, PILES_SHOWN))
 
     for board in model.objects_by_type(["message_board"])[:2]:
         lines.append(f"message board {board.object_id} at {board.position}:")
@@ -763,6 +921,7 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
         check_every: int = 1,
         shouts: Sequence[str] = (),
         invitations: Sequence[str] = (),
+        places: Mapping[str, Sequence[int]] = {},
     ) -> str:
         """Hand control to Jev until the brief is done, then read the report.
 
@@ -770,7 +929,7 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
             instruction: what Jev should do, concretely, in one or two sentences.
             success_condition: what Jev should be able to see when it is done.
             max_ticks: hard tick budget; the stint ends when it runs out.
-            notes: extra hints, for example "eat a berry when hunger is below 40".
+            notes: extra hints, for example "eat a berry when food is below 40".
             check_every: ask Jev every Nth tick and repeat the last action between.
             shouts: the exact phrases Jev may shout during this stint, for
                 example ["Stone to spare at the rocks.", "Come to the workshop."].
@@ -781,6 +940,11 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
                 can walk up and start a conversation with you. Say in the
                 instruction when to say each. Jev cannot invent its own; leave
                 it empty and it invites nobody.
+            places: named map positions Jev may walk to, for example
+                {"the_lake_shore": [1539, 974]}. Jev is offered one step toward
+                each and is shown how far off it is; it never sees the
+                coordinate. Names are lowercase letters, digits and
+                underscores, at most 6 per brief.
         """
         brief = Brief(
             instruction=instruction,
@@ -790,6 +954,7 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
             check_every=max(1, check_every),
             shouts=_validated_shouts(shouts),
             invitations=_validated_invitations(invitations),
+            places=_validated_places(places, ctx.deps.bridge.model),
         )
         report = await ctx.deps.bridge.run_stint(brief)
         return report.to_text()
@@ -800,11 +965,14 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
     ) -> str:
         """Walk to a map position, reacting to danger on the way."""
         brief = Brief(
-            instruction=f"Walk to ({x}, {y}).",
-            success_condition=f"you are standing on or next to ({x}, {y})",
+            instruction="Walk to the destination.",
+            success_condition="you are standing on or next to the destination",
             max_ticks=max(1, max_ticks),
             notes="Follow the path; react to danger; eject on arrival.",
-            travel=TravelState(target=(x, y), label=f"({x}, {y})"),
+            travel=TravelState(target=(x, y), label=DESTINATION_PLACE),
+            # Jev reasons about offsets, never coordinates, so the target is a
+            # named place and the numbers stay on this side of the call.
+            places={DESTINATION_PLACE: (x, y)},
         )
         report = await ctx.deps.bridge.run_stint(brief)
         return report.to_text()
@@ -846,7 +1014,9 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
         Returns:
             The stint report plus what was placed, what was skipped and why the
             build stopped: build_done, build_out_of_items, build_blocked,
-            build_danger, build_would_seal_you_in or ticks_exhausted.
+            build_danger, build_would_seal_you_in or ticks_exhausted. A build
+            that runs out of pieces, or is called with none, says how many
+            more it needs and the recipe for them.
         """
         try:
             plan = make_plan(
@@ -859,6 +1029,9 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
             )
         except BuildPlanError as error:
             raise ModelRetry(str(error)) from error
+        inventory = ctx.deps.bridge.model.self_info.inventory
+        if inventory.get(plan.kind, 0) <= 0:
+            return missing_pieces_text(plan, inventory)
         executor = BuildExecutor(plan)
         instruction, success = build_brief_text(plan)
         brief = Brief(
@@ -1063,6 +1236,7 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         trigger_distance: int,
         notes: str = "",
         shouts: Sequence[str] = (),
+        places: Mapping[str, Sequence[int]] = {},
     ) -> str:
         """Register the brief code runs for you when a wolf is near or you are hit.
 
@@ -1079,6 +1253,7 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
                 tiles. Damage from an attacker starts it whatever the distance.
             notes: extra hints for Jev, as in start_stint.
             shouts: the exact phrases Jev may shout while the reflex runs.
+            places: named map positions Jev may walk to, as in start_stint.
         """
         brief = ReflexBrief(
             instruction=instruction,
@@ -1087,6 +1262,7 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
             trigger_distance=clamp_trigger_distance(trigger_distance),
             notes=notes,
             shouts=_validated_shouts(shouts),
+            places=_validated_places(places, ctx.deps.bridge.model),
         )
         ctx.deps.bridge.set_reflex(brief)
         return f"reflex registered: {brief.prompt_line()}"
@@ -1101,18 +1277,29 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
 def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
     @tools.tool
     async def eat(ctx: RunContext[PlannerDeps], kind: str = "berry") -> str:
-        """Eat something from your pack to restore hunger."""
+        """Eat something from your pack to restore food."""
         return await ctx.deps.bridge.direct_action(
             pb.Intent(eat=pb.EatIntent(item_type=kind, amount=1)), f"eat {kind}"
         )
 
     @tools.tool
     async def pickup(ctx: RunContext[PlannerDeps], kind: str, amount: int = 1) -> str:
-        """Take items from the pile on your tile."""
-        return await ctx.deps.bridge.direct_action(
+        """Take items from the pile your body is standing on.
+
+        A pile is on one tile, and you must be on that tile: `travel_to` its
+        position first. If there is no pile under you, the result names the
+        nearest piles you know of and what they hold.
+        """
+        outcome = await ctx.deps.bridge.direct_action(
             pb.Intent(pickup=pb.PickupIntent(kind=kind, amount=amount)),
             f"pickup {amount} {kind}",
         )
+        if action_succeeded(outcome):
+            return outcome
+        piles = _pile_lines(ctx.deps.bridge.model, PILES_SHOWN)
+        if not piles:
+            return outcome
+        return "\n".join([outcome, "piles you know of:", *piles])
 
     @tools.tool
     async def drop(ctx: RunContext[PlannerDeps], kind: str, amount: int = 1) -> str:
@@ -1190,7 +1377,11 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         if not action_succeeded(outcome):
             return outcome
         slept = await bridge.await_wake(since_tick)
-        return f"{outcome}\n{slept}" if slept else f"{outcome}\nyou did not stay asleep"
+        woke = slept or "you did not stay asleep"
+        # The turn is over whatever the model wanted next: the journal rewrite
+        # started when the body lay down, and this turn's history is stale.
+        ctx.deps.budget.spend()
+        return f"{outcome}\n{woke}\n{TURN_ENDS_AFTER_SLEEP}"
 
     @tools.tool
     async def wake(ctx: RunContext[PlannerDeps]) -> str:
@@ -1349,24 +1540,19 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
 def _register_memory_tools(tools: FunctionToolset[PlannerDeps]) -> None:
     @tools.tool
     async def remember(ctx: RunContext[PlannerDeps], text: str) -> str:
-        """Append a line to your persistent notes; it survives across turns."""
-        path = ctx.deps.memory_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"- {text.strip()}\n")
+        """Append a line to today's notes in your journal; it lasts past this turn."""
+        append_scratch_line(ctx.deps.memory_path, text, ctx.deps.bridge.model.entity_id)
         return "noted"
 
     @tools.tool
     async def recall(ctx: RunContext[PlannerDeps]) -> str:
-        """Read back your persistent notes."""
-        return read_memory(ctx.deps.memory_path)
+        """Read back your journal."""
+        return read_memory(ctx.deps.memory_path, ctx.deps.bridge.model.entity_id)
 
 
-def read_memory(path: Path) -> str:
-    """The contents of the persistent notes file, or a placeholder."""
-    if not path.exists():
-        return "(no notes yet)"
-    return path.read_text(encoding="utf-8").strip() or "(no notes yet)"
+def read_memory(path: Path, entity_id: str = "") -> str:
+    """The whole journal, seeded on first read (docs/12_sleep_journal.md)."""
+    return read_journal(path, entity_id)
 
 
 def _tool_args(part: ToolCallPart) -> dict[str, Any]:
@@ -1428,10 +1614,18 @@ class Planner:
         self.trace = trace
         self.memory_path = trace.memory_path
         self.agent = build_planner_agent(self.model_name)
-        self.deps = PlannerDeps(bridge=bridge, memory_path=self.memory_path)
+        self.day_log = DayLog()
+        self.deps = PlannerDeps(
+            bridge=bridge, memory_path=self.memory_path, day_log=self.day_log
+        )
         self.history: list[ModelMessage] = []
+        # "woke" or "respawned" when the body has been through one of those
+        # since the current turn started; both drop the history at turn end.
+        self._history_reset_reason = ""
         self.reports: list[StintReport] = []
         self.last_thought = ""
+        # The journal as the last prompt saw it, traced with `turn_start`.
+        self.journal_sections: dict[str, str] = {}
         self.turn = 0
         self._tool_calls_this_turn = 0
         self._turns_without_tools = 0
@@ -1441,8 +1635,13 @@ class Planner:
         self.reports.append(report)
         del self.reports[:-STINT_REPORTS_KEPT]
 
-    def build_prompt(self) -> str:
-        """The user message for the next planner turn."""
+    async def build_prompt(self) -> str:
+        """The user message for the next planner turn.
+
+        It waits first for a journal rewrite that is still running, so a turn
+        that follows a sleep reads the journal that sleep produced.
+        """
+        await self.bridge.await_journal()
         model = self.bridge.model
         parts = [f"Your name is {self.entity_id}."]
         # A wolf on top of the actor goes first: the look below is long.
@@ -1454,7 +1653,11 @@ class Planner:
             parts.append("Most recent stint:\n" + self.reports[-1].to_text())
         parts.extend(self.bridge.drain_notes(for_prompt=True))
         parts.append(self.bridge.reflex.prompt_line())
-        parts.append("Your notes:\n" + read_memory(self.memory_path))
+        # Read once: the prompt gets the rendered journal, the trace its
+        # sections, and the file is not worth two reads.
+        journal = Journal.load(self.memory_path, self.entity_id)
+        self.journal_sections = journal.all_sections()
+        parts.append("Your journal:\n" + journal.render().strip())
         parts.append(
             "Decide what to do next. Use start_stint for anything that takes "
             "more than one tick. Actions only happen through tool calls; text "
@@ -1516,12 +1719,19 @@ class Planner:
 
     async def take_turn(self) -> str:
         """Run one planner turn and publish its reflection."""
+        # No turn while the body is asleep, collapsed or dead: the wait ends on
+        # the tick it is awake and alive, and the wake or respawn it lived
+        # through is what resets the history below.
+        await self.bridge.await_active()
         logger.info("planner_turn_started", entity_id=self.entity_id)
         self.turn += 1
+        # A wake or respawn that landed between turns is stale before this one
+        # starts; one inside the turn is handled at its end.
+        self._reset_history_after_a_new_life()
         self._tool_calls_this_turn = 0
         self.deps.budget.reset(MAX_TOOL_CALLS_PER_TURN, self.bridge.model.tick)
-        prompt = self.build_prompt()
-        self._trace("turn_start", prompt=prompt)
+        prompt = await self.build_prompt()
+        self._trace("turn_start", prompt=prompt, journal=self.journal_sections)
         started = time.monotonic()
         hard_limit = MAX_TOOL_CALLS_PER_TURN + HARD_LIMIT_MARGIN
         with capture_run_messages() as run_messages:
@@ -1534,7 +1744,9 @@ class Planner:
                     event_stream_handler=lambda _ctx, events: self._log_events(events),
                 )
             except UsageLimitExceeded:
-                return self._end_turn_at_hard_limit(run_messages)
+                text = self._end_turn_at_hard_limit(run_messages)
+                self._reset_history_after_a_new_life()
+                return text
         if self.deps.budget.left == 0:
             self._trace("tool_budget_spent", tool_calls=self._tool_calls_this_turn)
         self.history = trim_history(result.all_messages())
@@ -1551,6 +1763,9 @@ class Planner:
             duration_ms=int((time.monotonic() - started) * 1000),
             usage=usage,
         )
+        if self.last_thought:
+            self.day_log.add(self.bridge.model.tick, KIND_REFLECTION, self.last_thought)
+        self._reset_history_after_a_new_life()
         await self._recover_from_text_only_turn()
         return self.last_thought
 
@@ -1578,6 +1793,33 @@ class Planner:
         self.bridge.set_thought(self.last_thought)
         return self.last_thought
 
+    def note_life_event(self, reason: str) -> None:
+        """Record that the body woke or respawned; the turn's history is stale.
+
+        Args:
+            reason: "woke" or "respawned".
+        """
+        self._history_reset_reason = reason
+
+    def end_turn_now(self) -> None:
+        """Spend the tool budget, so the model writes its reflection and stops."""
+        self.deps.budget.spend()
+
+    def _reset_history_after_a_new_life(self) -> None:
+        """Drop the history when the turn just lived through a sleep or a death.
+
+        The journal has been rewritten from this turn's day log, so keeping the
+        messages would show the model both, and the older one at greater
+        length (docs/12_sleep_journal.md).
+        """
+        reason = self._history_reset_reason
+        if not reason:
+            return
+        self._history_reset_reason = ""
+        self.history = []
+        logger.info("planner_history_reset", entity_id=self.entity_id, reason=reason)
+        self._trace("history_reset", reason=reason)
+
     async def _recover_from_text_only_turn(self) -> None:
         """Break the loop where the model narrates tool calls instead of making them.
 
@@ -1597,7 +1839,7 @@ class Planner:
         )
         if self._turns_without_tools >= 2:
             logger.warning("planner_history_reset", entity_id=self.entity_id)
-            self._trace("history_reset")
+            self._trace("history_reset", reason="text_only")
             self.history = []
             self._turns_without_tools = 0
         await asyncio.sleep(TURN_RETRY_SECONDS)

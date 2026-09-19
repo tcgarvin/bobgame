@@ -15,6 +15,8 @@ from agents.jev_agent.options import TravelState
 from agents.jev_agent.pricing import jev_cost_usd
 from agents.jev_agent.stint import (
     END_DEATH,
+    END_LOST,
+    LOST_EXPLANATION,
     END_REPEATED_FAILURE,
     END_SUCCESS_OR_JUDGEMENT,
     END_TICKS,
@@ -39,6 +41,7 @@ def decision(
     *,
     done: float = 0.0,
     stuck: float = 0.0,
+    lost: float = 0.0,
     danger: float = 0.0,
 ) -> JevDecision:
     """A scripted Jev answer."""
@@ -46,6 +49,7 @@ def decision(
         action=action,
         probabilities={action: 0.8, "wait": 0.2},
         confidence=0.7,
+        lost=lost,
         done=done,
         stuck=stuck,
         danger=danger,
@@ -182,7 +186,39 @@ async def test_the_report_tail_shows_done_and_stuck(trace: AgentTrace) -> None:
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     harness.stint.record_intent_result("accepted")
     tail = harness.stint.build_report().tail
-    assert tail == ["t1 wait -> accepted (done 0.42, stuck 0.13, danger 0.03)"]
+    assert tail == [
+        "t1 wait -> accepted (done 0.42, stuck 0.13, lost 0.00, danger 0.03)"
+    ]
+
+
+async def test_two_high_lost_ticks_end_the_stint_as_lost(trace: AgentTrace) -> None:
+    jev = FakeJevClient(
+        script=[
+            decision("move_N", lost=0.7),
+            decision("move_S", lost=0.8),
+            decision("wait"),
+        ]
+    )
+    harness = StintHarness(jev, make_brief(max_ticks=10), trace)
+    for tick in range(1, 4):
+        await harness.tick(make_observation(tick, make_entity("ada", (10, 10))))
+    assert harness.stint.finished
+    assert harness.stint.end_reason == END_LOST
+    text = harness.stint.build_report().to_text()
+    assert "ended because: lost" in text
+    assert LOST_EXPLANATION in text
+
+
+async def test_a_high_lost_tick_between_low_ones_does_not_end_it(
+    trace: AgentTrace,
+) -> None:
+    jev = FakeJevClient(
+        script=[decision("wait", lost=0.9), decision("wait", lost=0.1)] * 2
+    )
+    harness = StintHarness(jev, make_brief(), trace)
+    for tick in range(1, 5):
+        await harness.tick(make_observation(tick, make_entity("ada", (10, 10))))
+    assert not harness.stint.finished
 
 
 async def test_a_single_high_done_does_not_end_the_stint(trace: AgentTrace) -> None:
@@ -322,8 +358,31 @@ async def test_accepted_move_that_goes_nowhere_counts_as_blocked(
     assert any("blocked" in line for line in harness.model.recent_history())
 
 
+async def test_the_state_carries_what_the_stint_has_done_so_far(
+    trace: AgentTrace,
+) -> None:
+    jev = FakeJevClient(default_action="move_E")
+    harness = StintHarness(jev, make_brief(max_ticks=9), trace)
+    for tick in range(1, 4):
+        await harness.tick(
+            make_observation(
+                tick,
+                make_entity("ada", (9 + tick, 10), inventory={"wood": tick}),
+            )
+        )
+    so_far = jev.last_state["so_far"]
+    assert so_far["ticks_used"] == 2
+    assert so_far["ticks_left"] == 7
+    assert so_far["actions"] == {"move": 2}
+    assert so_far["inventory_change"] == {"wood": 2}
+    assert so_far["moved_from_start"] == "dx 2 dy 0"
+    assert so_far["net_tiles_moved"] == 2
+
+
 async def test_travel_choice_sets_and_clears_the_travel(trace: AgentTrace) -> None:
-    jev = FakeJevClient(script=[decision("travel_to:tree_1"), decision("stop_travel")])
+    jev = FakeJevClient(
+        script=[decision("step_towards:tree_1"), decision("stop_going")]
+    )
     harness = StintHarness(jev, make_brief(), trace)
     observation = make_observation(
         1,
@@ -338,14 +397,14 @@ async def test_travel_choice_sets_and_clears_the_travel(trace: AgentTrace) -> No
     assert harness.stint.travel is None
 
 
-async def test_a_preset_travel_offers_follow_travel_on_the_first_tick(
+async def test_a_preset_travel_offers_keep_going_on_the_first_tick(
     trace: AgentTrace,
 ) -> None:
-    jev = FakeJevClient(default_action="follow_travel")
+    jev = FakeJevClient(default_action="keep_going")
     brief = make_brief(travel=TravelState(target=(14, 10), label="(14, 10)"))
     harness = StintHarness(jev, brief, trace)
     intent = await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
-    assert "follow_travel" in jev.last_options
+    assert "keep_going" in jev.last_options
     assert intent.move.direction == 3  # EAST
 
 
@@ -354,10 +413,13 @@ async def test_every_tick_is_written_to_the_stint_trace(trace: AgentTrace) -> No
     harness = StintHarness(jev, make_brief(), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
     await harness.tick(make_observation(2, make_entity("ada", (11, 10))))
+    # Rows are written one tick late, so the stint has to be over before the
+    # trace is complete (see `_flush_finished_record`).
+    harness.stint.finish("test_over")
     trace.close()
 
     lines = read_lines(trace.directory / "stints.jsonl.gz")
-    start, first, second = lines
+    start, first, second = lines[:3]
     assert start["event"] == "stint_start"
     assert start["stint_id"] == "ada-1"
     assert start["brief"] == {
@@ -368,6 +430,7 @@ async def test_every_tick_is_written_to_the_stint_trace(trace: AgentTrace) -> No
         "check_every": 1,
         "shouts": [],
         "invitations": [],
+        "places": {},
         "travel": None,
     }
     assert first["entity_id"] == "ada"
@@ -386,10 +449,27 @@ async def test_every_tick_is_written_to_the_stint_trace(trace: AgentTrace) -> No
     assert "event" not in first
 
 
+async def test_a_silently_blocked_move_reaches_the_trace(trace: AgentTrace) -> None:
+    """The row must not go to disk until the blocked-move check has seen it."""
+    jev = FakeJevClient(default_action="move_E")
+    harness = StintHarness(jev, make_brief(max_ticks=20), trace)
+    for tick in range(1, 4):
+        await harness.tick(make_observation(tick, make_entity("ada", (10, 10))))
+    trace.close()
+
+    rows = [
+        line
+        for line in read_lines(trace.directory / "stints.jsonl.gz")
+        if "action" in line
+    ]
+    assert rows, "the first tick's row was written"
+    assert rows[0]["intent_result"] == "blocked"
+
+
 async def test_a_preset_travel_is_serialised_in_the_start_line(
     trace: AgentTrace,
 ) -> None:
-    jev = FakeJevClient(default_action="follow_travel")
+    jev = FakeJevClient(default_action="keep_going")
     brief = make_brief(travel=TravelState(target=(14, 10), label="(14, 10)"))
     harness = StintHarness(jev, brief, trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
@@ -579,6 +659,7 @@ async def test_a_driver_tick_is_traced_without_jevs_numbers(trace: AgentTrace) -
     await harness.tick(
         make_observation(1, make_entity("ada", (10, 10), inventory={"road": 2}))
     )
+    harness.stint.finish("test_over")
     trace.close()
     records = [
         line

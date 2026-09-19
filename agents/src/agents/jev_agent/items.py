@@ -208,6 +208,17 @@ WIELD_DAMAGE_BONUS: Mapping[str, int] = {
 WOLF_HEALTH = 16
 WOLF_DAMAGE = 3
 
+# --- Food and health (mirrors world/stats.py) -----------------------------
+
+# Ticks per point of food lost while awake.
+FOOD_INTERVAL_TICKS = 4
+# At food 0, this much damage every this many ticks.
+STARVATION_INTERVAL_TICKS = 4
+STARVATION_DAMAGE = 1
+# Health only regrows above this food (and only while not tired).
+REGEN_FOOD_THRESHOLD = 50
+BERRY_FOOD_RESTORE = 20
+
 LOCAL_CHANNEL = "local"
 SHOUT_CHANNEL = "shout"
 SAY_RADIUS = 10
@@ -226,6 +237,11 @@ TIRED_FATIGUE = 60
 # A collapsed sleeper wakes at this fatigue and not before.
 COLLAPSE_WAKE_FATIGUE = 70
 RESPAWN_FATIGUE = 30
+# Dying: how long the body is gone, what it comes back with, and where
+# (`world/stats.py`: RESPAWN_DELAY_TICKS, RESPAWN_FOOD, RESPAWN_RING_DISTANCES).
+RESPAWN_DELAY_TICKS = 10
+RESPAWN_FOOD = 50
+RESPAWN_RING_TEXT = "12 or 24 tiles"
 # Ticks per fatigue point gained while awake.
 FATIGUE_INTERVAL_DAY = 4
 FATIGUE_INTERVAL_NIGHT = 3

@@ -106,9 +106,9 @@ function entityState(entityId, tick) {
     tags: [],
     health: Math.max(1, (isWolf ? 12 : 20) - damaged),
     max_health: isWolf ? 12 : 20,
-    hunger: isWolf ? 0 : Math.max(0, 100 - (tick % 80)),
-    max_hunger: 100,
-    wielded: entityId === 'ada' ? 'axe' : '',
+    food: isWolf ? 0 : Math.max(0, 100 - (tick % 80)),
+    max_food: 100,
+    wielded: WIELDED[entityId] ?? '',
     alive: true,
     fatigue: isWolf ? 0 : fatigue,
     max_fatigue: 100,
@@ -339,7 +339,7 @@ const BRIEFS = {
   },
   bram: {
     instruction: 'Pick berries and keep everyone fed',
-    success_condition: 'nobody below 40 hunger',
+    success_condition: 'nobody below 40 food',
     max_ticks: 30,
     notes: 'Bushes regrow every 20 ticks.',
     check_every: 5,
@@ -354,6 +354,9 @@ const BRIEFS = {
     travel: null,
   },
 };
+
+// Tools in hand, so the panel's wielded icon and tier word can be seen.
+const WIELDED = { ada: 'axe', bram: 'copper_pickaxe', cleo: 'iron_sword' };
 
 const OPTIONS = {
   ada: ['extract', 'move_north', 'move_east', 'deposit', 'wait'],
@@ -450,6 +453,7 @@ function agentDetail(entityId, tick) {
       criteria: null,
       planner_turn: null,
       memory: '',
+      journal: null,
     };
   }
   const stintStartTick = Math.floor(tick / 40) * 40;
@@ -476,7 +480,7 @@ function agentDetail(entityId, tick) {
         entity_id: entityId,
         position: positionAt(entityId, tick),
         health: entityState(entityId, tick).health,
-        hunger: entityState(entityId, tick).hunger,
+        food: entityState(entityId, tick).food,
         wielded: entityState(entityId, tick).wielded,
         inventory: entityState(entityId, tick).inventory,
       },
@@ -550,6 +554,20 @@ function agentDetail(entityId, tick) {
       '- chest_1 at (10,10) is the shared store. Deposit wood there, not in piles.',
       '- Wolves prowl east after tick 100. Do not chase them.',
     ].join('\n'),
+    journal: {
+      tick: stintStartTick,
+      source: stintStartTick === 0 ? 'turn_start' : 'journal_rewrite',
+      sections: {
+        'Story so far': `${entityId} woke on this island with eleven others. Day one went on berries; day two the axe changed everything.`,
+        Me: 'The one who chops. I want the palisade closed before the wolves learn the gate.',
+        Others:
+          'ada: keeps the chest, owes me nothing.\nbram: fights well, forgets to eat.\ncleo: sleeps through the good light.',
+        Learnings:
+          'An oak gives four wood and regrows slowly.\nA wolf alone beats anyone alone.\nDoors stop wolves; walls stop everyone.',
+        Tomorrow: 'Chop six more wood, then close the north gap with a door.',
+        "Today's notes": '- bram says two wolves east of the bush line\n- chest_1 has 12 wood',
+      },
+    },
   };
 }
 

@@ -9,7 +9,7 @@ from world.items import WIELD_DAMAGE_BONUS, attack_damage
 from world.state import Entity, Inventory, World
 from world.stats import (
     RESPAWN_DELAY_TICKS,
-    RESPAWN_HUNGER,
+    RESPAWN_FOOD,
     RESPAWN_SAFE_DISTANCE,
     process_respawns,
 )
@@ -164,7 +164,7 @@ class TestRespawn:
         assert alice.alive
         assert alice.position == Position(x=1, y=1)
         assert alice.health == alice.max_health
-        assert alice.hunger == RESPAWN_HUNGER
+        assert alice.food == RESPAWN_FOOD
         assert alice.inventory.items == ()
         assert world.is_position_occupied(Position(x=1, y=1))
         assert [r.entity_id for r in events.respawns] == ["alice"]

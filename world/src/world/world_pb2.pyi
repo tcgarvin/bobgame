@@ -37,7 +37,7 @@ class Position(_message.Message):
     def __init__(self, x: _Optional[int] = ..., y: _Optional[int] = ...) -> None: ...
 
 class Entity(_message.Message):
-    __slots__ = ("entity_id", "position", "entity_type", "tags", "status_bits", "inventory", "health", "max_health", "hunger", "max_hunger", "wielded", "alive", "fatigue", "max_fatigue", "asleep", "open_to_talk")
+    __slots__ = ("entity_id", "position", "entity_type", "tags", "status_bits", "inventory", "health", "max_health", "food", "max_food", "wielded", "alive", "fatigue", "max_fatigue", "asleep", "open_to_talk")
     ENTITY_ID_FIELD_NUMBER: _ClassVar[int]
     POSITION_FIELD_NUMBER: _ClassVar[int]
     ENTITY_TYPE_FIELD_NUMBER: _ClassVar[int]
@@ -46,8 +46,8 @@ class Entity(_message.Message):
     INVENTORY_FIELD_NUMBER: _ClassVar[int]
     HEALTH_FIELD_NUMBER: _ClassVar[int]
     MAX_HEALTH_FIELD_NUMBER: _ClassVar[int]
-    HUNGER_FIELD_NUMBER: _ClassVar[int]
-    MAX_HUNGER_FIELD_NUMBER: _ClassVar[int]
+    FOOD_FIELD_NUMBER: _ClassVar[int]
+    MAX_FOOD_FIELD_NUMBER: _ClassVar[int]
     WIELDED_FIELD_NUMBER: _ClassVar[int]
     ALIVE_FIELD_NUMBER: _ClassVar[int]
     FATIGUE_FIELD_NUMBER: _ClassVar[int]
@@ -62,15 +62,15 @@ class Entity(_message.Message):
     inventory: Inventory
     health: int
     max_health: int
-    hunger: int
-    max_hunger: int
+    food: int
+    max_food: int
     wielded: str
     alive: bool
     fatigue: int
     max_fatigue: int
     asleep: bool
     open_to_talk: bool
-    def __init__(self, entity_id: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ..., entity_type: _Optional[str] = ..., tags: _Optional[_Iterable[str]] = ..., status_bits: _Optional[int] = ..., inventory: _Optional[_Union[Inventory, _Mapping]] = ..., health: _Optional[int] = ..., max_health: _Optional[int] = ..., hunger: _Optional[int] = ..., max_hunger: _Optional[int] = ..., wielded: _Optional[str] = ..., alive: bool = ..., fatigue: _Optional[int] = ..., max_fatigue: _Optional[int] = ..., asleep: bool = ..., open_to_talk: bool = ...) -> None: ...
+    def __init__(self, entity_id: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ..., entity_type: _Optional[str] = ..., tags: _Optional[_Iterable[str]] = ..., status_bits: _Optional[int] = ..., inventory: _Optional[_Union[Inventory, _Mapping]] = ..., health: _Optional[int] = ..., max_health: _Optional[int] = ..., food: _Optional[int] = ..., max_food: _Optional[int] = ..., wielded: _Optional[str] = ..., alive: bool = ..., fatigue: _Optional[int] = ..., max_fatigue: _Optional[int] = ..., asleep: bool = ..., open_to_talk: bool = ...) -> None: ...
 
 class WorldClock(_message.Message):
     __slots__ = ("day", "tick_of_day", "day_length", "night")

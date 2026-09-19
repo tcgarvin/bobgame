@@ -13,6 +13,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-ai-slim", extra = ["openai"] },
     { name = "structlog" },
+    { name = "tiktoken" },
     { name = "typesafe-sdk" },
 ]
 
@@ -34,6 +35,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-ai-slim", extras = ["openai"], specifier = ">=2.43.0" },
     { name = "structlog", specifier = ">=25.5.0" },
+    { name = "tiktoken", specifier = ">=0.14" },
     { name = "typesafe-sdk", specifier = ">=0.6.0" },
 ]
 

@@ -194,9 +194,11 @@ def test_the_ledger_json_carries_the_total_rounded_to_eight_decimals() -> None:
     assert payload == {
         "planner_usd": 0.00123457,
         "converser_usd": 0.0,
+        "journal_usd": 0.0,
         "jev_usd": jev_cost_usd(123),
         "total_usd": round(0.001234567891 + jev_cost_usd(123), 8),
         "planner_turns": 1,
+        "journal_rewrites": 0,
         "jev_calls": 1,
     }
 
@@ -205,9 +207,11 @@ def test_an_empty_ledger_reports_zeroes() -> None:
     assert json.loads(CostLedger().as_json()) == {
         "planner_usd": 0.0,
         "converser_usd": 0.0,
+        "journal_usd": 0.0,
         "jev_usd": 0.0,
         "total_usd": 0.0,
         "planner_turns": 0,
+        "journal_rewrites": 0,
         "jev_calls": 0,
     }
 
@@ -224,3 +228,18 @@ async def test_the_ledger_client_bills_every_call_it_forwards() -> None:
     assert len(inner.calls) == 2, "the wrapper delegates every call"
     assert ledger.jev_calls == 2
     assert ledger.jev_usd == pytest.approx(2 * jev_cost_usd(first.input_tokens))
+
+
+def test_the_ledger_counts_journal_rewrites_in_its_total() -> None:
+    """A rewrite is billed like a planner turn, on its own line."""
+    ledger = CostLedger()
+
+    ledger.add_journal({"cost_usd": 0.004})
+    ledger.add_journal({})
+
+    assert ledger.journal_rewrites == 2
+    assert ledger.journal_usd == pytest.approx(0.004)
+    assert ledger.total_usd() == pytest.approx(0.004)
+    payload = json.loads(ledger.as_json())
+    assert payload["journal_usd"] == pytest.approx(0.004)
+    assert payload["journal_rewrites"] == 2

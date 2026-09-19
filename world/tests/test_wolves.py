@@ -36,7 +36,7 @@ def _add_wolf(world: World, entity_id: str, position: Position) -> Entity:
         entity_type="wolf",
         health=10,
         max_health=10,
-        hunger=100,
+        food=100,
     )
     world.add_entity(wolf)
     return wolf

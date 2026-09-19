@@ -161,7 +161,7 @@ New intents: `SleepIntent { string object_id = 1; }` (`Intent.sleep = 20`) and
 the sleeper; empty means sleeping on the ground where the entity stands.
 One sleeper per bed (lexicographically smallest entity id wins on the same
 tick; a bed already occupied by a sleeper fails with `"<bed> is taken"`).
-Sleeping needs hunger above 0 (`"too hungry to sleep"`) and fatigue above 0
+Sleeping needs food above 0 (`"too hungry to sleep"`) and fatigue above 0
 (`"not tired"`).
 
 Sleep is a state, not an action: `Entity.asleep` stays true across ticks. While
@@ -176,11 +176,11 @@ Fatigue recovery per tick while asleep:
 | ground | 1 per 2 ticks | 1 per 4 ticks |
 
 A bed sleeper also heals 1 health every `REGEN_INTERVAL_TICKS` (5) regardless
-of hunger and fatigue. A ground sleeper heals only through the ordinary regen
-rules. Hunger drops at the normal rate while asleep.
+of food and fatigue. A ground sleeper heals only through the ordinary regen
+rules. Food drops at the normal rate while asleep.
 
 Waking: a voluntary sleeper wakes when fatigue reaches 0, when it takes any
-damage, when its hunger reaches 0, when the bed it sleeps on is removed, or on
+damage, when its food reaches 0, when the bed it sleeps on is removed, or on
 `WakeIntent`. A collapsed sleeper wakes only at fatigue 70 or on bed removal
 (it never was on a bed). Waking is reported as an action event
 `("wake", true, "woke up: <reason>")` where reason is one of `rested`,
@@ -191,7 +191,7 @@ damage, when its hunger reaches 0, when the bed it sleeps on is removed, or on
 `RestIntent` (the instant 2-health rest on a bed) stays as it is.
 
 Tick order: sleep and wake intents are processed after the movement and action
-phases; the fatigue phase runs next to the hunger phase (accumulate for awake
+phases; the fatigue phase runs next to the food phase (accumulate for awake
 players, recover for sleepers, collapse checks, automatic wakes).
 
 ### Viewer
@@ -201,7 +201,7 @@ players, recover for sleepers, collapse checks, automatic wakes).
   readout in the overlay (`day 2, 143/300, night`).
 - Sleeping entities show a "z" marker above the sprite; collapsed ones show it
   in red.
-- The agent panel shows fatigue next to health and hunger.
+- The agent panel shows fatigue next to health and food.
 - New sprites (DawnLike, keyed in the TSX files, mapped in `OBJECT_SPRITE_MAP`):
   `copper-vein`, `iron-vein`, `furnace`, `anvil`. The object inspector shows
   vein units remaining and station craft progress.

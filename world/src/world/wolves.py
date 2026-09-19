@@ -146,8 +146,8 @@ class WolfSimulator:
             entity_type=WOLF_TYPE,
             health=WOLF_MAX_HEALTH,
             max_health=WOLF_MAX_HEALTH,
-            hunger=100,
-            max_hunger=100,
+            food=100,
+            max_food=100,
         )
         world.add_entity(wolf)
         events.entities_spawned.append(
