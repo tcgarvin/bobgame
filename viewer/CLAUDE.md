@@ -22,6 +22,24 @@ import type { ConnectionState, InterpolatedEntity } from '../network';
 
 This applies to all interfaces and types that aren't used as values.
 
+## The game's rules are generated, not copied
+
+`viewer/src/generated/rules.ts` is a **generated file** — floor codes and
+`FloorType`, the ground-layer kinds, blocking sets, dismantle and extract work,
+`TIRED_FATIGUE`, `NIGHT_START_FRACTION` and the rest. It is written from
+`bobgame_rules` (repo root `rules/`, which the world and the agents read too)
+by `tools/generate_rules_ts.py`, and it is checked in. Never edit it, and never
+hand-copy a number out of the Python: `TerrainConfig.ts`, `GameScene.ts`,
+`ObjectPanel.ts` and `OverlayUI.ts` all import from it. After changing anything
+in `rules/`, run:
+
+```bash
+cd tools && uv run python generate_rules_ts.py
+```
+
+`tools/tests/test_generate_rules_ts.py` fails when the checked-in file has
+drifted, or when an object kind has no sprite in the sprite index.
+
 ## Asset Loading
 
 ### Sprite Index

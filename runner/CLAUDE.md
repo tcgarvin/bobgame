@@ -44,11 +44,28 @@ args = ["--settlers", "6"]
 module = "agents.jev_agent"
 ```
 
-`AgentConfig.for_entity` falls back to the `default` section and raises
+`Config.get_agent_config` falls back to the `default` section and raises
 `KeyError` when there is neither an entry for the entity nor a default: there
 is no built-in agent module. The agent derives its own log root from
 `BOBGAME_RUN_DIR` (see docs/07_replay.md), so `log_dir` only matters for the
 runner's own output.
+
+`[runner]` also accepts `resume_from` (default `""`); see "Resuming" below.
+
+## Resuming a saved run
+
+Contract: [docs/14_new_moon_and_saves.md](../docs/14_new_moon_and_saves.md).
+
+`--resume-from <dir>` names the save directory this run continues from — an
+absolute path to the **parent** run's `saves/tick-<T>`. When it is set,
+`ProcessManager._agent_args` appends `--resume-from <dir>` to *every* agent
+command; each agent reads its own `agents/<entity_id>.json.gz` out of that one
+directory.
+
+The value is resolved in `runner/__main__.py` as `--resume-from`, else the
+environment variable `$BOBGAME_RESUME_FROM` (which is what `./dev.sh --resume`
+exports), else the config's `[runner] resume_from`, else nothing. It is logged
+on `runner_starting` as `resume_from`.
 
 ## Process Lifecycle
 
@@ -70,9 +87,9 @@ The runner monitors process status (is subprocess alive?) rather than lease stat
 ### Exponential Backoff
 
 Restart backoff prevents rapid crash loops:
-- Start at 1 second
-- Double each attempt up to 30 seconds max
-- Stop after 5 attempts (configurable)
+- Start at `initial_backoff_ms` (default 1 second; `hamlet.toml` sets 2)
+- Multiply by `backoff_multiplier` each attempt, capped at `max_backoff_ms`
+- Stop after `max_restart_attempts` (5)
 
 ### Signal Handling
 
@@ -85,14 +102,21 @@ The runner catches SIGINT and SIGTERM to ensure clean shutdown:
 ## Running
 
 ```bash
-# With config file
+# Default config: the name `hamlet`, resolved to runner/configs/hamlet.toml
+cd runner && uv run python -m runner
+
+# By name or by path
 cd runner && uv run python -m runner --config configs/hamlet.toml
 
 # With CLI overrides
 cd runner && uv run python -m runner --server localhost:50051 --log-dir logs
 
+# Resuming a saved run (dev.sh --resume sets $BOBGAME_RESUME_FROM instead)
+cd runner && uv run python -m runner --resume-from /abs/runs/<parent>/saves/tick-612
+
 # Or via dev.sh (uses runner automatically)
 ./dev.sh
+./dev.sh --resume <run_id>[@<tick>]
 ```
 
 ## Testing

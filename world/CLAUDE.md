@@ -24,6 +24,14 @@ Development notes and patterns for the world simulation core.
 - `server.py` (`WorldServer`), `bootstrap.py` (`ServerSettings` + `run_server`,
   building a world from a config or a save) and `cli.py` (argparse).
   `python -m world.server` runs `cli.main`.
+- `moon.py` - the new moon: clock predicates (`is_new_moon_day`, `is_still`,
+  `wolves_lie_low`) and `apply_new_moon`, the forced sleep. Pure physics; it
+  happens whether or not a save is written.
+- `snapshot.py` - a save on disk: `write_world_snapshot`, `load_world_snapshot`,
+  `restore_world`, the path helpers and `check_map`.
+- `save_coordinator.py` - `SaveSettings` (run dir, run config, map hash, wait)
+  and `SaveCoordinator`: decides when a save is due, waits for the settlers'
+  files, writes the world's half or abandons the directory.
 - `terrain_types.py` - re-exports `FloorType` and `FLOOR_TYPE_BY_CODE` from
   `bobgame_rules.terrain`. `tests/test_terrain_types.py` parses
   `viewer/src/generated/rules.ts` and fails on drift.
@@ -227,7 +235,9 @@ uv run python -m agents.jev_agent --entity bob
 - `wolf_spawn_interval_ticks` (default 40, must be >= 1) - ticks between spawn
   attempts, so a killed wolf stays gone for at least that long.
 
-The defaults are the `wolves.py` module constants.
+The defaults are the `bobgame_rules.entities` constants, which `wolves.py`
+re-exports as `MAX_WOLVES`, `SPAWN_MIN_DISTANCE`, `SPAWN_MAX_DISTANCE`,
+`SPAWN_INTERVAL_TICKS` and `DESPAWN_DISTANCE`.
 `WorldConfig.wolf_settings()` bundles them into a frozen `WolfSettings`, which
 travels `run_server` -> `WorldServer` -> `TickLoop` -> `WolfSimulator`. Nothing
 reads `MAX_WOLVES` / `SPAWN_MIN_DISTANCE` / `SPAWN_MAX_DISTANCE` /
@@ -335,7 +345,10 @@ WebSocket protocol.
 
 - `recording.py` - `JsonlGzWriter` (one gzip member per file, sync-flushed at
   most once a second so a killed run stays readable), `read_jsonl_gz` (tolerates
-  a truncated last block), `RunRecorder` and `generate_run_id`.
+  a truncated last block), `file_sha256`, `RunRecorder` and the run id.
+  `run_id_for(config_name)` returns `$BOBGAME_RUN_ID` when `dev.sh` exported
+  one and falls back to `generate_run_id` (`YYYYMMDD-HHMMSS-<config>`): inventing
+  a second id here made `meta.json` disagree with the directory name.
 - `viewer_payload.py` - the JSON shapes shared by the live viewer service, the
   recorder and the replay server. Never duplicate an entity/object payload;
   add it here.
@@ -493,7 +506,8 @@ Two phases, both in `sleep.py`:
 - `process_fatigue_phase` (beside `process_food_phase`) accumulates fatigue
   for the awake, recovers it for sleepers at the bed/ground x night/day rate,
   heals bed sleepers, collapses anyone at max fatigue and wakes sleepers whose
-  reason to sleep has gone.
+  reason to sleep has gone — except inside a new-moon still window, where both
+  the `wake` mechanic and `_wake_reason` refuse (see the new moon below).
 
 Sleep is a *state*: `TickContext.submit_intent` refuses every intent that is
 not `mechanics.sleeper_may_submit` from a sleeper with reason `asleep`, and `tick._living_subset` repeats
@@ -532,6 +546,73 @@ option below the floor.
 `is_tired(entity)` (fatigue >= 60) is the one predicate other modules use:
 `stats.process_health_regen` skips the tired, and extraction and combat apply
 their penalties through it.
+
+## The New Moon, Saves and Resume (docs/14_new_moon_and_saves.md)
+
+Contract: [docs/14_new_moon_and_saves.md](../docs/14_new_moon_and_saves.md).
+Three `[world]` settings, validated in `config.py`: `new_moon_every_days`
+(default 0, must be >= 0; 0 means the world never has a new moon and never
+saves — `hamlet.toml` sets 3), `save_on_new_moon` (default true) and
+`save_wait_seconds` (default 180, must be >= 1).
+
+### The physics (`moon.py`)
+
+The night of day `d` is a new moon when `(d + 1) % every_days == 0`. At
+`night_start_tick(day_length)` exactly, `apply_new_moon` puts every living,
+awake, non-wolf entity to sleep where it stands (lowest-id free bed on or next
+to its tile, else the ground) and `conversations.close_all_conversations` closes
+every open conversation with end reason `new_moon`. For the next
+`NEW_MOON_STILL_TICKS` (6) ticks `is_still(world)` holds: `sleep.py` refuses
+every wake and `stats.py` holds respawns that fall due. `wolves_lie_low(world)`
+holds from the forced sleep to dawn, so no wolf hunts or arrives that night.
+The constants are `bobgame_rules.clock`. `moon.py` is imported *inside* the
+functions in `sleep.py`, `stats.py` and `state/world.py`, because it imports
+them back.
+
+`WorldClock` (`state/models.py`, `ClockState` in the proto, `viewer_payload`)
+carries `new_moon_tonight`, `next_new_moon_day` (-1 when there is no new moon)
+— both computed in `World.clock` — and `save_tick`, which is 0 except in the
+observation of the one tick a save is taken on, where `observation_service`
+copies it from `TickContext.save_tick`.
+
+### Taking the save
+
+`SaveCoordinator` is built by `WorldServer` (it needs the tick loop's wolf
+simulator). `pending_save_tick()` is non-zero at `night_start +
+NEW_MOON_SAVE_OFFSET` (3) of a new-moon night, when saving is on, the run is
+recorded and the tick is not `SaveSettings.suppress_tick`. `TickLoop.run` asks
+it once per tick *before* the observations: `prepare()` makes
+`saves/tick-<T>/agents/`, the observations go out carrying `save_tick`, then
+`wait_and_write()` polls for one `agents/<entity_id>.json.gz` per non-wolf
+entity and restarts the intent deadline, so the pause costs no thinking time.
+On a timeout it logs `save_abandoned` naming who did not report, renames the
+directory `tick-<T>.abandoned` keeping what is there, and the run carries on: a
+run is never blocked by a save.
+
+The layout is `runs/<run>/saves/tick-<T>/` with `agents/<id>.json.gz`,
+`world.json` (clock, config, entities, wolf RNG state), `objects.jsonl.gz` and
+`complete.json` **last** — a directory without it is not a save. The world's
+two data files are written `.partial` and renamed. Loading refuses an unknown
+`format_version` (`SNAPSHOT_FORMAT_VERSION` = 1) and a map whose sha256 has
+moved; `restore_world` needs an empty world with terrain in it already and
+rebuilds every derived index as objects and entities go back, dead ones
+unplaced.
+
+### Resuming
+
+```bash
+uv run python -m world.server --resume runs/<run>/saves/tick-1234 \
+    --parent-run-id 20260920-030501-hamlet
+```
+
+`cli._resume` calls `bootstrap.load_resume` (read `world.json`, check the map
+hash, load that map, restore into it); the config in the snapshot wins over the
+TOML on disk. The resume gets a **new** run id and run directory, with
+`--parent-run-id` (defaulting to the snapshot's run id) and `resumed_from_tick`
+in the new `meta.json`, and `suppress_tick` set to the resumed tick so it does
+not immediately ask for a save it already has. `run_server` waits for every
+`snapshot.settler_ids()` to connect before the first tick; if they do not, it
+raises `ResumeStartupError` and the CLI exits 1.
 
 ## Conversations and Giving (docs/09_conversation_and_reflex.md)
 

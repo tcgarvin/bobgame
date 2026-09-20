@@ -101,6 +101,9 @@ TickStart(T+1)
 
 ## Directory Structure (Target)
 
+*Historical: this is the layout as originally planned (note the Parquet writer,
+which was never built). For the tree as it is now, see the root `CLAUDE.md`.*
+
 ```
 bobgame/
 ├── docs/                    # Documentation

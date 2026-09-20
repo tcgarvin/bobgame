@@ -22,7 +22,7 @@ code lives, and [../CHANGELOG.md](../CHANGELOG.md) for how it got here.
 | [11_cost_accounting.md](11_cost_accounting.md) | What a run costs: Jev pricing, OpenRouter per-request cost, the cost report |
 | [12_sleep_journal.md](12_sleep_journal.md) | The five-section journal, its triggers, the day log and the history reset |
 | [13_jev_vs_chat_evals.md](13_jev_vs_chat_evals.md) | The intelligence/cost comparison harness between Jev and a chat model |
-| [14_new_moon_and_saves.md](14_new_moon_and_saves.md) | The new moon, saving a world and resuming it (in progress) |
+| [14_new_moon_and_saves.md](14_new_moon_and_saves.md) | The new moon, saving a world at one and resuming a run from it |
 | [terrain_generation_proposal.md](terrain_generation_proposal.md) | The procedural island: noise, hydrology, classification, object placement |
 
 ## Architecture Summary
@@ -42,5 +42,7 @@ Runner ──spawns──► Agents ──gRPC──► World Runtime ──WebS
 
 Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 20+ and npm. Each
 Python component (`world/`, `agents/`, `runner/`, `tools/`) is its own uv
-project; `cd <component> && uv sync` installs it. The viewer is `cd viewer &&
+project; `cd <component> && uv sync` installs it. `rules/` is the shared,
+dependency-free `bobgame_rules` package that `world/`, `agents/` and `tools/`
+pull in as a path dependency. The viewer is `cd viewer &&
 npm install`. Then `./dev.sh`.

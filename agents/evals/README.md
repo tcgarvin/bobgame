@@ -4,7 +4,7 @@ A functional suite that calls the **real** TypeSafe Jev API with hand-built
 states and checks that the answers still mean what they meant last month. It
 exists to catch two things the unit tests cannot see:
 
-- **prompt degradation** — a change to `jevstate.py`, `options.py` or the
+- **prompt degradation** — a change to `jevstate.py`, `options/` or the
   question wording in `jevclient.py` that quietly makes Jev worse;
 - **model-version drift** — `jev-latest` moving under us.
 

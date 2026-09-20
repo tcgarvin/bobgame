@@ -12,7 +12,7 @@ Everything goes through one script. Always run it from the repo root:
 
 ```bash
 cd /home/timg/code/bobgame
-tools/live_run.sh start <seconds>
+tools/live_run.sh start <seconds> [--resume <run_id>[@<tick>]]
 tools/live_run.sh wait-ticks
 tools/live_run.sh status
 tools/live_run.sh wait
@@ -27,7 +27,12 @@ script starts the run detached, and the run stops itself after `<seconds>`.
 ## Inputs you should have been given
 
 - `seconds`: how long to run. If none was given, use 1500 (25 minutes, about
-  700 ticks at 2 s per tick). Never exceed 14400.
+  700 ticks at 2 s per tick). Never exceed 14400. The script takes no scenario
+  argument: there is one scenario, `hamlet`.
+- Optionally, a run to continue: pass `--resume <run_id>[@<tick>]` after the
+  seconds, and only when you were asked to. It continues that run from its
+  newest complete save (or the save at `@<tick>`) in a **new** run directory,
+  so the run id you report is the new one.
 - What to look for. If nothing was given, report the standard numbers below.
 
 Each run spends real money on LLM calls. Start exactly one run per request
@@ -35,7 +40,8 @@ unless you were told to do more. Never restart a run that ended normally.
 
 ## Procedure
 
-1. `tools/live_run.sh start <seconds>`
+1. `tools/live_run.sh start <seconds>` (plus `--resume <run_id>[@<tick>]` if
+   you were asked to continue a run)
    - If it prints `REFUSED: a live run is already active`: run `status`, report
      that a run was already going, and stop. Do not stop someone else's run.
    - If it prints `REFUSED: port ... in use`: the user probably has their own
@@ -44,7 +50,8 @@ unless you were told to do more. Never restart a run that ended normally.
 2. `tools/live_run.sh wait-ticks` (give the Bash call a timeout of 200000 ms).
    It blocks until the world is ticking, at most 3 minutes.
    - `TICKING`: run `tools/live_run.sh status`. Healthy looks like
-     `state: RUNNING`, a `== world: ticks 0..N` line, `agent_processes` equal
+     `state: RUNNING`, a `== world: ticks <first>..<last>` line (`first` is 0,
+     or the save tick on a resumed run), `agent_processes` equal
      to the scenario's settler count (6), and `none` under real errors.
      Agents may take another 30 seconds to appear; that is fine.
    - `NO TICKS AFTER 3 MINUTES` or `ENDED BEFORE TICKING`: go to "When

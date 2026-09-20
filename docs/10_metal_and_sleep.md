@@ -1,10 +1,13 @@
 # 10 - Stations, the metal tier, and sleep
 
-Status: contract. Source of truth for the mechanics below; `world/src/world/items.py`
-and `world/src/world/crafting.py` are the same contract in code, and
-`agents/src/agents/jev_agent/items.py` mirrors it. If they disagree, fix all of
-them in one change. Builds on docs/08 (building) and docs/05 (settlement
-mechanics).
+Status: contract. The numbers and tables below live in one place in code: the
+dependency-free `bobgame_rules` package at the repo root (`rules/`). The world
+(`world/src/world/items.py`, `crafting.py`, `sleep.py`, `stats.py`) and the
+agents (`agents/src/agents/jev_agent/items.py`) both import from it and
+re-export under their own names, so there is nothing to keep in step by hand;
+the viewer reads the same definitions through
+`tools/generate_rules_ts.py`. Change a number in `rules/`. Builds on docs/08
+(building) and docs/05 (settlement mechanics).
 
 Goal: deepen the crafting tree (five levels instead of two), make some work take
 time and a place, give settlers a reason to travel for ore, and add a body clock
@@ -171,7 +174,7 @@ fatigue 20"`.
 settler took ten sleeps of one or two ticks at fatigue 1. `MIN_SLEEP_FATIGUE`
 gates the `SleepIntent` only: collapse still happens at `max_fatigue` whatever
 it says, and Jev's `sleep:` options are withheld below it
-(`agents/.../options.py`, `items.MIN_SLEEP_FATIGUE`).
+(`agents/.../options/`, `items.MIN_SLEEP_FATIGUE`).
 
 **Changed 2026-09-20 (hamlet round 2).** The line used to be food 0 both
 ways. A settler called `sleep` at food 39 and health 2, the world kept him
@@ -215,6 +218,16 @@ happens at most once per sleep. A collapsed sleeper wakes only at fatigue 70 or 
 `damaged`, `hungry`, `bed removed`, `asked`. Falling asleep is
 `("sleep", true, "asleep on <bed id|the ground>")` and collapse is
 `("collapse", true, "collapsed from exhaustion")`.
+
+**The new moon is the one exception**, on both sides. On a new-moon night
+(contract: [docs/14_new_moon_and_saves.md](14_new_moon_and_saves.md), section
+1) the world puts every awake settler to sleep where it stands at
+`night_start_tick`, in a free adjacent bed if there is one and on the ground
+otherwise, regardless of `MIN_SLEEP_FATIGUE` and `HUNGRY_WAKE_FOOD`; it is a
+sleep, not a collapse. For the `NEW_MOON_STILL_TICKS` (6) ticks that follow,
+nothing wakes a sleeper — not rest, damage, hunger or a dismantled bed — and a
+`WakeIntent` is refused with `"new moon"`. After the still window the ordinary
+rules above apply again, so a rested or hungry settler gets up then.
 
 `RestIntent` (the instant 2-health rest on a bed) stays as it is.
 
@@ -279,8 +292,9 @@ site is (1539, 974), and the nearest copper and iron are 187 and 121 tiles away.
 
 ## 6. Agents
 
-- `jev_agent/items.py` mirrors the new kinds, recipes (with station and work),
-  tool tiers and vein tool requirements.
+- `jev_agent/items.py` re-exports the kinds, recipes (with station and work),
+  tool tiers and vein tool requirements from `bobgame_rules`, the same package
+  the world reads, and adds only the agent-side prose around them.
 - Options: craft options are offered when inputs are present and the station is
   adjacent; extraction of veins only with an acceptable tool; `sleep` on the
   ground and on an adjacent bed (offered whenever fatigue > 0, with the

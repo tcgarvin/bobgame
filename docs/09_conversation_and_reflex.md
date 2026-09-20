@@ -38,7 +38,7 @@ extracted, and is recorded and replayed like any other object.
 | `passes` | consecutive passes (explicit or timed out); a `speak` resets it |
 | `transcript` | JSON list of the last 12 `{"tick": int, "speaker": str, "text": str}`; the opening line is entry 0 |
 
-### 2.2 Constants (`world/src/world/items.py`, mirrored in `agents/.../items.py`)
+### 2.2 Constants (`bobgame_rules.social`, re-exported by `world/.../items.py` and `agents/.../items.py`)
 
 | name | value | meaning |
 |---|---|---|
@@ -89,6 +89,13 @@ failure carries the reason.
    - every current participant has passed in a row (a full round of passes);
    - `utterances` reached `CONVERSATION_MAX_UTTERANCES`;
    - it has had only its opener for `CONVERSATION_LONELY_TICKS`.
+
+   The world's own reasons, as `_closing_reason` returns them, are `empty`,
+   `alone`, `utterance_cap`, `all_passed` and `nobody_joined`. There is one
+   more, from outside the lifecycle: on a new-moon night
+   ([docs/14](14_new_moon_and_saves.md), section 1) `moon.apply_new_moon`
+   closes **every** open conversation with the reason `new_moon` on the tick
+   everyone falls asleep.
 5. Conflicts: two `open` intents for the same anchor in one tick, or more
    `join` intents than free seats, are resolved by lexicographic entity id like
    every other conflict.
@@ -196,8 +203,14 @@ reported to the viewer through the existing status channel.
   anything, it wants to keep from the conversation. A non-empty answer is
   appended to `memory.md` as `- [conversation, tick N, with a, b] <text>`.
 - **Conversation report** (returned to the planner): id, ticks, participants,
-  why it ended for this actor (`closed`, `left`, `removed`, `died`, `nobody
-  joined`), the transcript, items given and received, and the note written.
+  why it ended for this actor, the transcript, items given and received, and
+  the note written. The end reasons are the `END_*` constants in
+  `agents/.../conversation/protocol.py`: `closed`, `left`, `removed`, `died`,
+  `nobody joined`, plus `asleep` and `new_moon` — the actor fell asleep with a
+  seat, so the session ends there, the second when the new moon put everyone to
+  sleep and closed every conversation on the same tick (docs/14). Those two
+  carry a sentence of physics into the report (`SLEEP_END_TEXT`), and
+  `sleep_end_reason(model)` picks between them from the clock.
 - **Trace**: `agents/agent-<id>/conversations.jsonl.gz` with events
   `conversation_start`, `turn` (prompt, move, latency, and `note` `stale` for a
   dropped call, with `cancelled` when it was still running), `conversation_end`
@@ -315,7 +328,9 @@ turn order, leaving or closing changes.
 
 ### 9.3 Agent side
 
-- `items.py` mirrors `ACTION_HAIL`, `ACTION_HAILED` and `HAIL_COOLDOWN_TICKS`.
+- `agents/.../items.py` re-exports `ACTION_HAIL`, `ACTION_HAILED` and
+  `HAIL_COOLDOWN_TICKS` from `bobgame_rules.social`, the same definitions the
+  world enforces.
 - `joined_conversation` accepts `hail` and `hailed` as seat-taking actions, and
   `UNASKED_VIA = (VIA_HAILED,)` is what `JevAgent._detect_join`
   treats as a seat the actor did not ask for: the in-flight and queued
@@ -332,9 +347,10 @@ turn order, leaving or closing changes.
   the world's reason verbatim plus where the settler was last seen.
 - Planner tool `start_stint(..., hails=[{"settler": "dov", "line": "Dov, can
   we split the wall work?"}])`. **Brief hails**, added 2026-09-19:
-  `Brief.hails: tuple[BriefHail, ...]` (`BriefHail(settler, line)` lives in
-  `options.py`, beside `TravelState`, because `options.py` cannot import
-  `stint.py`). At most `MAX_BRIEF_HAILS` (3) per brief; each `line` is at most
+  `Brief.hails: tuple[BriefHail, ...]` (`BriefHail(settler, line, purpose)`
+  lives in `briefs.py`, beside `Option` and `TravelState`: the shared
+  vocabulary the `options/`, `stint/`, `planner/` and `agent/` packages all
+  import, which imports none of them). At most `MAX_BRIEF_HAILS` (3) per brief; each `line` is at most
   `CONVERSATION_TEXT_LIMIT` characters; each `settler` must be one this actor
   has seen and must not be itself. `_validated_hails` raises `ModelRetry`
   naming who it has met. `ReflexBrief` has no hails. The payload and the trace
@@ -422,9 +438,9 @@ a pure `details`-string change; `action_type` stays `"say"` for every channel,
 or the viewer parsed the old `"local"`/`"shout"` value, so nothing else needed
 to change for backward compatibility.
 
-Agent side, `planner.py`'s `shout` tool (and, until 2026-09-19, `say`) no
-longer returns the world's
-`"<description> -> say ok: heard: <ids>"` verbatim: `_speak_result` rewrites it
+Agent side, the `shout` tool (`planner/tools/talking.py`; and, until
+2026-09-19, `say`) no longer returns the world's
+`"<description> -> say ok: heard: <ids>"` verbatim: `speak_result` rewrites it
 to `"said to cleo, finn (within 10 tiles)"` / `"shouted to cleo, finn (within
 60 tiles)"`, or `"nobody was within <radius> tiles to hear it"` when the id
 list is empty. Anything that is not that exact successful shape (a failure, an
@@ -433,7 +449,7 @@ list is empty. Anything that is not that exact successful shape (a failure, an
 ### 10.4 Board unread tracking
 
 `ObjectInfo.notes()` drops empty slots, so its list index was never the real
-slot number; `notes_by_slot()` (`worldmodel.py`) parses the same `notes` JSON
+slot number; `notes_by_slot()` (`worldmodel/types.py`) parses the same `notes` JSON
 into `{slot: note}` so read-tracking survives other slots filling or emptying.
 `WorldModel` keeps two independent per-board `{slot: tick}` maps:
 
@@ -450,7 +466,7 @@ into `{slot: note}` so read-tracking survives other slots filling or emptying.
   `TickDigest.board_notes`, exactly the way `sign_notes` already worked. This
   is independent of the read map: it fires by being in view, once per
   `(board, slot, tick)`, whether or not the note has since been read.
-  `agent.py`'s `_handle_tick` drains `digest.board_notes` through
+  `JevAgent._handle_tick` (`agent/core.py`) drains `digest.board_notes` through
   `_note_for_planner`, the same path as a sign note, so it reaches the next
   tool result, the next turn prompt and the journal's `DayLog`.
 
@@ -470,7 +486,8 @@ day.
 
 ### 11.1 Asleep settlers are visible, and cannot be hailed
 
-`describe_world`'s "entities in view" line and `_roster_lines` (`planner.py`)
+`describe_world`'s "entities in view" line and `_roster_lines`
+(`planner/describe.py`)
 now print `asleep` for a living settler seen asleep, and `dead` (unchanged)
 takes priority over it; the roster line reads `asleep as of <when>`. `talk_to`
 refuses at once, without walking, when the target is in view and already
@@ -483,8 +500,8 @@ sleeping settler cannot be hailed at all.
 
 Both tools now check, from what the actor has itself observed, whether the
 named object is the kind they write to; a mismatch is refused with what the
-object actually is and the right tool's name (`_refuse_wrong_note_target`,
-`planner.py`), before any intent is submitted. This is a planner-side
+object actually is and the right tool's name (`wrong_note_target`,
+`actions.py`), before any intent is submitted. This is a planner-side
 guardrail: `write_sign` always writes `WriteNoteIntent` slot 0, which is a
 message board's own first note slot, so calling it on a board silently
 overwrote that slot with a blank-titled note. The world side was already
@@ -505,7 +522,7 @@ pydantic-ai's own validation-error text names only the field that was wrong
 (e.g. "Extra inputs are not permitted"), never what the tool actually takes,
 so a model that guessed a parameter name (`sleep(bed_object_id=...)` for the
 renamed `sleep(bed=...)`) got no way to self-correct and could burn every
-retry. `BudgetedToolset.get_tools` (`planner.py`) wraps every tool's
+retry. `BudgetedToolset.get_tools` (`planner/toolset.py`) wraps every tool's
 `args_validator` in `_FriendlyArgsValidator`, which catches a
 `pydantic.ValidationError` and re-raises it as a `ModelRetry` with a
 `_tool_signature_line` appended (`"<tool> takes: a, b (optional)"`) — the one
@@ -530,7 +547,7 @@ raised retry count this should now be rare.
 `talk_to` and `open_conversation` both gain a required `purpose` argument:
 "what you want out of this conversation; only you see it; it is handed to you
 while you are in the conversation." A hail Jev makes from the brief can carry
-one too: `BriefHail` (`options.py`) gains an optional `purpose`, so
+one too: `BriefHail` (`briefs.py`) gains an optional `purpose`, so
 `start_stint(..., hails=[{"settler": "dov", "line": "...", "purpose": "..."}])`
 flows it the same way. A settler that was hailed, or that only joined, has no
 purpose — only the settler that opened or hailed sees one.

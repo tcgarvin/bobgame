@@ -14,7 +14,8 @@ were written in.
 ticks between spawn attempts. It generates the 4000x4000 island (seed 12345)
 into `saves/island.npz` when the save is missing. `./dev.sh` with no argument
 runs it and a missing config is now an error rather than a silent fallback.
-`tools/live_run.sh start <seconds>` takes no config. The `settlement`,
+`tools/live_run.sh start <seconds> [--resume <run_id>]` takes no config. The
+`settlement`,
 `settlement_peaceful`, `island`, `island_small`, `foraging` and `default`
 configs were deleted, and so were `agents/src/agents/random_agent.py`
 (SimpleAgent / RandomAgent) and `python -m agents`; the runner has no built-in
@@ -45,14 +46,89 @@ ticks and one read of each agent trace. Recordings that still use the old
 `hunger` key classify starvation correctly. The legacy flat `logs/` layout is
 no longer read.
 
-**New moon and saving** (docs/14_new_moon_and_saves.md): `WorldClock` gained
-`new_moon_tonight`, `next_new_moon_day` and `save_tick`. In progress on this
-branch.
-
 **Documentation restructured.** The dated "update" paragraphs and
 "<scenario>-run fixes, round N" narratives moved out of `CLAUDE.md`,
 `world/CLAUDE.md` and `agents/CLAUDE.md` into this file; those files now
 describe the system as it is.
+
+**World simplification.** `mechanics.py` is the intent registry: one `Mechanic`
+row per intent (model, `action_type`, proto oneof field, converter, phase),
+declared in phase order, and `INTENT_ACTION_TYPES`, `intent_from_proto` and
+`tick.process_tick`'s phase walk all derive from it — adding an intent is one
+row plus one proto field. `events.commit_object` replaced ten hand-rolled
+`ObjectChange` emissions, `objstate.py` is the one JSON-in-object-state codec,
+`collect` and `eat` write `events.acted` like every other mechanic, the
+observation service's events are table-driven, and bug-hiding broad excepts were
+narrowed. `say` moved to `speech.py`. `server.py` split into `server.py` /
+`bootstrap.py` (`ServerSettings`) / `cli.py`, and `state.py` into `state/`
+(`models.py`, `world.py`) — both re-export their old names. `FloorType.code` is
+the single source of the floor codes, tested against the viewer.
+
+**`rules/`: one dependency-free source for the game's constants.** A new uv
+project, `bobgame_rules` (items, recipes, entities, body, clock, social,
+terrain), which `world/`, `agents/` and `tools/` depend on by path and
+re-export under their existing names, and which
+`tools/generate_rules_ts.py` renders into `viewer/src/generated/rules.ts`
+(tests fail on a stale file or an object kind with no sprite). Nothing is
+mirrored by hand any more. Pulling the four copies together found exactly one
+real drift: the agents computed `night_start_tick` in floats where the world
+used integer arithmetic; there is now one integer formula.
+
+**Agents simplification.** `briefs.py` and `bridge.py` hold the vocabulary the
+layers share, and `tests/test_layering.py` parses the imports and keeps the
+package acyclic (packages count as one unit, with an `INTRA_ORDER` for their
+own submodules). `walk.py` replaced five A*-and-stop-adjacent walkers with one
+`WalkDriver`; `recipes.py` owns craftability, descriptions, sources and the
+recipe chain; `actions.py` holds one precondition and one intent constructor
+per action kind for both layers, with an `EXPOSURE` table (tested against the
+real Jev option keys and planner tool names) writing down which layer may take
+which kind and why; `outcomes.ActionOutcome` replaced re-parsing rendered
+result strings, with one parser per world detail shape. `jev_agent/items.py`
+keeps only prompt prose and planner-side thresholds. The six biggest modules
+became packages under their old import names — `planner/`, `agent/`,
+`worldmodel/`, `options/`, `conversation/`, `stint/` — and the tests were split
+to mirror them. `JevAgent` was deliberately **not** split: it stays one class in
+`agent/core.py` (~1450 lines), because its per-tick priority order belongs in
+one place and the sleep transition, the drain and the conversation phase each
+touch a dozen of its fields.
+
+**Behaviour changed on purpose**, as a result of the one-rule-per-action work:
+the planner's `shout` now obeys the same cooldown (8 ticks) and 120-character
+cut as Jev's (it used to ignore the cooldown and cut at 200); its `sleep`
+refuses a body below `MIN_SLEEP_FATIGUE` up front, stating the number, instead
+of spending a tick on the world's refusal; `pickup`, `deposit`, `withdraw`,
+`drop`, `give`, `dismantle`, `place` and `talk_to` all refuse before a tick is
+spent, naming the fact (the pile it is not standing on, the chest out of reach,
+the item the pack does not hold, the occupant of the tile); `place` no longer
+crafts a piece it cannot place; and a brief hail line can no longer skip the
+conversation text limit, because there is one `converse_intent` constructor.
+The world's `meta.json` `run_id` now matches the run directory `dev.sh` made
+(`$BOBGAME_RUN_ID` when set).
+
+**New moon, saving and resuming** (docs/14_new_moon_and_saves.md) — done, and
+verified live on 2026-09-20. Every third night in `hamlet`
+(`new_moon_every_days`) every settler falls asleep at nightfall where it
+stands, conversations close with reason `new_moon`, wolves lie low until dawn
+and nothing wakes a sleeper for six ticks. Three ticks into that still window
+the world pauses, each settler writes its own snapshot, and the world writes
+`runs/<run>/saves/tick-<T>/` with `complete.json` last; a save that times out
+is renamed `.abandoned` and the run carries on. `./dev.sh --resume
+<run_id>[@<tick>]` starts a new run directory whose `meta.json` carries
+`parent_run_id` and `resumed_from_tick`, the world with `--resume <save dir>`
+and every agent with `--resume-from <save dir>`. The live save took about a
+minute with all six settlers mid-stint, and the resumed run woke everyone into
+journal-fed first turns.
+
+It also found a bug: a settler inside the planner's multi-phase `build` tool
+kept queueing work after it had fallen asleep, because `build`'s own Python
+loop went on calling the bridge after the drain had swept the queues. The
+queued stint sat there all night, `drained()` answered "a stint is queued" and
+the save was abandoned. Fixed by refusing requests while the body is inactive:
+`run_stint`, `direct_action`, `wait_ticks` and `await_conversation` all check
+`JevAgent.inactive_reason()` (`asleep`, `new_moon`, `death`) and return a
+finished zero-tick `StintReport` carrying the reason, which breaks every such
+loop. Falling asleep now also ends any stint, reflex stint and conversation
+seat, where a stint used to be suspended until morning.
 
 ---
 

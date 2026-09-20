@@ -56,7 +56,7 @@ uv run python -m agents.jev_agent --entity ada --server localhost:50051
 ```
 
 Flags: `--log-root`, `--planner-model`, `--jev-model`, `--journal-model`,
-`--settlers`, `--log-level`. Logs go to stderr; the trace files go under
+`--settlers`, `--resume-from`, `--log-level`. Logs go to stderr; the trace files go under
 `<log_root>/agent-<id>/`.
 
 `--settlers N` (default `items.DEFAULT_SETTLER_COUNT`, 12) is how many settlers
@@ -91,7 +91,9 @@ the journal at any tick - docs/12),
 `tool_call` and `tool_result` with untruncated args and results, `turn_end` with
 the reflection, tool count, duration and token usage, plus `turn_failed`,
 `tool_budget_spent` (the soft 20-call budget ran out and the turn ended
-normally), `tool_budget_reached` (the hard backstop fired) and `history_reset`. `conversations.jsonl.gz` holds one
+normally), `tool_budget_reached` (the hard backstop fired), `history_reset` and the save
+events `save_written`, `save_skipped` (with the reason the settler never
+drained) and `save_failed` (docs/14). `conversations.jsonl.gz` holds one
 conversation per `conversation_start`/`turn`/`conversation_end` triple.
 `memory.md`, the settler's journal (five sections it rewrites itself at the end
 of every day, plus today's notes - docs/12_sleep_journal.md), and
@@ -137,16 +139,19 @@ in function-local imports at the call sites.
 The six biggest modules are packages under their old import names, so
 `from agents.jev_agent.planner import Planner` still works. **Patch the module
 that owns a constant, never the re-export in a package's `__init__.py`**:
-`planner.toolset` (`MAX_TOOL_CALLS_PER_TURN`, `HARD_LIMIT_MARGIN`),
-`planner.turn` (`TURN_RETRY_SECONDS`), `planner.tools.building`
-(`BUILD_RESUPPLY_ROUNDS`), `stint.runner` (`JEV_TICK_BUDGET_SECONDS`).
+`planner.common` (`MAX_TOOL_CALLS_PER_TURN`), `planner.toolset`
+(`HARD_LIMIT_MARGIN`, `PLANNER_TOOL_RETRIES`), `planner.turn`
+(`TURN_RETRY_SECONDS`), `planner.tools.building` (`BUILD_RESUPPLY_ROUNDS`),
+`stint.endings` (`JEV_TICK_BUDGET_SECONDS`), `agent.modes`
+(`PLANNER_POLL_SECONDS`, `SUBMIT_MARGIN_MS`, `MAX_PLANNER_WAIT_MS`),
+`agent.saving` (`DEFAULT_SAVE_WAIT_SECONDS`).
 
 | Module | Responsibility |
 | --- | --- |
 | `client.py` | Async wrapper over the sync gRPC stubs (stream on a thread, unary via `to_thread`), lease renewal every 10 s |
 | `geometry.py` | Direction tables, offsets, Chebyshev distance (`+y` is south) |
 | `items.py` | The agent's view of `bobgame_rules` (re-exported under the names agent code uses), plus the agent-side prose and thresholds built on it |
-| `outcomes.py` | The world's answer to one intent as data: the frozen `ActionOutcome` (`ok`, `action`, `detail`, `not_run`, and the one `text()` rendering), and one parser per world detail shape (`placed_object_id`, `heard_ids`, `parse_gave`, `parse_craft_progress`, `parse_seat`). No dependencies at all, so `worldmodel.py` and the planner both use it |
+| `outcomes.py` | The world's answer to one intent as data: the frozen `ActionOutcome` (`ok`, `action`, `detail`, `not_run`, and the one `text()` rendering), and one parser per world detail shape (`placed_object_id`, `heard_ids`, `parse_gave`, `parse_craft_progress`, `parse_seat`). No dependencies at all, so `worldmodel/` and the planner both use it |
 | `build.py` | Shape geometry and the `BuildExecutor` that drives the planner's `build` tool |
 | `pathfinding.py` | 8-connected A* with the world's diagonal-blocking rule; unknown tiles cost 3 |
 | `walk.py` | The one set of walking primitives — stand candidates, next step with stop-adjacent, the arrival test, the backstop tick budget — and `WalkDriver`, the code driver every code-owned walk uses |
@@ -155,7 +160,7 @@ that owns a constant, never the re-export in a package's `__init__.py`**:
 | `bridge.py` | `AgentBridge`, the protocol the planner needs from the tick loop; `JevAgent` implements it. `direct_action` returns an `outcomes.ActionOutcome`, not a sentence |
 | `actions.py` | Preconditions and intent construction both layers share: an `Attempt` is either the intent to submit or the sentence saying why not. One `*_attempt` per action kind (shout, sleep, eat, collect-here, extract, dismantle, place, pickup, drop, deposit, withdraw, hail, join, give, write note, write sign), the placement helpers (`can_place_ground`, `can_place_structure`, `place_failure_lines`) and the `EXPOSURE` table saying which layer may take which kind |
 | `recipes.py` | Everything both layers do with the recipe table: `craftable_now`, the option's craft description, the recipe-chain crafting loop (`craft_chain`, `craft_once`, `stock_one`, `CraftTally`) and the "where does this raw material come from" lines |
-| `enclosure.py` | Seals, rooms, the enclosed fact and the actor's own pieces: the flood fills `build.py`, `options.py`, `planner.py` and `jevstate.py` share |
+| `enclosure.py` | Seals, rooms, the enclosed fact and the actor's own pieces: the flood fills `build.py`, `options/`, `planner/` and `jevstate.py` share |
 | `options/` | The legal actions for this tick, each carrying its proto Intent; walking is `step_towards:<target>` with a per-type quota (`STEP_GROUPS`), and `OPTION_SECTIONS` fixes what gets truncated first. Preconditions and intents come from `actions.py`, `recipes.py` and `walk.py`. `common` (constants), then one module per section (`steps`, `survival`, `social`, `interaction`, `crafting`), then `base`, which assembles the tick's list |
 | `jevstate.py` | The compact JSON state (17x17 ASCII map, one `facts` list, the `so_far` block, a `nearby` list of only what the map cannot say) Jev sees |
 | `jevclient.py` | The TypeSafe System One call; `JevClient` protocol for fakes |
@@ -168,6 +173,7 @@ that owns a constant, never the re-export in a package's `__init__.py`**:
 | `journal.py` | The sleep-time journal: sections, token cap, the day log and the writer (docs/12) |
 | `planner/` | The pydantic-ai agent, its tools and the turn loop: `common`, `prompt` (the system prompt), `status` (the clock line and the `!!` alerts), `validation` (what a bad tool argument is told), `describe` (`look`), `toolset` (the budget and the wrapper), `tools/` (`core`, `building`, `body`, `items_tools`, `signs`, `talking`, `reflex_tools`, `memory`, `common`), `factory` (the registration order the model sees) and `turn` (the `Planner` loop) |
 | `agent/` | The tick loop and the planner handshake: `modes` (the `Mode` str-enum, the loop's timings and the transition table), `sleeping` (the world's sleep wording, `SleepRecord`, the parked `sleep` tools), `saving` (`DrainState` and where a snapshot goes), `requests` (what a planner tool hands the loop), `status` (the viewer's status line) and `core` (`JevAgent`, one class: its per-tick priority order stays in one place, and the sleep transition, the drain and the conversation phase each reach a dozen of its fields) |
+| `snapshot.py` | One settler's state written at a save tick and read back on a resume (docs/14): the versioned `AgentSnapshot` (world model, planner, cost ledger, reflex watch, `SleepSnapshot`, the two note queues), `capture`/`restore`, `write_snapshot`/`read_snapshot` (gzip JSON through a `.partial` rename, `SNAPSHOT_FORMAT_VERSION` refused rather than guessed at) and `snapshot_path` |
 
 ### The four modes
 
@@ -191,7 +197,7 @@ on the status channel.
 Jev and the planner never run at the same time: during a stint the planner task
 is parked on the `start_stint` future, and during planning Jev is not called.
 
-`agent.py` is only the sequencer. It checks the reflex trigger at the very top
+`agent/core.py` is only the sequencer. It checks the reflex trigger at the very top
 of the tick (before the last tick's single-tick action is resolved, so an
 in-flight one comes back as `interrupted: reflex stint started`), then runs the
 reflex stint, then the conversation session, then the ordinary stint or
@@ -220,7 +226,7 @@ brief itself is in every turn prompt. `stint_start` lines carry `kind`
 ### Conversations (docs/09 sections 2, 3 and 4.3)
 
 A conversation is a world object of type `conversation` on an anchor tile;
-`worldmodel.py` parses it into `ConversationInfo` and `my_conversation()`
+`worldmodel/` parses it into `ConversationInfo` and `my_conversation()`
 returns the seat this actor holds. Utterances carrying a `conversation_id` are
 kept per conversation (`heard_conversation_lines`), because the object only
 keeps the last twelve lines; the object's transcript is the fallback for lines
@@ -291,8 +297,8 @@ its last conversation ended.
 `_validated_hails` refuses a settler this actor has not met (naming who it
 has), itself, a blank pair and a line over `CONVERSATION_TEXT_LIMIT`, each as a
 `ModelRetry`; `ReflexBrief` has none. `Brief.hails` is a tuple of
-`briefs.BriefHail(settler, line)`; `briefs.py` is below both `options.py` and
-`stint.py`, so both can name it. `options.py` offers `hail:<settler>` in
+`briefs.BriefHail(settler, line)`; `briefs.py` is below both `options/` and
+`stint/`, so both can name it. `options/` offers `hail:<settler>` in
 its own `OPTION_SECTIONS` entry (`hail`, between `survival` and
 `conversation`, so truncation cannot drop it): the hail intent next to the
 settler, otherwise a code-owned `stop_adjacent` walk, and never while this
@@ -339,7 +345,8 @@ Facts that live only here; the runs that produced them are in
   Jev `done` ticks. It otherwise ends on `no_path`, a danger stop or a food
   stop; `walk.tick_budget(model, target)` is only a backstop (`path_length *
   TICKS_PER_STEP (2) + TICK_ALLOWANCE (20)`, clamped to `MIN_TICKS` (30) ..
-  `MAX_TICKS` (600); the old `TRAVEL_*` names in `planner.py` are aliases).
+  `MAX_TICKS` (600); `planner/__init__.py` re-exports the old `TRAVEL_*`
+  names as aliases).
   When the destination is known and unwalkable, `walk.plan_step(...,
   retry_adjacent=True)` routes to a free neighbour instead of failing, so a
   step option and `keep_going` both survive it.
@@ -349,8 +356,9 @@ Facts that live only here; the runs that produced them are in
   station on or next to the tile. `build` stocks up before its first stint and
   again on every `BUILD_OUT_OF_ITEMS` (at most `BUILD_CRAFT_LIMIT` (20) pieces
   over `BUILD_RESUPPLY_ROUNDS` (3) rounds, never walking to a station), `place`
-  crafts one piece (`_stock_one_to_place`) and `place_sign` crafts its own sign
-  from 2 wood. The crafting ticks come out of the tool's own `max_ticks`.
+  crafts one piece (`recipes.stock_one`) — but only after `actions.place_attempt`
+  has allowed the placement, so it no longer makes a piece it cannot put down —
+  and `place_sign` crafts its own sign from 2 wood. The crafting ticks come out of the tool's own `max_ticks`.
 - **`eat` with an empty pack** submits nothing and spends no tick: if a bush on
   the actor's own tile has a berry it collects and eats it, reporting both
   actions; otherwise it names the nearest known bushes that had one.
@@ -369,7 +377,7 @@ Facts that live only here; the runs that produced them are in
   stuff wants fresh water. `items.habitat_table_text()` is the narrative's
   "Where things are found" list — the one statement of each rule.
 - **Enclosure geometry.** `enclosure.py` holds one set of flood fills shared by
-  `build.py`, `options.py`, `planner.py` and `jevstate.py`:
+  `build.py`, `options/`, `planner/` and `jevstate.py`:
   - `BuildExecutor.geometry_lines(model)` (kept apart from `summary()`, which
     the `StintDriver` protocol says takes nothing) appends `the walls here now
     enclose N interior tile(s) spanning WxH; doors: D; gaps: G; you are
@@ -377,7 +385,7 @@ Facts that live only here; the runs that produced them are in
     (x, y), ...`, from a 4-connected room fill, and lists what stands inside.
     A closed ring with no door and no gap adds `the interior has no entrance`.
     Only walls and doors bound a room; roads, floors and beds say nothing.
-  - `options._place_options` skips a structure placement where
+  - `options.crafting._place_options` skips a structure placement where
     `enclosure.would_seal` leaves the actor fewer than `SEAL_MIN_FREE_TILES`
     (64) reachable tiles; a door is passable to settlers, so placing one is
     never a seal. `build_would_seal_you_in` names the tiles it refused, and a
@@ -400,10 +408,11 @@ Facts that live only here; the runs that produced them are in
   the body is not beside one. `options` offers a greedy fallback step *only*
   for a destination `model.is_known` has never seen; a known tile with no route
   gets no option at all.
-- **Interrupted calls are free.** `stint.was_interrupted` spots a result of the
+- **Interrupted calls are free.** `briefs.was_interrupted` spots a result of the
   form `<what> -> interrupted: ...` and `BudgetedToolset.call_tool` refunds the
   call. `INTERRUPTED_BY_REFLEX`, `INTERRUPTED_BY_CONVERSATION` and
-  `conversation_interruption` live in `stint.py` so `planner.py` can see them.
+  `conversation_interruption` live in `briefs.py` (re-exported by `stint/`) so
+  the planner can see them.
   The first interrupted result does *not* carry the conversation report — that
   would block a single-tick tool on the whole conversation; it arrives as a
   note in the next tool result.
@@ -443,8 +452,8 @@ Facts that live only here; the runs that produced them are in
   tiles off, and `place` the occupant of the tile and the free sides — each
   before a tick is spent. `actions.EXPOSURE` writes the deliberate
   asymmetries down with their reasons (Jev gets no `dismantle`, `place_sign`,
-  `write_*` or `build`; the planner no `move`, `attack`, `extract` or
-  `collect`), and `tests/test_actions.py` checks it against the real option
+  `write_*`, `build`, `drop`, `give`, `open_conversation` or `travel_to`; the
+  planner no `move`, `attack`, `extract` or `collect`), and `tests/test_actions.py` checks it against the real option
   keys and the real tool names.
 - **A bad kwarg never fails a turn.** `BudgetedToolset.get_tools` wraps every
   tool's argument validator (`_FriendlyArgsValidator`) so a bad call's retry
@@ -505,22 +514,69 @@ a recorded `jev_states.jsonl.gz`.
 sleep-recovery numbers come with them. `recipe_table_text()` renders the
 station and the action count, and the planner prompt is generated from it.
 
-`options.py` offers a craft only when the recipe's station is on or next to the
+`options/` offers a craft only when the recipe's station is on or next to the
 tile, names the work and the progress banked in the station under this actor's
 name, refuses a vein the wielded tool cannot bite, and offers `sleep:<bed>`,
 `sleep:ground` (whenever fatigue > 0) and `wake` (only while asleep).
 `jevstate.py` adds `self.fatigue`, `self.asleep`, the `clock` block and the
 fatigue physics line.
 
-**The asleep wait**: while `observation.self.asleep` is true `agent.py` submits
-nothing, and calls neither Jev nor the planner nor the converser - the one
-exception is a `wake` the planner queued, which is the only intent the world
-accepts from a sleeper. The reflex cannot fire while asleep; the tick the actor
-wakes is an ordinary tick, so a bite that woke it triggers the reflex there.
-Falling asleep and waking are written to `stints.jsonl.gz` as `sleep_start` and
-`sleep_end` (with the wake reason). The planner's `sleep` tool parks on
-`JevAgent.await_wake` until then; `craft` repeats the craft action until the
-recipe completes or an action fails.
+**Falling asleep ends everything**: `JevAgent._drain_for_sleep`
+(`agent/core.py`, on the tick `_note_sleep_transitions` sees the body go down)
+answers the in-flight single-tick action, refuses the queued ones, and finishes
+the stint, the reflex stint and the conversation seat, each reported to the
+planner as usual. The end reason is `asleep`, or `new_moon` on the night the
+world puts everyone down (`stint.endings.END_ASLEEP`/`END_NEW_MOON`; the seat's
+are `conversation.protocol.END_ASLEEP`/`END_NEW_MOON`). It runs once per sleep
+(`_drained_this_sleep`), then `end_turn_now` ends the turn and the journal
+rewrite starts. Everything that arrives *after* that sweep — a multi-phase
+tool's next call — is refused up front by `inactive_reason()` rather than
+queued (see "Requests a sleeping, collapsed or dead body makes" above).
+
+While `observation.self.asleep` is true `_sleeping_tick` submits nothing and
+calls neither Jev nor the planner nor the converser - the one exception is a
+`wake` the planner queued, which is the only intent the world accepts from a
+sleeper. The reflex cannot fire while asleep; the tick the actor wakes is an
+ordinary tick, so a bite that woke it triggers the reflex there. Falling asleep
+and waking are written to `stints.jsonl.gz` as `sleep_start` and `sleep_end`
+(with the wake reason). The planner's `sleep` tool parks on
+`JevAgent.await_wake` until then - the deliberate exception to both the refusal
+and to `drained()`; `craft` repeats the craft action until the recipe completes
+or an action fails.
+
+### Saving and resuming (docs/14_new_moon_and_saves.md)
+
+On a new-moon night the world puts everyone to sleep, pauses and waits for one
+snapshot file per settler.
+
+- **The trigger.** `WorldClock.save_tick` rides on every observation;
+  `_handle_tick` calls `JevAgent._maybe_save(tick)` on the tick whose clock
+  carries `save_tick == tick`. Blocking the tick loop there costs nothing,
+  because the world is waiting; lease renewal is its own task.
+- **Drained or nothing.** `JevAgent.drained() -> DrainState`
+  (`agent/saving.py`: `drained` plus the `reason` it is not) says the body is
+  asleep or dead with no stint, held report, queued request, seat, closing note,
+  journal rewrite, in-flight action or unfinished planner turn. `_maybe_save`
+  polls it every `SAVE_POLL_SECONDS` (0.1) up to `save_wait_seconds()` —
+  `BOBGAME_SAVE_WAIT_SECONDS`, what the world was configured with minus its
+  margin, default 170 s — and a settler that never drains writes *nothing*
+  rather than a partial truth, tracing `save_skipped` with the reason. A `sleep`
+  tool parked on `await_wake` is deliberately not counted as busy.
+- **The file.** `snapshot.py`: `capture(agent)` builds the versioned
+  `AgentSnapshot` (world model, planner, cost ledger, reflex watch,
+  `SleepSnapshot`, and both note queues, *read* not drained because the run goes
+  on), `write_snapshot` writes gzip JSON through a `.partial` rename to
+  `snapshot_path(save_dir, entity_id)` =
+  `<run dir>/saves/tick-<T>/agents/<id>.json.gz`. `memory.md` and `reflex.json`
+  are copied by `dev.sh`, not carried here.
+- **The resume.** `python -m agents.jev_agent --resume-from <save dir>` (the
+  flag must name a directory) makes `run_agent` call
+  `restore(agent, read_snapshot(...))` *before* connecting; `read_snapshot`
+  refuses another settler's file or another `SNAPSHOT_FORMAT_VERSION` instead
+  of guessing. The world then re-delivers the snapshot's own tick:
+  `WorldModel.update` sees `observation.tick_id == last_observed_tick`, refreshes
+  the picture of the world and returns an empty digest marked `repeated`, so the
+  tick's events, deaths, respawns and sleeps are not lived through twice.
 
 ### The journal (docs/12_sleep_journal.md)
 
@@ -546,7 +602,7 @@ building kinds, and what `reeds` and `clay_deposit` yield. They are the same
 objects the world enforces (see "Game rules live in `rules/`" below), so there
 is nothing to copy.
 
-What Jev may choose (`options.py`):
+What Jev may choose (`options/`):
 
 - **craft** only when the recipe would actually succeed: the inputs are in the
   pack and, for a station recipe, `WorldModel.station_near(kind)` finds a
@@ -625,13 +681,13 @@ A sign is a placed object carrying one line (`text`, `author`, `tick`). The
 agent side owns the *read guarantee*: `WorldModel._read_signs_in_view` keeps
 `sign_texts_read` (sign id -> the text this actor was shown) and puts one
 formatted line per newly-seen or newly-changed sign on `TickDigest.sign_notes`.
-`agent.py` pushes each through `_note_for_planner`, so it reaches the next tool
+`agent/core.py` pushes each through `_note_for_planner`, so it reaches the next tool
 result, the next turn prompt and the journal's `DayLog` exactly as a reflex line
 does, and `Stint._absorb` also folds them into the stint's `notable` list. The
 actor's own signs are recorded as read without a note.
 
 `jevstate.py` draws a sign as `S` and puts its `text` and `written_by` in
-`nearby`; `options.py` gives it a `step_towards` quota group but excludes it
+`nearby`; `options/` gives it a `step_towards` quota group but excludes it
 from `JEV_PLACEABLE_KINDS`, because Jev cannot write and a blank sign is
 useless. The planner has `place_sign(direction, text)` (place, then write; the
 sign id is read back out of the world's `placed <id> at ...` detail) and

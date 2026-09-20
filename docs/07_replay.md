@@ -29,7 +29,7 @@ Parquet export for analysis can be added as a tool later.
 ## Run identity and directory layout
 
 A **run id** is `YYYYMMDD-HHMMSS-<config>` in local time, e.g.
-`20260917-143000-settlement`. `dev.sh` creates it and exports two environment
+`20260917-143000-hamlet`. `dev.sh` creates it and exports two environment
 variables that every process inherits:
 
 | variable | value |
@@ -56,7 +56,44 @@ runs/<run_id>/
       jev_states.jsonl.gz         # the exact state + criteria sent to Jev, per call (heavy)
       planner.jsonl.gz            # planner turns: prompt, tool calls, results, reflection
       memory.md                   # the planner's persistent notes (plain text, as today)
+  saves/                          # only when the run takes new-moon saves (docs/14)
+    tick-<T>/
+      agents/<entity_id>.json.gz  # one snapshot per settler, written by the agents
+      world.json                  # world state at the start of tick T
+      objects.jsonl.gz            # every object in registry order
+      complete.json               # written last; a directory without it is not a save
 ```
+
+### saves/
+
+A save is taken at one moment only, the new-moon save tick (contract:
+[docs/14_new_moon_and_saves.md](14_new_moon_and_saves.md)). The world creates
+`saves/tick-<T>/agents/` before it pushes observation `T`, each settler writes
+its own `agents/<entity_id>.json.gz` there (via a `.partial` name and a
+rename), and the world then writes `world.json` and `objects.jsonl.gz` (each
+also `.partial` then renamed) and `complete.json` last. `complete.json` is
+`{format_version, tick, run_id, entities: [...]}`; a directory without it is
+not a save and is never resumed from. If the settlers do not all report inside
+`save_wait_seconds` the directory is renamed `tick-<T>.abandoned`, keeping
+whatever was written, and the run carries on. The names are the constants in
+`world/src/world/snapshot.py`.
+
+Saves are *not* part of the replay format: the replay server never reads
+`saves/`. They matter to a replay only because a resumed run's recording starts
+at the save tick (below).
+
+### Resumed runs
+
+`./dev.sh --resume <run_id>[@<tick>]` starts a **new** run directory; nothing is
+ever appended to the parent's files. Its `meta.json` carries `parent_run_id`
+and `resumed_from_tick`, its `world/objects.jsonl.gz` baseline is the restored
+object set, and its first `tick` record is the save tick `T`, not 0.
+
+Readers must therefore not assume a run starts at tick 0. `RunLoader.first_tick`
+is the first recorded tick id and every clamp, seek and `entity_log` lookback
+works from it; `RunLoader.parent_run_id` / `resumed_from_tick` expose the
+parent (`""` and `-1` for a run that started fresh) and travel to the viewer on
+the `snapshot`'s `replay` block and on `replay_status`.
 
 ### Gzip JSONL writing
 
@@ -73,9 +110,9 @@ reopening per line: that produces one gzip member per line and no compression.
 ```json
 {
   "format_version": 1,
-  "run_id": "20260917-143000-settlement",
-  "config_name": "settlement",
-  "config_path": "world/configs/settlement.toml",
+  "run_id": "20260917-143000-hamlet",
+  "config_name": "hamlet",
+  "config_path": "world/configs/hamlet.toml",
   "started_at": "2026-09-17T14:30:00-04:00",
   "finished_at": null,
   "last_tick": null,
@@ -86,6 +123,8 @@ reopening per line: that produces one gzip member per line and no compression.
   "day_length_ticks": 300,
   "settlement": {"x": 168, "y": 904},
   "wolves": true,
+  "parent_run_id": null,
+  "resumed_from_tick": null,
   "map_path": "saves/island.npz",
   "map_sha256": "…",
   "entities": [{"entity_id": "ada", "entity_type": "player"}, "…"]
@@ -96,6 +135,10 @@ reopening per line: that produces one gzip member per line and no compression.
 warn when the saved map has been regenerated since. `finished_at` and
 `last_tick` are written at clean shutdown; when missing, the replay server
 derives `last_tick` from the last tick record.
+
+`parent_run_id` and `resumed_from_tick` are `null` on a run that started fresh
+and name the parent run and its save tick on a resumed one (see "Resumed runs"
+above).
 
 For configs with no map file (`generation_mode = "empty"`) `map_path` is
 `null` and the replay server builds an empty `World(width, height)`.
@@ -112,7 +155,8 @@ the events the viewer message leaves out:
 
 ```json
 {"type": "tick", "tick_id": 412,
- "clock": {"day": 1, "tick_of_day": 112, "day_length": 300, "night": false},
+ "clock": {"day": 1, "tick_of_day": 112, "day_length": 300, "night": false,
+           "new_moon_tonight": false, "next_new_moon_day": 2, "save_tick": 0},
  "wall_ms": 1758133812345, "duration_ms": 3.1,
  "moves": [{"entity_id": "ada", "from": {"x":1,"y":1}, "to": {"x":2,"y":1}, "success": true}],
  "entity_updates": [ {…viewer EntityState for every entity, every tick…} ],
@@ -141,7 +185,12 @@ keys as it reads the tick stream, so old runs still replay. `clock` is the world
 that tick and appears on the `tick` record, on the viewer's `tick_completed`
 and `snapshot` messages, and on the replay server's copies of both; the replay
 server falls back to computing it from `day_length_ticks` for runs recorded
-before the clock existed.
+before the clock existed. Its shape is `clock_payload` in
+`world/viewer_payload.py`: besides `day`, `tick_of_day`, `day_length` and
+`night` it carries `new_moon_tonight`, `next_new_moon_day` (`-1` when the
+setting is off) and `save_tick` (`0` except on the tick a save is taken) - see
+[docs/14_new_moon_and_saves.md](14_new_moon_and_saves.md). Runs recorded before
+the new moon simply lack the three keys.
 
 ### `agent_status`
 
@@ -245,8 +294,13 @@ object ids so a rollback never rebuilds all 60k island objects.
 {"type": "snapshot", "tick_id": 412, "world_size": …, "chunk_size": 32,
  "tick_duration_ms": 2000, "settlement": …, "run_id": "…",
  "replay": {"run_id": "…", "first_tick": 0, "last_tick": 1830, "tick_id": 412,
-            "playing": false, "speed": 1}}
+            "playing": false, "speed": 1,
+            "parent_run_id": "", "resumed_from_tick": -1}}
 ```
+
+`first_tick` is the run's first recorded tick, which is the save tick on a
+resumed run and 0 otherwise; `parent_run_id` / `resumed_from_tick` are `""` and
+`-1` unless this run was resumed. The `snapshot` also carries `clock`.
 
 The live world server also puts `run_id` in its snapshot (no `replay` block),
 so the viewer can offer a replay link for the run it is watching.
@@ -270,7 +324,7 @@ divided by `speed`, so interpolation matches the pace), `tick_completed`,
 `agent_status` records stamped with that tick, then `replay_status`.
 
 - `{"type": "replay_status", "tick_id", "playing", "speed", "first_tick",
-  "last_tick"}` after every state change.
+  "last_tick", "parent_run_id", "resumed_from_tick"}` after every state change.
 - `{"type": "run_index", "run_id", "agents": ["ada", …], "events": [{"tick_id",
   "kind", "entity_id", "text"}]}` where `kind` is one of `death`, `respawn`,
   `wolf_spawned`, `wolf_killed`, `craft`, `place`, `write_note`, `say`,
@@ -389,7 +443,7 @@ fresh, and the heavy files would cost more than they are worth.
   `viewer.log`.
 - `dev.sh` does not pass `--run-dir` to the world server or `--log-root` to the
   agents; it exports `BOBGAME_RUN_DIR` and lets both processes pick it up.
-  `runner/configs/settlement.toml` no longer passes `--log-root ../logs`, and
+  `runner/configs/hamlet.toml` no longer passes `--log-root ../logs`, and
   the runner is started with `--log-dir "$RUN_DIR/agents"`.
 - `analyze_run.py` cannot report "first sighting of a wolf by a settler": the
   tick records carry no per-agent visibility. It reports the first tick a wolf

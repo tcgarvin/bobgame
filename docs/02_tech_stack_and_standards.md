@@ -12,7 +12,7 @@ All Python projects use **uv** for dependency management:
 # Create new project
 uv init world
 cd world
-uv add grpcio grpcio-tools pyarrow
+uv add grpcio grpcio-tools
 
 # Run scripts
 uv run python -m world.server
@@ -38,7 +38,6 @@ npm run dev
 |---------|---------|---------|
 | `grpcio` | gRPC server | ^1.60 |
 | `grpcio-tools` | Protobuf compilation | ^1.60 |
-| `pyarrow` | Parquet logging | ^15.0 |
 | `pydantic` | Data validation | ^2.0 |
 | `structlog` | Structured logging | ^24.0 |
 | `pytest` | Testing | ^8.0 |
@@ -211,6 +210,11 @@ type TileData = any;
 - Event-driven communication between scenes
 
 ## Project Setup Commands
+
+The Python components are separate uv projects: `rules/` (`bobgame_rules`, the
+game's constants, no dependencies), `world/`, `agents/`, `runner/` and
+`tools/`. The last four pull `rules/` in as a path dependency. `cd <component>
+&& uv sync` installs one.
 
 ### Initial Setup
 ```bash

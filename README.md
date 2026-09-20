@@ -18,8 +18,9 @@ Run the development environment with a single command:
 ./dev.sh
 ```
 
-This starts:
-- **World Server** - gRPC on `:50051`, WebSocket on `:8765`, with one entity (bob)
+This runs the `hamlet` scenario: six LLM settlers on a 4000x4000 procedural
+island with one wolf. It starts:
+- **World Server** - gRPC on `:50051`, WebSocket on `:8765`
 - **Runner** - launches and supervises the agent processes
 - **Replay Server** - WebSocket on `:8766`, serves recorded runs
 - **Viewer** - Vite dev server at http://localhost:5173
@@ -46,8 +47,8 @@ alongside the live world, so you can open any past tick of the run you are
 watching. To replay an earlier run on its own:
 
 ```bash
-./replay.sh                              # replays runs/latest
-./replay.sh 20260917-143000-settlement   # a specific run
+./replay.sh                           # replays runs/latest
+./replay.sh 20260920-143000-hamlet    # a specific run
 ```
 
 Then open the deep link it prints. Any tick, entity or object can be linked
@@ -68,16 +69,29 @@ python tools/analyze_run.py --json          # machine-readable
 The recording format and replay protocol are specified in
 [docs/07_replay.md](docs/07_replay.md).
 
+## Resuming a run
+
+Every third night the world writes a save (the "new moon"). To continue a saved
+run as an exact continuation:
+
+```bash
+./dev.sh --resume 20260920-143000-hamlet          # newest complete save
+./dev.sh --resume 20260920-143000-hamlet@903      # a specific save tick
+```
+
+See [docs/14_new_moon_and_saves.md](docs/14_new_moon_and_saves.md).
+
 ## Project Structure
 
 ```
 bobgame/
+├── rules/      # Python - bobgame_rules: the game's constants, no dependencies
 ├── world/      # Python - Tick-based simulation engine (gRPC + WebSocket)
-├── agents/     # Python - Example agent that controls entities via gRPC
+├── agents/     # Python - The settler agent (planner + Jev) over gRPC
 ├── viewer/     # TypeScript - Phaser 3 visualization
-├── runner/     # Python - Agent launcher (placeholder)
+├── runner/     # Python - Agent process manager (spawns, monitors, restarts)
 ├── proto/      # Protocol Buffer definitions
-├── tools/      # Build scripts (proto compilation)
+├── tools/      # Build scripts, run analysis (tools/runlib/)
 ├── docs/       # Architecture and design documentation
 ├── runs/       # Recorded runs (gitignored); runs/latest -> newest
 ├── dev.sh      # Development environment launcher

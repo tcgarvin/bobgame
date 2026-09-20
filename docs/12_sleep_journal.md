@@ -97,12 +97,28 @@ second trigger while one is running is dropped with a debug log, because the day
 log it would have taken is already inside the running call. The day log is
 snapshotted and cleared at trigger time.
 
+The writer's input carries, besides the journal and the day log, the world
+clock's **new-moon fact** (`WorldClock.moon_text()`, passed as `rewrite`'s
+`clock_fact` argument and shown just above "Write your journal now"), so
+`Tomorrow` can plan around a night on which everyone falls asleep at once
+(docs/14_new_moon_and_saves.md). It is empty when the setting is off.
+
 The task reads the journal from disk, calls the writer, and saves atomically.
 On failure it logs a warning, traces `journal_rewrite_failed`, leaves the file
 untouched, and puts the snapshotted entries back in front of the day log so the
 next rewrite still sees them. It never takes the agent down.
 
 ## 5. The planner turn ends with the day
+
+Falling asleep ends **everything that holds the body**, whatever caused the
+sleep (`JevAgent._drain_for_sleep`, run once per sleep, before the turn ends
+and the rewrite starts): the in-flight single-tick action is resolved from the
+world's own event and the rest of the request queue is refused `asleep`; an
+active stint and a reflex stint are finished; and a conversation seat is closed.
+The end reason is `asleep`, or `new_moon` on a new-moon night (docs/14). A
+stint used to be suspended and resumed on the tick the settler woke, which
+stranded the planner — the turn cannot end while `start_stint` is parked on a
+stint that will not report until morning.
 
 - The `sleep` tool, after the wake returns, spends the whole tool budget (so
   `BudgetedToolset` refuses every later call) and appends a line telling the
@@ -179,11 +195,15 @@ triggers and truncated sections per settler
 
 ## 8. Tests
 
-`agents/tests/test_journal.py` covers the format, `all_sections()` and the
-token cap and the day log; `test_planner.py` the `remember` target, the `sleep` tool's budget, the
-history reset and the prompt's wait; `test_agent.py` the triggers, the
-single-flight rule, the failure path and the `journal` block on the rewrite
-record; `test_planner.py` also the `journal` block on `turn_start`;
+`agents/tests/test_journal.py` covers the format, `all_sections()`, the token
+cap and the day log; `agents/tests/planner/` the `remember` target
+(`test_tools_items.py`), the `sleep` tool's budget (`test_tools_body.py`), the
+history reset (`test_tools_body.py`, `test_turn.py`), the prompt's wait
+(`test_prompt.py`) and the `journal` block on `turn_start` (`test_turn.py`);
+`agents/tests/agent/test_journal_rewrite.py` the triggers, the single-flight
+rule, the failure path and the `journal` block on the rewrite record, with
+`test_sleeping.py` covering the drain that ends a stint and
+`test_new_moon_and_saves.py` the same for a conversation seat;
 `world/tests/test_replay.py` the `agent_detail.journal` payload, the
 `memory.md` fallback and the live re-read; `tools/tests/test_analyze_run.py` the
 roll-up. No test makes a model call.

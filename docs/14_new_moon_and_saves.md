@@ -11,6 +11,10 @@ Bit-identical *futures* are not a goal and not possible (model calls are not
 seeded, and whether an intent makes a tick's deadline depends on the wall
 clock). The guarantee is about state at the save tick.
 
+**Status: implemented**, and verified live on 2026-09-20: a save with all six
+settlers mid-stint completed in about a minute, and the resumed run woke
+everyone into journal-fed first turns.
+
 ## 1. The new moon (world physics)
 
 Config (`world/configs/hamlet.toml`, validated at load):
@@ -61,16 +65,25 @@ Facts only, in line with the rest of the prompt:
 
 ## 2. What "drained" means for a settler
 
-Falling asleep already ends the planner's turn, runs the journal rewrite and
-arms the history reset for the next wake (docs/12). A settler is **drained**
-when all of these hold:
+Falling asleep ends everything that holds the body: the planner's turn, any
+stint or reflex stint, any conversation seat, and the in-flight single-tick
+action. It then runs the journal rewrite (docs/12). While the body is asleep,
+collapsed or dead the tick loop **refuses** new requests from the planner
+(`inactive_reason()`) instead of queueing them, so nothing new can start during
+the night. A settler is **drained** when all of these hold:
 
 - the body is asleep (or dead and awaiting respawn),
-- no stint, reflex stint or conversation session is active or held,
-- the planner is parked in `await_active` with its turn ended and the history
-  reset pending,
+- no stint, reflex stint or conversation session is active, held or queued,
+- the planner is parked in `await_active` with its turn ended,
 - no journal rewrite and no converser closing call is in flight,
-- no request or waiter queue holds an entry.
+- no single-tick action is in flight and no tool is waiting for a conversation.
+
+Two things deliberately do **not** block a drain. A `sleep` tool parked on
+`await_wake` does not: that is what a settler who chose to sleep looks like all
+night, and counting it would abandon the save for anyone who went to bed early.
+And the planner's history reset is not checked, because it is never pending
+while asleep — the reset reason is set at the *wake*, and the snapshot stores no
+message history at all, which is the same state by another route.
 
 If a journal rewrite failed, the restored day log is part of the snapshot, so
 nothing is lost.
@@ -199,7 +212,6 @@ decide something the contract left open.
   the agents write into it before the world writes anything. Atomicity is per
   file (`world.json.partial` and `objects.jsonl.gz.partial`, each renamed) plus
   `complete.json` last.
-- **An abandoned save is renamed, not deleted** (see section 3).
 - **`ObservationService._last_result` starts empty on a resume.** The first
   observation at `T` therefore replays no events from tick `T-1`. That tick's
   events were already delivered in the run being resumed, and the agent folds
@@ -228,7 +240,7 @@ decide something the contract left open.
 
 ### Modules
 
-- `agents/.../worldmodel.py` — `WorldClock` parses `new_moon_tonight`,
+- `agents/.../worldmodel/` — `WorldClock` parses `new_moon_tonight`,
   `next_new_moon_day` and `save_tick`, and `moon_text()` renders the one line
   every surface shows. `WorldModel.to_payload()/from_payload()` serialise
   everything the model remembers; the derived position indexes are rebuilt on
@@ -242,12 +254,14 @@ decide something the contract left open.
   another settler) and `snapshot_path`. Every component serialises itself
   (`WorldModel`, `Planner`, `CostLedger`, `ReflexWatch`, `DayLog` all gained
   `to_payload`/`from_payload`|`load_payload`); this module only assembles.
-- `agents/.../agent.py` — `JevAgent.drained() -> DrainState`, the forced-sleep
-  drain, `load_snapshot`, `save_directory` and `_maybe_save`, plus the
+- `agents/.../agent/` — `saving.py` holds `DrainState` and where a snapshot
+  goes; `core.py` holds `JevAgent.drained()`, `inactive_reason()`, the
+  forced-sleep drain, `load_snapshot` and `_maybe_save`, plus the
   `--resume-from` path through `run_agent`.
-- `agents/.../items.py` — `NEW_MOON_STILL_TICKS` (6) and
-  `night_start_tick(day_length)`. The **period** is deliberately not mirrored:
-  it is world config and reaches the settlers only through the clock.
+- `agents/.../items.py` — re-exports `NEW_MOON_STILL_TICKS` (6) and
+  `night_start_tick(day_length)` from `bobgame_rules.clock`, which the world
+  reads too. The **period** is not there at all: it is world config and reaches
+  the settlers only through the clock.
 
 ### What the settlers are told
 
@@ -283,23 +297,24 @@ night, and the brief it resumed was written for yesterday, before the journal
 rewrite and the history reset. Ending the stint is both what `drained` needs
 and what the sleep contract in docs/12 always implied.
 
-### Two deviations from section 2
+### The second bug: a request queued after the drain
 
-- A `sleep` tool parked on `await_wake` does **not** stop a settler being
-  drained, although section 2 says no waiter queue may hold an entry. It is
-  what a settler that chose to sleep looks like all night, so the rule as
-  written would abandon the save for anyone who went to bed early. The
-  snapshot carries no futures: a resumed settler simply takes a fresh
-  journal-fed turn when it wakes, one reflection short of what the
-  uninterrupted run would have written.
-- "the history reset pending" is not checked, because it is never pending
-  while asleep: the reset reason is set at the *wake*. The snapshot stores no
-  message history at all, which is the same state by another route.
+The first live save hung on a settler inside the planner's `build` tool. A
+multi-phase tool runs its own Python loop — `build`'s three resupply rounds,
+`craft_once`'s work loop, `recipes.craft_chain`, `talk_to`'s walk-then-hail,
+`place_sign` — and that loop went on calling the bridge after the drain had
+swept the queues. The stint it queued sat there all night, `drained()` answered
+"a stint is queued", and the save was abandoned.
 
-Everything else is checked exactly: body asleep or dead, no stint (active,
-held or queued), no conversation seat, no closing converser call, no journal
-rewrite, no single-tick action, no conversation waiter, and the planner parked
-on `await_active`.
+The fix is section 2's refusal rule: `run_stint`, `direct_action`, `wait_ticks`
+and `await_conversation` all check `JevAgent.inactive_reason()` (`asleep`,
+`new_moon` or `death`) before queueing anything. A refused stint comes back as
+a finished `StintReport` of zero ticks carrying that reason, which is what
+breaks every one of those loops. The `sleep`/`wake` tools' `await_wake` is the
+one deliberate exception, as section 2 says.
+
+`drained()` otherwise checks exactly what section 2 lists, and its
+`DrainState.reason` is the sentence a skipped save reports.
 
 ### The save and the resume
 
@@ -310,7 +325,8 @@ under the world's 180 s) and then writes
 tick loop there is safe: the world is paused, and lease renewal is its own
 task. A settler that has not drained writes nothing and says why, at error
 level and as a `save_skipped` line in `planner.jsonl.gz`; a written save is a
-`save_written` line carrying the path and the byte count.
+`save_written` line carrying the path and the byte count, and a write that
+raised is `save_failed`.
 
 `python -m agents.jev_agent --resume-from <save dir>` builds the agent as
 usual, restores it, and only then connects, so the re-delivered observation

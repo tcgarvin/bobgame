@@ -1,8 +1,12 @@
 # 08 - Building a proper settlement
 
 Status: contract. This document is the source of truth for the building
-mechanics; `world/src/world/items.py` is the same contract in code. If the two
-disagree, fix both in one change.
+mechanics. In code they live once, in `bobgame_rules` (the dependency-free
+package at the repo root, `rules/`): `world/src/world/items.py` and
+`agents/src/agents/jev_agent/items.py` both re-export the kinds, recipes,
+layers and blocking sets from it under their own names, and the viewer reads
+them through `tools/generate_rules_ts.py`. Change a kind or a recipe in
+`rules/`, and this document with it.
 
 Goal: give the settlers what they need to turn a camp into a settlement -
 roads, walls, doors, floors, beds, chairs, tables and a workshop table - and a
@@ -143,7 +147,7 @@ pushed at everyone who walks past it.
 - **Dismantling**: `sign` is in `BUILDING_KINDS`, so `DISMANTLE_WORK` (3)
   extract actions return the item, like any other placed piece.
 
-The read guarantee, agent side (`worldmodel.py`): when a non-blank sign first
+The read guarantee, agent side (`worldmodel/`): when a non-blank sign first
 comes into view, or a known sign's text has changed since this settler last saw
 it, and the author is not this settler, the model queues one line —
 `[sign at (x, y) by ada, written tick N: "text"]` — on the `TickDigest`. The
@@ -205,9 +209,10 @@ runs stay replayable because recordings carry their own objects.
 
 ## Agents
 
-- `agents/jev_agent/options.py` mirrors the recipe table, offers craft options
-  only when they can succeed (inputs and workshop proximity), offers place,
-  rest and dismantle options.
+- `agents/jev_agent/options/` builds Jev's choices from the same recipe table
+  (`recipes.py` over `items.py`, which re-exports `bobgame_rules`): craft
+  options only when they can succeed (inputs and workshop proximity), plus
+  place, rest and dismantle options.
 - The planner prompt teaches the material chain and what a settlement looks
   like. Because Jev cannot reason about coordinates tick by tick, the planner
   gets a deterministic `build` tool in the spirit of `travel_to`: given a kind
@@ -222,7 +227,8 @@ runs stay replayable because recordings carry their own objects.
 - **Doors in a build (2026-09-20, hamlet round 4).** `build(..., door="x,y;
   x,y")` names tiles of the shape that get a `door` instead of `kind`. Those
   tiles are added to the main plan's `skip`, so the wall run leaves them open,
-  and a second pass (`planner._door_plan` -> `planner._build_phase` with a
+  and a second pass (`_door_plan` -> `_build_phase`, both in
+  `planner/tools/building.py`, with a
   `tiles` plan of doors) fills them out of the same `max_ticks`, crafting the
   doors through `_craft_chain` exactly as the walls are crafted. A door tile
   that is not on the shape is a `ModelRetry`; `kind="door"` plus `door=` is
@@ -235,7 +241,7 @@ runs stay replayable because recordings carry their own objects.
   `enclosure.INSIDE_OBJECTS_NAMED` = 8). esme closed a doorless 4x4 ring with
   the settlement's only workshop_table inside it.
 - **A refused `place` names the occupant (round 4).** The world's own refusal
-  is only `"target already holds an object"`. `planner.place_failure_lines`
+  is only `"target already holds an object"`. `actions.place_failure_lines`
   adds, from the world model, what is on the target tile
   (`(1549, 971) holds wood_wall_16`, an entity id, or the floor type when the
   terrain will not take it) and which neighbouring directions would take that

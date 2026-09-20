@@ -356,7 +356,7 @@ is fast, cheap, and literal, while the planner is slow and expensive. Tools:
   2026-09-20 the planner gives it no tick budget: the walk runs to
   `arrived`/`arrived_next_to`, `no_path`, or a danger or hunger stop. Code
   computes a backstop budget of `path_length * 2 + 20` ticks, clamped to
-  30..600 (`travel_budget` in `planner.py`).
+  30..600 (`walk.tick_budget`, re-exported as `travel_budget` by `planner/`).
 - Direct single-tick actions (each waits one tick and returns the result):
   `eat(kind)`, `pickup(kind, amount)`, `drop(kind, amount)`,
   `deposit(object_id, kind, amount)`, `withdraw(object_id, kind, amount)`,
@@ -494,12 +494,12 @@ observation and viewer services: `move_results`, `action_results`
 - `settlement.py` reads `World._floor_array` directly (via a `floor_array_of`
   helper) because `World` exposes no public accessor for the terrain array and
   per-tile `get_tile` calls are far too slow on 4000x4000. Small worlds without
-  a floor array are rebuilt tile by tile. If `state.py` ever grows a public
+  a floor array are rebuilt tile by tile. If `state/` ever grows a public
   accessor, `floor_array_of` should use it.
 - `settlement.py` defines its own `BLOCKING_OBJECT_TYPES`
   (`tree`, `rock_*`, `boulder`) for spawn-tile selection, and its own
   `nearest_free_walkable` / `is_free_walkable`, rather than a
-  `World.find_free_tile_near` helper on `state.py` (owned by the mechanics
+  `World.find_free_tile_near` helper on `state/` (owned by the mechanics
   track). If the mechanics track adds such a helper, `settlement.py` should
   delegate to it. Respawn placement should call
   `settlement.nearest_free_walkable(world, world.settlement)`.
@@ -563,11 +563,16 @@ observation and viewer services: `move_results`, `action_results`
   event (respawns happen at the settlement spawn). If the observation proto
   later gains a settlement field, `WorldModel.settlement` should read it.
 - **Module split.** The doc's "stint" responsibilities are spread over four
-  modules for readability: `options.py` (legal-option enumeration and the
-  option -> Intent mapping), `jevstate.py` (state building and the ASCII map),
-  `jevclient.py` (the TypeSafe call and the `JevClient` protocol that fakes
-  implement), and `stint.py` (the tick loop, code rules, JSONL log, and
-  `StintReport`). `geometry.py` holds directions and distance helpers.
+  units for readability: the `options/` package (legal-option enumeration and
+  the option -> Intent mapping), `jevstate.py` (state building and the ASCII
+  map), `jevclient.py` (the TypeSafe call and the `JevClient` protocol that
+  fakes implement), and the `stint/` package (the tick loop, code rules, JSONL
+  log, and `StintReport`). `briefs.py` holds the vocabulary they share
+  (`Option`, `Brief`, `TravelState`), `walk.py` the one walk driver,
+  `recipes.py` the recipe helpers, and `geometry.py` directions and distance
+  helpers. The planner, the world model, the conversation layer and the agent
+  loop are packages too (`planner/`, `worldmodel/`, `conversation/`,
+  `agent/`).
 - **Blocking objects.** Pathfinding treats `tree` and all rock types as
   occupying their tile (mirroring `world/settlement.py`'s
   `BLOCKING_OBJECT_TYPES`). Travel to such an object finishes on an adjacent
