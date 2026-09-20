@@ -34,12 +34,12 @@ LAYERS: dict[str, int] = {
     "pricing": 1,
     "worldmodel": 1,
     # L2 - shared vocabulary and the standalone writers.
-    "actions": 2,
     "briefs": 2,
     "enclosure": 2,
     "journal": 2,
     "recipes": 2,
-    # L3 - walking, and what a tick may look like.
+    # L3 - walking, and the one rule per action (which needs the seal check).
+    "actions": 3,
     "walk": 3,
     "conversation": 4,
     "jevstate": 4,

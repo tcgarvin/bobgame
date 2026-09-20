@@ -26,7 +26,7 @@ import contextlib
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Sequence, TypeVar
 
@@ -46,11 +46,11 @@ from .conversation import (
     ConversationSession,
     Converser,
     ModelConverser,
-    hailed_target,
     joined_conversation,
     sleep_end_reason,
 )
 from .jevclient import JevClient, TypeSafeJevClient
+from .outcomes import ActionOutcome, Seat
 from .journal import (
     JOURNAL_WAIT_SECONDS,
     KIND_EVENT,
@@ -99,6 +99,7 @@ from .briefs import (
 )
 from .stint import (
     END_ASLEEP,
+    END_DEATH,
     END_JOINED_CONVERSATION,
     END_NEW_MOON,
     END_PREEMPTED_BY_REFLEX,
@@ -106,6 +107,7 @@ from .stint import (
     Stint,
     StintReport,
     never_ends,
+    stint_stats,
 )
 from .pricing import CostLedger, LedgerJevClient, pricing_payload
 from .tracelog import RUN_DIR_ENV, AgentTrace, resolve_log_root
@@ -155,6 +157,11 @@ UNKNOWN_WAKE_REASON = "unknown"
 WAKE_HUNGRY_REASON = "hungry"
 
 ASLEEP_REJECTION = "failed: asleep"
+
+# The `log_root` an agent is built with when nobody named one: work it out from
+# `$BOBGAME_RUN_DIR` (`tracelog.resolve_log_root`). An empty path says "not
+# given" without a `None` that also has to mean "the current directory".
+USE_RUN_DIR = Path()
 
 # What the planner is told happened to its body, so it can drop its history.
 LIFE_WOKE = "woke"
@@ -261,9 +268,8 @@ class _DirectRequest:
 
     intent: pb.Intent
     description: str
-    future: asyncio.Future[str]
+    future: asyncio.Future[ActionOutcome]
     remaining_ticks: int = 1
-    results: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -281,6 +287,31 @@ class _WakeWaiter:
     # The rendered sleep, or "" when no sleep was seen.
     future: asyncio.Future[str]
     deadline_tick: int
+
+
+@dataclass(frozen=True)
+class StatusLine:
+    """The five strings the viewer's status channel carries.
+
+    Frozen and named because it is also compared against the last one sent, and
+    a five-slot tuple said nothing about which slot was which.
+    """
+
+    mode: str = ""
+    brief: str = ""
+    thought: str = ""
+    detail_json: str = ""
+    cost_json: str = ""
+
+    def as_arguments(self) -> tuple[str, str, str, str, str]:
+        """The positional arguments `WorldClient.report_status` takes."""
+        return (
+            self.mode,
+            self.brief,
+            self.thought,
+            self.detail_json,
+            self.cost_json,
+        )
 
 
 @dataclass
@@ -320,7 +351,7 @@ class JevAgent:
         jev: JevClient,
         entity_id: str,
         *,
-        log_root: Path | None = None,
+        log_root: Path = USE_RUN_DIR,
         planner_model: str = "",
         journal_model: str = "",
         converser: Converser | None = None,
@@ -333,7 +364,7 @@ class JevAgent:
         # and conversation sessions - is billed to this agent's ledger.
         self.jev: JevClient = LedgerJevClient(jev, self.ledger)
         self.entity_id = entity_id
-        self.log_root = resolve_log_root() if log_root is None else log_root
+        self.log_root = resolve_log_root() if log_root == USE_RUN_DIR else log_root
         self.trace = AgentTrace(entity_id, self.log_root)
         self._model = WorldModel(entity_id)
 
@@ -403,7 +434,7 @@ class JevAgent:
         # drain runs once per sleep rather than once per sleeping tick.
         self._drained_this_sleep = False
         self._pending_thought = ""
-        self._last_status = ("", "", "", "", "")
+        self._last_status = StatusLine()
         self._running = False
         # Set by the planner's `open_conversation`/`talk_to` just before the
         # open or hail intent, and read once by `_begin_conversation` when that
@@ -467,6 +498,42 @@ class JevAgent:
         # are two queues over one note and the journal wants it once.
         self.planner.day_log.add(self._model.tick, KIND_NOTE, text)
 
+    def inactive_reason(self) -> str:
+        """Why the body can take no action at all right now, or `""`.
+
+        A sleeping, collapsed or dead body submits nothing, so a request made
+        while it is in that state can never run. It is refused here rather
+        than queued: a multi-phase tool (`build`, a craft loop, `talk_to`'s
+        walk-then-hail) keeps calling back after `_drain_for_sleep` has swept
+        the queues once, and a request that arrives afterwards would sit there
+        all night and make `drained()` answer "a stint is queued", which
+        abandons the whole save (docs/14).
+        """
+        info = self._model.self_info
+        if not info.alive:
+            return END_DEATH
+        if not info.asleep:
+            return ""
+        return END_NEW_MOON if self._model.clock.new_moon_tonight else END_ASLEEP
+
+    def _refused_report(self, brief: Brief, reason: str) -> StintReport:
+        """A stint that never ran, rendered as a finished one of zero ticks."""
+        position = self._model.position
+        stats = stint_stats(self._model)
+        return StintReport(
+            brief=brief,
+            ticks_used=0,
+            end_reason=reason,
+            start_position=position,
+            end_position=position,
+            start_stats=stats,
+            end_stats=stats,
+            inventory_delta={},
+            action_counts={},
+            notable=[],
+            tail=[],
+        )
+
     async def run_stint(
         self,
         brief: Brief,
@@ -480,6 +547,9 @@ class JevAgent:
         `end_check` is asked before every tick and ends the stint with the
         reason it returns.
         """
+        inactive = self.inactive_reason()
+        if inactive:
+            return self._refused_report(brief, inactive)
         future: asyncio.Future[StintReport] = asyncio.get_running_loop().create_future()
         await self._stint_requests.put(
             _StintRequest(
@@ -488,17 +558,20 @@ class JevAgent:
         )
         return await future
 
-    async def direct_action(self, intent: pb.Intent, description: str) -> str:
+    async def direct_action(self, intent: pb.Intent, description: str) -> ActionOutcome:
         """Submit one intent on the next tick and report what the world did."""
+        if self.inactive_reason():
+            return ActionOutcome.never_ran(description, ASLEEP_REJECTION)
         if self._reflex_stint is not None:
-            return f"{description} -> {INTERRUPTED_BY_REFLEX}"
+            return ActionOutcome.never_ran(description, INTERRUPTED_BY_REFLEX)
         session = self._conversation
         if session is not None:
-            return (
-                f"{description} -> "
-                f"{conversation_interruption(session.conversation_id)}"
+            return ActionOutcome.never_ran(
+                description, conversation_interruption(session.conversation_id)
             )
-        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[ActionOutcome] = (
+            asyncio.get_running_loop().create_future()
+        )
         await self._direct_requests.put(
             _DirectRequest(intent=intent, description=description, future=future)
         )
@@ -506,7 +579,11 @@ class JevAgent:
 
     async def wait_ticks(self, ticks: int) -> str:
         """Hold position for `ticks` ticks."""
-        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        if self.inactive_reason():
+            return f"wait {ticks} ticks -> {ASLEEP_REJECTION}"
+        future: asyncio.Future[ActionOutcome] = (
+            asyncio.get_running_loop().create_future()
+        )
         await self._direct_requests.put(
             _DirectRequest(
                 intent=pb.Intent(wait=pb.WaitIntent()),
@@ -515,7 +592,7 @@ class JevAgent:
                 remaining_ticks=max(1, ticks),
             )
         )
-        return await future
+        return (await future).text()
 
     async def await_conversation(self) -> ConversationReport | None:
         """Block until the conversation now starting has ended.
@@ -523,6 +600,8 @@ class JevAgent:
         None means the tick loop never saw the actor take a seat, so there is
         nothing to wait for.
         """
+        if self.inactive_reason():
+            return None
         loop = asyncio.get_running_loop()
         future: asyncio.Future[ConversationReport | None] = loop.create_future()
         waiter = _ConversationWaiter(
@@ -936,7 +1015,7 @@ class JevAgent:
                 return request
             if not request.future.done():
                 request.future.set_result(
-                    f"{request.description} -> {ASLEEP_REJECTION}"
+                    ActionOutcome.never_ran(request.description, ASLEEP_REJECTION)
                 )
         return None
 
@@ -1127,10 +1206,14 @@ class JevAgent:
         if awaiting is not None:
             self._awaiting_direct = None
             if not awaiting.future.done():
-                awaiting.future.set_result(f"{awaiting.description} -> {message}")
+                awaiting.future.set_result(
+                    ActionOutcome.never_ran(awaiting.description, message)
+                )
         for request in _drain(self._direct_requests):
             if not request.future.done():
-                request.future.set_result(f"{request.description} -> {message}")
+                request.future.set_result(
+                    ActionOutcome.never_ran(request.description, message)
+                )
 
     # -- conversations ------------------------------------------------------
 
@@ -1142,12 +1225,13 @@ class JevAgent:
         asked for nothing, so whatever single-tick action it had in flight is
         answered as interrupted.
         """
-        conversation_id, action = joined_conversation(digest)
+        seat = joined_conversation(digest)
+        conversation_id = seat.conversation_id
         if not conversation_id or self._conversation is not None:
             return
-        via = action
+        via = seat.action
         stint = self._active_stint
-        purpose = self._conversation_purpose(via, action, digest, stint)
+        purpose = self._conversation_purpose(seat, stint)
         if stint is not None:
             stint.finish(END_JOINED_CONVERSATION)
             self._finish_stint(hold=True)
@@ -1158,9 +1242,7 @@ class JevAgent:
         self._begin_conversation(conversation_id, via, purpose)
         self._pending_purpose = ""
 
-    def _conversation_purpose(
-        self, via: str, action: str, digest: TickDigest, stint: Stint | None
-    ) -> str:
+    def _conversation_purpose(self, seat: Seat, stint: Stint | None) -> str:
         """Why this actor started the conversation, or `""` (docs/09 item 4).
 
         A settler that was hailed or that only joined has no purpose. A
@@ -1169,14 +1251,13 @@ class JevAgent:
         `set_conversation_purpose` stashed just before the intent.
         """
         if stint is not None:
-            if action != ACTION_HAIL:
+            if seat.action != ACTION_HAIL:
                 return ""
-            target = hailed_target(digest)
             for hail in stint.brief.hails:
-                if hail.settler == target:
+                if hail.settler == seat.target:
                     return hail.purpose
             return ""
-        if via in (ACTION_OPEN, ACTION_HAIL):
+        if seat.action in (ACTION_OPEN, ACTION_HAIL):
             return self._pending_purpose
         return ""
 
@@ -1317,22 +1398,27 @@ class JevAgent:
             return
         if request.remaining_ticks > 1:
             return
-        outcome = "submitted"
+        outcome = ActionOutcome.submitted_only(request.description)
         for acted in digest.own_actions:
-            status = "ok" if acted.success else "failed"
-            outcome = f"{acted.action_type} {status}: {acted.details or '(no detail)'}"
+            outcome = ActionOutcome.from_event(
+                request.description, acted.action_type, acted.success, acted.details
+            )
             break
         self._awaiting_direct = None
         if not request.future.done():
-            request.future.set_result(f"{request.description} -> {outcome}")
+            request.future.set_result(outcome)
 
     def _fail_pending(self, reason: str) -> None:
         for request in _drain(self._direct_requests):
             if not request.future.done():
-                request.future.set_result(f"{request.description} -> {reason}")
+                request.future.set_result(
+                    ActionOutcome.never_ran(request.description, reason)
+                )
         awaiting = self._awaiting_direct
         if awaiting is not None and not awaiting.future.done():
-            awaiting.future.set_result(f"{awaiting.description} -> {reason}")
+            awaiting.future.set_result(
+                ActionOutcome.never_ran(awaiting.description, reason)
+            )
         self._awaiting_direct = None
         for waiter in self._conversation_waiters:
             if not waiter.future.done():
@@ -1517,29 +1603,27 @@ class JevAgent:
     async def _report_status(self) -> None:
         session = self._conversation
         if session is not None:
-            status = (
-                self.mode,
-                "in conversation",
-                self.planner.last_thought,
-                session.status_json(),
-                self.ledger.as_json(),
+            status = StatusLine(
+                mode=self.mode,
+                brief="in conversation",
+                thought=self.planner.last_thought,
+                detail_json=session.status_json(),
+                cost_json=self.ledger.as_json(),
             )
         else:
             stint = self._reflex_stint or self._active_stint
-            brief = stint.brief.summary() if stint is not None else ""
-            stint_json = stint.status_json() if stint is not None else ""
-            status = (
-                self.mode,
-                brief,
-                self.planner.last_thought,
-                stint_json,
-                self.ledger.as_json(),
+            status = StatusLine(
+                mode=self.mode,
+                brief=stint.brief.summary() if stint is not None else "",
+                thought=self.planner.last_thought,
+                detail_json=stint.status_json() if stint is not None else "",
+                cost_json=self.ledger.as_json(),
             )
         if status == self._last_status:
             return
         self._last_status = status
         try:
-            await self.world.report_status(*status)
+            await self.world.report_status(*status.as_arguments())
         except grpc.RpcError as error:
             logger.debug("status_report_failed", details=error.details())
 
@@ -1576,7 +1660,7 @@ async def run_agent(
     server_address: str,
     entity_id: str,
     *,
-    log_root: Path | None = None,
+    log_root: Path = USE_RUN_DIR,
     planner_model: str = "",
     jev_model: str = "",
     journal_model: str = "",

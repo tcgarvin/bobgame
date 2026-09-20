@@ -17,8 +17,9 @@ from typing import Any, Iterable, Mapping, Sequence
 from .. import world_pb2 as pb
 from . import items
 from .geometry import DELTA_TO_DIRECTION, Coord, chebyshev, direction_name
+from .outcomes import CraftProgress, parse_craft_progress
 
-VIEW_RADIUS = 8
+VIEW_RADIUS = items.VIEW_RADIUS
 
 # Object types that occupy their tile. Walls really do block (the world says so
 # in `Tile.walkable` too); trees and rocks are treated as blocking only because
@@ -58,7 +59,7 @@ class WorldClock:
 
     day: int = 0
     tick_of_day: int = 0
-    day_length: int = items.DEFAULT_DAY_LENGTH
+    day_length: int = items.DEFAULT_DAY_LENGTH_TICKS
     night: bool = False
     # docs/14_new_moon_and_saves.md: whether tonight is a new-moon night, the
     # 0-based day the next one falls on (-1 when the world has none), and the
@@ -121,17 +122,16 @@ class ObjectInfo:
         """Parsed `contents` JSON for chests and item piles ({} when absent/bad)."""
         return _parse_counts(self.state.get("contents", ""))
 
-    def craft_progress(self, entity_id: str) -> tuple[str, int]:
-        """`(recipe, actions done)` this crafter has banked at this station.
+    def craft_progress(self, entity_id: str) -> CraftProgress:
+        """What this crafter has banked at this station, recipe and actions.
 
-        Empty recipe and zero when the station holds no progress for them, or
-        when the state value is not the `"<recipe>:<done>"` the world writes.
+        Empty recipe and zero actions when the station holds no progress for
+        them, or when the state value is not the `"<recipe>:<done>"` the world
+        writes.
         """
-        raw = self.state.get(f"{items.CRAFT_PROGRESS_PREFIX}{entity_id}", "")
-        recipe, _, done = raw.partition(":")
-        if not recipe or not done.isdigit():
-            return ("", 0)
-        return (recipe, int(done))
+        return parse_craft_progress(
+            self.state.get(f"{items.CRAFT_PROGRESS_PREFIX}{entity_id}", "")
+        )
 
     @property
     def sign_text(self) -> str:
@@ -199,7 +199,7 @@ class EntityInfo:
     inventory: Mapping[str, int]
     last_seen: int
     fatigue: int = 0
-    max_fatigue: int = items.MAX_FATIGUE
+    max_fatigue: int = items.PLAYER_MAX_FATIGUE
     asleep: bool = False
     # Object id of the bed slept on, "" for the ground (and while awake).
     sleeping_on: str = ""
@@ -1150,7 +1150,7 @@ def _entity_info(entity: pb.Entity, tick: int) -> EntityInfo:
         inventory=inventory_to_dict(entity.inventory),
         last_seen=tick,
         fatigue=entity.fatigue,
-        max_fatigue=entity.max_fatigue or items.MAX_FATIGUE,
+        max_fatigue=entity.max_fatigue or items.PLAYER_MAX_FATIGUE,
         asleep=entity.asleep,
         sleeping_on=entity.sleeping_on,
         collapsed=entity.collapsed,

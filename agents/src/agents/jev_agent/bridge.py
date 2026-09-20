@@ -13,6 +13,7 @@ from typing import Callable, Protocol
 from .. import world_pb2 as pb
 from .briefs import Brief, StintDriver
 from .conversation import ConversationReport
+from .outcomes import ActionOutcome
 from .reflex import ReflexBrief
 from .stint import StintReport, never_ends
 from .worldmodel import WorldModel
@@ -36,7 +37,7 @@ class AgentBridge(Protocol):
         `end_check` is an extra code-owned end rule, asked before every tick.
         """
 
-    async def direct_action(self, intent: pb.Intent, description: str) -> str:
+    async def direct_action(self, intent: pb.Intent, description: str) -> ActionOutcome:
         """Submit one intent on the next tick and report what happened."""
 
     async def wait_ticks(self, ticks: int) -> str:

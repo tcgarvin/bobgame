@@ -28,7 +28,20 @@ from .geometry import (
     same_or_adjacent,
 )
 from . import actions
-from .actions import converse_intent, shout_attempt, sleep_attempt
+from .actions import (
+    collect_here_attempt,
+    deposit_attempt,
+    eat_attempt,
+    extract_attempt,
+    hail_attempt,
+    hail_refusal,
+    join_attempt,
+    pickup_attempt,
+    place_attempt,
+    shout_attempt,
+    sleep_attempt,
+    withdraw_attempt,
+)
 from .briefs import (
     EMPTY_PLACES,
     HAIL_REFUSAL_LIMIT,
@@ -40,7 +53,6 @@ from .briefs import (
     Option,
     TravelState,
 )
-from .enclosure import blocks_movement, would_seal
 from .pathfinding import legal_directions
 from .recipes import (
     CRAFT_ONCE_KINDS,
@@ -261,13 +273,14 @@ def _survival_options(
     shouts: Sequence[str],
 ) -> list[Option]:
     options: list[Option] = []
-    if inventory.get("berry", 0) > 0:
+    eat = eat_attempt(model, items.BERRY)
+    if eat.allowed:
         food = model.self_info.food
         options.append(
             Option(
                 key="eat:berry",
                 description=f"eat a berry to restore 20 food (food now {food})",
-                intent=pb.Intent(eat=pb.EatIntent(item_type="berry", amount=1)),
+                intent=eat.intent,
             )
         )
     options.extend(_rest_options(model))
@@ -394,9 +407,7 @@ def _conversation_options(
                         f"with {seated}; in it you speak when your turn comes "
                         f"round, and {conversation.free_seats} seats are free"
                     ),
-                    intent=converse_intent(
-                        "join", conversation_id=conversation.conversation_id
-                    ),
+                    intent=join_attempt(model, conversation.conversation_id).intent,
                     clears_travel=True,
                 )
             )
@@ -437,20 +448,11 @@ def _hail_options(
     asleep or already in a conversation: the world would refuse every one of
     those, and Jev would spend the stint being told no.
     """
-    if model.my_conversation() is not None:
-        return []
-    seated = {
-        participant
-        for conversation in model.conversations()
-        for participant in conversation.participants
-    }
     options: list[Option] = []
     for hail in hails[:MAX_BRIEF_HAILS]:
-        target = model.entities.get(hail.settler)
-        if target is None or not target.alive or target.asleep:
+        if hail_refusal(model, hail.settler):
             continue
-        if target.entity_id in seated:
-            continue
+        target = model.entities[hail.settler]
         key = f"{HAIL_KEY_PREFIX}{hail.settler}"
         distance = chebyshev(target.position, position)
         if distance == 1:
@@ -462,11 +464,7 @@ def _hail_options(
                         "conversation with the two of you starts and "
                         f"{hail.settler} answers first"
                     ),
-                    intent=converse_intent(
-                        items.ACTION_HAIL,
-                        target_entity_id=hail.settler,
-                        text=hail.line,
-                    ),
+                    intent=hail_attempt(model, hail.settler, hail.line).intent,
                     clears_travel=True,
                 )
             )
@@ -617,39 +615,37 @@ def _interaction_options(
         if obj.object_type in EXTRACTABLE_TYPES and same_or_adjacent(
             position, obj.position
         ):
-            option = _extract_option(obj, position, wielded)
+            option = _extract_option(model, obj, position, wielded)
             if option is not None:
                 options.append(option)
         elif obj.object_type == "bush" and obj.position == position and obj.has_berry:
-            options.append(
-                Option(
-                    key=f"collect:{obj.object_id}",
-                    description="pick the berry off the bush on this tile",
-                    intent=pb.Intent(
-                        collect=pb.CollectIntent(
-                            object_id=obj.object_id, item_type="berry", amount=1
-                        )
-                    ),
+            collect = collect_here_attempt(model)
+            if collect.allowed:
+                options.append(
+                    Option(
+                        key=f"collect:{obj.object_id}",
+                        description="pick the berry off the bush on this tile",
+                        intent=collect.intent,
+                    )
                 )
-            )
         elif obj.object_type == "item_pile" and obj.position == position:
             for kind, count in sorted(obj.contents().items()):
                 options.append(
                     Option(
                         key=f"pickup:{kind}",
                         description=f"pick up {kind} from the pile here ({count} available)",
-                        intent=pb.Intent(
-                            pickup=pb.PickupIntent(kind=kind, amount=min(count, 5))
-                        ),
+                        intent=pickup_attempt(model, kind, min(count, 5)).intent,
                     )
                 )
         elif obj.object_type == "chest" and same_or_adjacent(position, obj.position):
-            options.extend(_chest_options(obj, inventory))
+            options.extend(_chest_options(model, obj, inventory))
 
     return options
 
 
-def _chest_options(obj: ObjectInfo, inventory: Mapping[str, int]) -> list[Option]:
+def _chest_options(
+    model: WorldModel, obj: ObjectInfo, inventory: Mapping[str, int]
+) -> list[Option]:
     options: list[Option] = []
     contents = obj.contents()
     for kind in sorted(inventory):
@@ -659,11 +655,9 @@ def _chest_options(obj: ObjectInfo, inventory: Mapping[str, int]) -> list[Option
             Option(
                 key=f"deposit:{obj.object_id}:{kind}",
                 description=f"put {kind} from your pack into chest {obj.object_id}",
-                intent=pb.Intent(
-                    deposit=pb.DepositIntent(
-                        object_id=obj.object_id, kind=kind, amount=inventory[kind]
-                    )
-                ),
+                intent=deposit_attempt(
+                    model, obj.object_id, kind, inventory[kind]
+                ).intent,
             )
         )
     for kind, count in sorted(contents.items()):
@@ -671,26 +665,27 @@ def _chest_options(obj: ObjectInfo, inventory: Mapping[str, int]) -> list[Option
             Option(
                 key=f"withdraw:{obj.object_id}:{kind}",
                 description=f"take {kind} out of chest {obj.object_id} ({count} inside)",
-                intent=pb.Intent(
-                    withdraw=pb.WithdrawIntent(
-                        object_id=obj.object_id, kind=kind, amount=min(count, 5)
-                    )
-                ),
+                intent=withdraw_attempt(
+                    model, obj.object_id, kind, min(count, 5)
+                ).intent,
             )
         )
     return options
 
 
-def _extract_option(obj: ObjectInfo, position: Coord, wielded: str) -> Option | None:
+def _extract_option(
+    model: WorldModel, obj: ObjectInfo, position: Coord, wielded: str
+) -> Option | None:
     """Harvesting one object, or None when what is in hand cannot work it.
 
     A vein needs a pickaxe of the right tier; everything else yields to bare
     hands, only slower.
     """
-    if not items.can_extract(obj.object_type, wielded):
+    attempt = extract_attempt(model, obj.object_id)
+    if not attempt.allowed:
         return None
     yields = items.EXTRACT_YIELD.get(obj.object_type, "materials")
-    work = items.extract_work_per_action(obj.object_type, wielded)
+    work = items.extract_work(wielded, obj.object_type)
     holding = f"with the {wielded}" if wielded else "bare-handed"
     return Option(
         key=f"extract:{obj.object_id}",
@@ -699,7 +694,7 @@ def _extract_option(obj: ObjectInfo, position: Coord, wielded: str) -> Option | 
             f"{obj.remaining} units left ({work} work per action {holding}, "
             f"{items.EXTRACT_THRESHOLD} work per unit)"
         ),
-        intent=pb.Intent(extract=pb.ExtractIntent(object_id=obj.object_id)),
+        intent=attempt.intent,
     )
 
 
@@ -730,72 +725,35 @@ def _crafting_options(model: WorldModel, inventory: Mapping[str, int]) -> list[O
     return options
 
 
-def can_place_ground(model: WorldModel, position: Coord) -> bool:
-    """Whether a road or floor may go on `position`.
-
-    Ground objects never block, but they may not cover a natural object and
-    only one may lie on a tile.
-    """
-    if not model.is_known(position):
-        return False
-    tile = model.tiles.get(position)
-    if tile is not None and not tile.walkable:
-        return False
-    for obj in model.object_at(position):
-        if obj.object_type in items.NATURAL_OBJECT_TYPES:
-            return False
-        if obj.object_type in items.GROUND_LAYER_KINDS:
-            return False
-    return True
-
-
-def can_place_structure(model: WorldModel, position: Coord) -> bool:
-    """Whether a wall, door, bed or other structure may go on `position`."""
-    if not model.is_known(position) or not model.is_walkable(position):
-        return False
-    return not model.structure_objects_at(position)
-
-
 def _place_options(model: WorldModel, inventory: Mapping[str, int]) -> list[Option]:
     """One placement per carried building item: own tile for ground, one free
     neighbour for structures."""
     options: list[Option] = []
-    position = model.position
     for kind in sorted(JEV_PLACEABLE_KINDS & set(inventory)):
         if len(options) >= PLACE_OPTION_LIMIT:
             break
         if items.is_ground_kind(kind):
-            if not can_place_ground(model, position):
+            here = place_attempt(model, kind, NO_DIRECTION)
+            if not here.allowed:
                 continue
             options.append(
                 Option(
                     key=f"place:{kind}:here",
                     description=f"lay {kind} down on the tile you are standing on",
-                    intent=pb.Intent(
-                        place=pb.PlaceIntent(kind=kind, direction=NO_DIRECTION)
-                    ),
+                    intent=here.intent,
                 )
             )
             continue
         for direction in ORDERED_DIRECTIONS:
-            target = offset(position, direction)
-            if not can_place_structure(model, target):
-                continue
-            if any(entity.position == target for entity in model.entities_near(2)):
-                continue
-            # A settler once walled the six free neighbours of her own tile one
-            # by one and starved in the cell. A door lets settlers through, so
-            # placing one is never a seal.
-            if blocks_movement(kind) and would_seal(model, position, target):
+            attempt = place_attempt(model, kind, direction)
+            if not attempt.allowed:
                 continue
             name = direction_name(direction)
             options.append(
                 Option(
                     key=f"place:{kind}:{name}",
                     description=f"set down the {kind} on the empty tile to the {name}",
-                    intent=pb.Intent(
-                        place=pb.PlaceIntent(kind=kind, direction=direction)
-                    ),
+                    intent=attempt.intent,
                 )
             )
             break  # one placement direction per kind is enough choice for Jev

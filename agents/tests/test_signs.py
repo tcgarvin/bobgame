@@ -25,6 +25,7 @@ from agents.jev_agent.stint import Brief, Stint
 from agents.jev_agent.worldmodel import WorldModel
 
 from helpers import FakeJevClient, make_entity, make_object, make_observation
+from agents.jev_agent.outcomes import ActionOutcome
 from test_planner import RecordingBridge  # noqa: F401 - fixtures live there
 
 
@@ -357,9 +358,9 @@ class _CraftingBridge(RecordingBridge):
     future resolves (`JevAgent._resolve_awaiting_direct` runs after
     `self._model.update`)."""
 
-    async def direct_action(self, intent: object, description: str) -> str:
+    async def direct_action(self, intent: object, description: str) -> ActionOutcome:
         outcome = await super().direct_action(intent, description)
-        if "crafted sign" in outcome:
+        if "crafted sign" in outcome.detail:
             observe(
                 self.model,
                 self.model.tick,

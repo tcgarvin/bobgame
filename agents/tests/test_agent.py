@@ -236,10 +236,12 @@ async def test_a_direct_action_is_submitted_and_its_outcome_returned(
 
     async def plan() -> None:
         outcomes.append(
-            await agent.direct_action(
-                pb.Intent(extract=pb.ExtractIntent(object_id="tree_1")),
-                "extract tree_1",
-            )
+            (
+                await agent.direct_action(
+                    pb.Intent(extract=pb.ExtractIntent(object_id="tree_1")),
+                    "extract tree_1",
+                )
+            ).text()
         )
         await asyncio.sleep(3600)
 
@@ -451,10 +453,12 @@ async def test_a_reflex_interrupts_an_in_flight_direct_action(
 
     async def plan() -> None:
         outcomes.append(
-            await agent.direct_action(
-                pb.Intent(extract=pb.ExtractIntent(object_id="tree_1")),
-                "extract tree_1",
-            )
+            (
+                await agent.direct_action(
+                    pb.Intent(extract=pb.ExtractIntent(object_id="tree_1")),
+                    "extract tree_1",
+                )
+            ).text()
         )
         await asyncio.sleep(3600)
 
@@ -785,7 +789,7 @@ async def test_the_sleep_tool_returns_when_the_settler_wakes(tmp_path: Path) -> 
         outcome = await agent.direct_action(
             pb.Intent(sleep=pb.SleepIntent()), "sleep on the ground"
         )
-        results.append(outcome)
+        results.append(outcome.text())
         results.append(await agent.await_wake(1))
         await asyncio.sleep(3600)
 
@@ -808,7 +812,9 @@ async def test_a_wake_intent_is_the_one_thing_a_sleeper_may_submit(
     async def plan() -> None:
         await asyncio.sleep(0)
         outcomes.append(
-            await agent.direct_action(pb.Intent(wake=pb.WakeIntent()), "wake up")
+            (
+                await agent.direct_action(pb.Intent(wake=pb.WakeIntent()), "wake up")
+            ).text()
         )
         await asyncio.sleep(3600)
 
@@ -843,7 +849,7 @@ async def test_a_sleeper_holds_the_wake_and_refuses_other_queued_actions(
     picked = agent._wake_request_while_asleep()
 
     assert picked is wake
-    assert move.future.result() == "move north -> failed: asleep"
+    assert move.future.result().text() == "move north -> failed: asleep"
 
 
 async def test_the_status_report_carries_the_running_cost(tmp_path: Path) -> None:
@@ -899,9 +905,12 @@ async def test_a_conversation_that_starts_by_itself_interrupts_a_direct_action(
 
     async def plan() -> None:
         outcomes.append(
-            await agent.direct_action(
-                pb.Intent(eat=pb.EatIntent(item_type="berry", amount=1)), "eat berry"
-            )
+            (
+                await agent.direct_action(
+                    pb.Intent(eat=pb.EatIntent(item_type="berry", amount=1)),
+                    "eat berry",
+                )
+            ).text()
         )
         # Anything asked for while the seat lasts gets the same answer at once.
         outcomes.append(await agent.wait_ticks(1))
@@ -1023,9 +1032,12 @@ async def test_being_hailed_interrupts_a_direct_action(tmp_path: Path) -> None:
 
     async def plan() -> None:
         outcomes.append(
-            await agent.direct_action(
-                pb.Intent(eat=pb.EatIntent(item_type="berry", amount=1)), "eat berry"
-            )
+            (
+                await agent.direct_action(
+                    pb.Intent(eat=pb.EatIntent(item_type="berry", amount=1)),
+                    "eat berry",
+                )
+            ).text()
         )
         await asyncio.sleep(3600)
 

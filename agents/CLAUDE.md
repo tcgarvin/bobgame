@@ -110,6 +110,20 @@ a `usage` block on planner turns and conversation turns, and `pricing.json`
 written at startup with the prices the run is billed at (`pricing.py`). Contract:
 [docs/11_cost_accounting.md](../docs/11_cost_accounting.md).
 
+### Game rules live in `rules/`
+
+The kinds, the recipe table, the blocking and extraction tables and every
+number behind food, health, fatigue, sleep, combat, wolves, conversations,
+signs, the day clock, the view radius and the floor codes are `bobgame_rules`,
+the dependency-free package at the repo root (`rules/`, a uv path dependency
+the world uses too). `jev_agent/items.py` imports them and re-exports them
+under the names the agent code uses, and keeps only what is genuinely
+agent-side: the prompt prose (`island_opening`, `HABITAT_TEXT`,
+`recipe_table_text`, `source_text`, `sleep_recovery_text`, the fatigue words),
+the terrain-generator habitat numbers, and the thresholds that are not world
+physics (`FOOD_ALERT_AT`, `DEFAULT_SETTLER_COUNT`). A rule changes in `rules/`
+and both sides follow; nothing is mirrored by hand any more.
+
 ### Module map
 
 Modules sit on numbered import layers and may only import from a strictly
@@ -122,15 +136,15 @@ vocabulary lives in `briefs.py` and the planner's view of the tick loop in
 | --- | --- |
 | `client.py` | Async wrapper over the sync gRPC stubs (stream on a thread, unary via `to_thread`), lease renewal every 10 s |
 | `geometry.py` | Direction tables, offsets, Chebyshev distance (`+y` is south) |
-| `items.py` | The agent-side mirror of `world/src/world/items.py`: recipes, item kinds, object layers, extraction yields |
-| `outcomes.py` | Reading the world's answer to one submitted intent (`action_succeeded`) |
+| `items.py` | The agent's view of `bobgame_rules` (re-exported under the names agent code uses), plus the agent-side prose and thresholds built on it |
+| `outcomes.py` | The world's answer to one intent as data: the frozen `ActionOutcome` (`ok`, `action`, `detail`, `not_run`, and the one `text()` rendering), and one parser per world detail shape (`placed_object_id`, `heard_ids`, `parse_gave`, `parse_craft_progress`, `parse_seat`). No dependencies at all, so `worldmodel.py` and the planner both use it |
 | `build.py` | Shape geometry and the `BuildExecutor` that drives the planner's `build` tool |
 | `pathfinding.py` | 8-connected A* with the world's diagonal-blocking rule; unknown tiles cost 3 |
 | `walk.py` | The one set of walking primitives — stand candidates, next step with stop-adjacent, the arrival test, the backstop tick budget — and `WalkDriver`, the code driver every code-owned walk uses |
 | `worldmodel.py` | Everything ever observed: tiles, objects, entities, own history, settlement |
 | `briefs.py` | The vocabulary the option and stint layers share: `Option`, `TravelState`, `Brief`, `BriefHail`, `DriverChoice`, `StintDriver`, and the `interrupted: ...` strings |
-| `bridge.py` | `AgentBridge`, the protocol the planner needs from the tick loop; `JevAgent` implements it |
-| `actions.py` | Preconditions and intent construction both layers share: an `Attempt` is either the intent to submit or the sentence saying why not (`shout_attempt`, `sleep_attempt`, `converse_intent`, `give_intent`) |
+| `bridge.py` | `AgentBridge`, the protocol the planner needs from the tick loop; `JevAgent` implements it. `direct_action` returns an `outcomes.ActionOutcome`, not a sentence |
+| `actions.py` | Preconditions and intent construction both layers share: an `Attempt` is either the intent to submit or the sentence saying why not. One `*_attempt` per action kind (shout, sleep, eat, collect-here, extract, dismantle, place, pickup, drop, deposit, withdraw, hail, join, give, write note, write sign), the placement helpers (`can_place_ground`, `can_place_structure`, `place_failure_lines`) and the `EXPOSURE` table saying which layer may take which kind |
 | `recipes.py` | Everything both layers do with the recipe table: `craftable_now`, the option's craft description, the recipe-chain crafting loop (`craft_chain`, `craft_once`, `stock_one`, `CraftTally`) and the "where does this raw material come from" lines |
 | `enclosure.py` | Seals, rooms, the enclosed fact and the actor's own pieces: the flood fills `build.py`, `options.py`, `planner.py` and `jevstate.py` share |
 | `options.py` | The legal actions for this tick, each carrying its proto Intent; walking is `step_towards:<target>` with a per-type quota (`STEP_GROUPS`), and `OPTION_SECTIONS` fixes what gets truncated first. Preconditions and intents come from `actions.py`, `recipes.py` and `walk.py` |
@@ -257,7 +271,7 @@ blocks until the conversation ends. The world seats the target without asking,
 so `joined_conversation` also reads `hail conv_N <target>` (the hailer) and
 `hailed conv_N <hailer>` (the target), and `UNASKED_VIA` (`hailed`) is what
 `_detect_join` treats as a seat nobody asked for.
-`conversation_start` `via` is `hail` or `hailed`. `items.py` mirrors
+`conversation_start` `via` is `hail` or `hailed`. `items.py` re-exports
 `ACTION_HAIL`, `ACTION_HAILED`, `CONVERSE_ACTION_TYPE` and
 `HAIL_COOLDOWN_TICKS` (60): a settler cannot be hailed until that long after
 its last conversation ended.
@@ -286,7 +300,8 @@ any other seat.
 `open_conversation` take a required `purpose` argument (only the settler that
 opened or hailed sees it, rendered in the converser's prompt as "You started
 this conversation because: …"); `BriefHail` carries an optional `purpose` that
-flows the same way through `JevAgent._detect_join`/`hailed_target`. The closing
+flows the same way through `JevAgent._detect_join`, which reads the
+`outcomes.Seat` `joined_conversation` returns. The closing
 converser call returns two fields (`ClosingNote`: `agreed_or_learned`,
 `you_said_you_would`), both appended to the journal and both leading
 `ConversationReport.to_text()`. `describe_world` marks an asleep settler in view
@@ -302,7 +317,7 @@ Facts that live only here; the runs that produced them are in
   health H/M, fatigue F/M`, and `body_alerts(model)` returns the `!!` lines —
   physics only, no advice — for food at or below `items.FOOD_ALERT_AT` (25),
   food 0 (the starvation rate and what a berry restores) and fatigue within
-  `FATIGUE_ALERT_MARGIN` (10) of `items.MAX_FATIGUE`, plus
+  `FATIGUE_ALERT_MARGIN` (10) of `items.PLAYER_MAX_FATIGUE`, plus
   `enclosure.enclosed_fact` (below). `BudgetedToolset.call_tool` appends them
   under the threat alert and `Planner.build_prompt` puts the same lines above
   the `look`. A dead or sleeping body gets none.
@@ -332,9 +347,9 @@ Facts that live only here; the runs that produced them are in
   actions; otherwise it names the nearest known bushes that had one.
 - **A failed `craft` names where the raw input comes from.**
   `items.source_text(kind)` (rendered by `recipes.source_lines`) is generic over `EXTRACT_YIELD` / `EXTRACT_TOOLS` /
-  `EXTRACT_REQUIRED_TOOLS` and appends each source's habitat sentence from
+  `VEIN_REQUIRED_TOOLS` and appends each source's habitat sentence from
   `items.HABITAT_TEXT` (written from `world/terrain/objects.py`'s placement
-  rules, with the numbers mirrored: `REED_BANK_WIDTH`, `REED_COAST_EXCLUSION`,
+  rules, whose generation-time numbers are still restated here: `REED_BANK_WIDTH`, `REED_COAST_EXCLUSION`,
   `CLAY_MIN_DISTANCE`/`CLAY_MAX_DISTANCE`, `BUSH_WATER_MIN_DISTANCE`/
   `BUSH_WATER_MAX_DISTANCE`, `TREE_COAST_DISTANCE`, `ORE_EXCLUSION_RADIUS`).
   `recipes.missing_input_lines` adds it plus the nearest `SOURCES_SHOWN` (3)
@@ -383,6 +398,24 @@ Facts that live only here; the runs that produced them are in
   The first interrupted result does *not* carry the conversation report — that
   would block a single-tick tool on the whole conversation; it arrives as a
   note in the next tool result.
+- **Requests a sleeping, collapsed or dead body makes are refused at once.**
+  `JevAgent.inactive_reason()` answers `asleep`, `new_moon` or `death`, and
+  `run_stint`, `direct_action`, `wait_ticks` and `await_conversation` all check
+  it before queueing anything. `_drain_for_sleep` sweeps the queues once, on
+  the tick the body falls asleep; a multi-phase tool's own Python loop
+  (`build`'s three resupply rounds, `craft_once`'s work loop,
+  `recipes.craft_chain`, `talk_to`'s walk-then-hail, `place_sign`) goes on
+  calling after that, and a request queued then sat there all night, so
+  `drained()` answered "a stint is queued" and the whole save was abandoned
+  (docs/14). A refused stint comes back as a finished `StintReport` of zero
+  ticks carrying that reason, which is what breaks every one of those loops.
+  The `sleep`/`wake` tools' own `await_wake` is the deliberate exception.
+- **The world's answer is data, not a sentence.** The tick loop folds the
+  `entity_acted` event into one frozen `outcomes.ActionOutcome`
+  (`_resolve_awaiting_direct`), and the planner's tools read `ok`, `detail`,
+  `placed_object_id` and `heard` instead of re-reading the rendered line for
+  `" ok:"`, a `sign_\d+` regex or a `"say ok: heard: "` marker. `text()` is the
+  one place the line the model sees is built, and it is unchanged.
 - **One rule per action, for both layers.** `actions.py` holds the
   preconditions and intents Jev's option layer and the planner's tools both
   need, as an `Attempt` (the intent to submit, or the sentence saying why not
@@ -392,7 +425,18 @@ Facts that live only here; the runs that produced them are in
   `sleep` refuses a body below `items.MIN_SLEEP_FATIGUE` on both sides,
   stating the number, where the planner used to spend a tick on the world's
   refusal. `converse_intent` and `give_intent` live there too, so the
-  conversation-text truncation happens in exactly one place.
+  conversation-text truncation happens in exactly one place. Every other
+  action kind has an `*_attempt` as well, so the planner is no longer blind
+  where Jev's option layer could see: `pickup` names the pile it is not
+  standing on, `deposit`/`withdraw` the chest that is out of reach or empty of
+  that kind, `drop`/`give` an item the pack does not hold, `extract` a vein
+  the wielded tool cannot bite, `dismantle` something nobody placed or five
+  tiles off, and `place` the occupant of the tile and the free sides — each
+  before a tick is spent. `actions.EXPOSURE` writes the deliberate
+  asymmetries down with their reasons (Jev gets no `dismantle`, `place_sign`,
+  `write_*` or `build`; the planner no `move`, `attack`, `extract` or
+  `collect`), and `tests/test_actions.py` checks it against the real option
+  keys and the real tool names.
 - **A bad kwarg never fails a turn.** `BudgetedToolset.get_tools` wraps every
   tool's argument validator (`_FriendlyArgsValidator`) so a bad call's retry
   names the tool's actual parameters, and `PLANNER_TOOL_RETRIES` is 3.
@@ -445,11 +489,11 @@ a recorded `jev_states.jsonl.gz`.
 
 ### Stations, metal and sleep (docs/10_metal_and_sleep.md)
 
-`items.py` also mirrors the deeper tree: `Recipe` carries `station`
+`items.py` re-exports the deeper tree: `Recipe` carries `station`
 (`""`, `workshop_table`, `furnace` or `anvil`) and `work` (craft actions),
 `EXTRACT_TOOLS`/`EXTRACT_WORK_BY_TOOL` give the tool tiers,
-`EXTRACT_REQUIRED_TOOLS` gates the two veins, and the fatigue, day and
-sleep-recovery numbers live beside them. `recipe_table_text()` renders the
+`VEIN_REQUIRED_TOOLS` gates the two veins, and the fatigue, day and
+sleep-recovery numbers come with them. `recipe_table_text()` renders the
 station and the action count, and the planner prompt is generated from it.
 
 `options.py` offers a craft only when the recipe's station is on or next to the
@@ -487,10 +531,11 @@ after a wake or a respawn drops `Planner.history`; `build_prompt` waits (up to
 
 ### Building (docs/08_building.md)
 
-`items.py` restates the world's contract for the agent: the full recipe table
+`items.py` re-exports the world's contract for the agent: the full recipe table
 (inputs, output count, `station`, `work`), the ground/structure layer split, the
-building kinds, and what `reeds` and `clay_deposit` yield. It is a mirror, so a
-change in `world/src/world/items.py` has to be copied here in the same commit.
+building kinds, and what `reeds` and `clay_deposit` yield. They are the same
+objects the world enforces (see "Game rules live in `rules/`" below), so there
+is nothing to copy.
 
 What Jev may choose (`options.py`):
 
@@ -517,7 +562,8 @@ What Jev may choose (`options.py`):
   and how
   to operate Jev. It gives no strategy or etiquette; those are meant to
   emerge. Keep advice out of option descriptions and alerts too. The wolf
-  numbers in `items.py` mirror `world/wolves.py` and `world/items.py`.
+  numbers come from `bobgame_rules.entities`, the same ones `world/wolves.py`
+  uses.
   **One relaxation, by the owner's decision**: the communication tools. Each of
   `shout`, `talk_to`, `open_conversation`, `join_conversation`, a message board
   and a sign states plainly, in the

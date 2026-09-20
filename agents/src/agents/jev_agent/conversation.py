@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +35,7 @@ from . import items
 from .geometry import Coord
 from .journal import append_scratch_line, read_journal
 from .llm import planner_model_settings, resolve_model_name
+from .outcomes import Seat, parse_gave, parse_seat
 from .actions import converse_intent, give_intent
 from .walk import WalkDriver, stand_candidates
 from .pricing import CostLedger, usage_from_messages
@@ -122,9 +122,6 @@ DUPLICATE_TICK_WINDOW = 2
 
 # Stands in for the answer a cancelled or failed call never produced.
 NO_MOVE_ACTION = ""
-
-# `gave 3 stone to mira`, the world's success details for a `give`.
-_GAVE_PATTERN = re.compile(r"^gave (?P<amount>\d+) (?P<kind>\S+) to (?P<target>\S+)$")
 
 
 def converser_narrative(
@@ -425,8 +422,8 @@ def free_seat_tiles(model: WorldModel, anchor: Coord) -> list[Coord]:
 ApproachDriver = WalkDriver
 
 
-def joined_conversation(digest: TickDigest) -> tuple[str, str]:
-    """`(conversation id, action)` for the seat the actor took on this tick.
+def joined_conversation(digest: TickDigest) -> Seat:
+    """The seat the actor took on this tick, as `outcomes.Seat`.
 
     The world reports a successful `ConverseIntent` as an `EntityActed` with
     action type `converse` and details that start with the action name and the
@@ -434,36 +431,20 @@ def joined_conversation(digest: TickDigest) -> tuple[str, str]:
     the settler who hailed one, and `hailed conv_12 ivo` for the settler that
     hail seated.
 
-    Both values are empty when the actor took no seat.
+    Every field is empty when the actor took no seat.
     """
     for acted in digest.own_actions:
         if acted.action_type != CONVERSE_ACTION_TYPE or not acted.success:
             continue
-        parts = acted.details.split()
-        if len(parts) >= 2 and parts[0] in JOIN_ACTIONS:
-            return (parts[1], parts[0])
-    return ("", "")
+        seat = parse_seat(acted.details)
+        if seat.conversation_id and seat.action in JOIN_ACTIONS:
+            return seat
+    return Seat()
 
 
 def joined_conversation_id(digest: TickDigest) -> str:
     """The conversation the actor opened, joined or was seated in this tick."""
-    return joined_conversation(digest)[0]
-
-
-def hailed_target(digest: TickDigest) -> str:
-    """The settler this actor addressed, when this tick's seat came from a hail.
-
-    Details read `hail conv_12 mira`; `""` when the seat came from anything
-    else. Used to match a Jev-chosen `hail:<settler>` option back to the
-    `BriefHail` that named it, for its purpose (docs/09 section 10, item 4).
-    """
-    for acted in digest.own_actions:
-        if acted.action_type != CONVERSE_ACTION_TYPE or not acted.success:
-            continue
-        parts = acted.details.split()
-        if len(parts) >= 3 and parts[0] == ACTION_HAIL:
-            return parts[2]
-    return ""
+    return joined_conversation(digest).conversation_id
 
 
 def transcript_for(
@@ -782,12 +763,11 @@ class ConversationSession:
         for acted in digest.others_actions:
             if acted.action_type != GIVE_ACTION_TYPE or not acted.success:
                 continue
-            match = _GAVE_PATTERN.match(acted.details)
-            if match is None or match.group("target") != self.model.entity_id:
+            given = parse_gave(acted.details)
+            if not given.happened or given.target != self.model.entity_id:
                 continue
-            kind = match.group("kind")
-            self._received_items[kind] = self._received_items.get(kind, 0) + int(
-                match.group("amount")
+            self._received_items[given.kind] = (
+                self._received_items.get(given.kind, 0) + given.amount
             )
 
     def _end_reason(self, conversation: ConversationInfo | None) -> str:

@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 import structlog
 
+from . import items
 from .geometry import Coord
 from .briefs import Brief
 from .worldmodel import TickDigest, WorldModel
@@ -34,8 +35,8 @@ REFLEX_CLEAR_TICKS = 3
 
 MIN_TRIGGER_DISTANCE = 1
 MAX_TRIGGER_DISTANCE = 8
-# How far the end condition looks for wolves; the observation window is 8.
-REFLEX_VIEW_RADIUS = 8
+# How far the end condition looks for wolves: the whole observation window.
+REFLEX_VIEW_RADIUS = items.VIEW_RADIUS
 
 TRIGGER_WOLF_NEAR = "wolf_near"
 TRIGGER_DAMAGE = "damage"

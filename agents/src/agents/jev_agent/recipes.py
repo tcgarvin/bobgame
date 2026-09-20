@@ -18,7 +18,7 @@ from typing import Mapping, Protocol
 from .. import world_pb2 as pb
 from . import items
 from .geometry import chebyshev
-from .outcomes import CRAFTED_DETAIL, action_succeeded
+from .outcomes import CRAFTED_DETAIL, ActionOutcome
 from .worldmodel import WorldModel
 
 # How deep `build` follows a recipe's inputs: wood -> plank -> wood_wall.
@@ -78,7 +78,7 @@ class Crafter(Protocol):
     def model(self) -> WorldModel:
         """The shared world model, updated every tick."""
 
-    async def direct_action(self, intent: pb.Intent, description: str) -> str:
+    async def direct_action(self, intent: pb.Intent, description: str) -> ActionOutcome:
         """Submit one intent on the next tick and report what happened."""
 
 
@@ -97,9 +97,7 @@ def craftable_now(model: WorldModel, inventory: Mapping[str, int]) -> list[str]:
     for name, recipe in items.RECIPES.items():
         if recipe.station and model.station_near(recipe.station) is None:
             continue
-        if any(
-            inventory.get(kind, 0) < amount for kind, amount in recipe.inputs.items()
-        ):
+        if any(inventory.get(kind, 0) < amount for kind, amount in recipe.inputs):
             continue
         if name in CRAFT_ONCE_KINDS and inventory.get(name, 0) > 0:
             continue
@@ -129,9 +127,9 @@ def craft_description(model: WorldModel, recipe_name: str) -> str:
     station = model.station_near(recipe.station)
     done = 0
     if station is not None:
-        started, actions = station.craft_progress(model.entity_id)
-        if started == recipe_name:
-            done = actions
+        progress = station.craft_progress(model.entity_id)
+        if progress.recipe == recipe_name:
+            done = progress.actions
     return f"{text}; {recipe.work} craft actions, {done} done so far"
 
 
@@ -178,7 +176,7 @@ def missing_input_lines(model: WorldModel, recipe: items.Recipe) -> list[str]:
     """For every input the pack is short of, where that input comes from."""
     inventory = model.self_info.inventory
     lines: list[str] = []
-    for name, amount in sorted(recipe.inputs.items()):
+    for name, amount in sorted(recipe.inputs):
         if inventory.get(name, 0) >= amount:
             continue
         lines.extend(source_lines(model, name))
@@ -241,11 +239,11 @@ async def craft_once(crafter: Crafter, recipe: str, known: items.Recipe) -> str:
         outcome = await crafter.direct_action(
             pb.Intent(craft=pb.CraftIntent(recipe=recipe)), f"craft {recipe}"
         )
-        lines.append(outcome)
-        if not action_succeeded(outcome):
+        lines.append(outcome.text())
+        if not outcome.ok:
             failed = True
             break
-        if CRAFTED_DETAIL in outcome:
+        if outcome.detail.startswith(CRAFTED_DETAIL):
             break
     if failed:
         lines.extend(missing_input_lines(crafter.model, known))
@@ -265,7 +263,7 @@ async def _craft_inputs(
     turns 2 wood into the plank a wood_wall eats. False means it cannot run,
     and `tally.stopped` says why.
     """
-    for name, amount in recipe.inputs.items():
+    for name, amount in recipe.inputs:
         if carried(crafter, name) >= amount:
             continue
         if depth <= 0 or name not in items.RECIPES:

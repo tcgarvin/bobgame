@@ -18,7 +18,7 @@ from .briefs import EMPTY_PLACES, BriefHail, TravelState
 from .pathfinding import NO_PATH, next_step, path_length
 from .worldmodel import EntityInfo, HeardUtterance, ObjectInfo, WorldModel
 
-VIEW_RADIUS = 8
+VIEW_RADIUS = items.VIEW_RADIUS
 MAP_SIZE = VIEW_RADIUS * 2 + 1
 NEARBY_LIMIT = 25
 ENTITY_LIMIT = 8
@@ -329,8 +329,8 @@ def _nearby_objects(
 
 # Physics only: what to do about a wolf is the planner's brief to decide.
 WOLF_FACTS = (
-    f"A wolf has {items.WOLF_HEALTH} health and bites an adjacent settler for "
-    f"{items.WOLF_DAMAGE} every tick. Every settler attacking the same wolf "
+    f"A wolf has {items.WOLF_MAX_HEALTH} health and bites an adjacent settler for "
+    f"{items.WOLF_ATTACK_DAMAGE} every tick. Every settler attacking the same wolf "
     "hits it on the same tick."
 )
 
@@ -340,7 +340,7 @@ FATIGUE_FACTS = (
     f"Fatigue rises 1 every {items.FATIGUE_INTERVAL_DAY} ticks by day and every "
     f"{items.FATIGUE_INTERVAL_NIGHT} ticks at night. From {items.TIRED_FATIGUE} "
     "you are tired: the work a tool adds per extract action is halved and "
-    f"your attacks hit for 1 less. At {items.MAX_FATIGUE} you collapse where you "
+    f"your attacks hit for 1 less. At {items.PLAYER_MAX_FATIGUE} you collapse where you "
     f"stand and sleep until fatigue falls to {items.COLLAPSE_WAKE_FATIGUE}. "
     f"Sleeping on a bed recovers {items.sleep_recovery_text(True, True)} at "
     f"night and {items.sleep_recovery_text(True, False)} by day; on the ground "
@@ -350,7 +350,7 @@ FATIGUE_FACTS = (
 )
 
 DAY_FACTS = (
-    f"A day is {items.DEFAULT_DAY_LENGTH} ticks: the first two thirds are light "
+    f"A day is {items.DEFAULT_DAY_LENGTH_TICKS} ticks: the first two thirds are light "
     "and the rest is night."
 )
 

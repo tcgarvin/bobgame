@@ -13,6 +13,7 @@ import pytest
 from agents import world_pb2 as pb
 from agents.jev_agent import items
 from agents.jev_agent.agent import (
+    ASLEEP_REJECTION,
     MODE_CONVERSATION,
     MODE_PLANNING,
     SAVE_WAIT_ENV,
@@ -34,6 +35,8 @@ from agents.jev_agent.snapshot import (
     snapshot_path,
     write_snapshot,
 )
+from agents.jev_agent.build import BUILD_OUT_OF_ITEMS
+from agents.jev_agent.recipes import CraftTally, craft_chain, craft_once
 from agents.jev_agent.stint import Brief
 from agents.jev_agent.worldmodel import TileInfo, WorldClock, WorldModel
 
@@ -53,7 +56,7 @@ from helpers import (
 from test_agent import FakeJournalWriter, FakeWorldClient, build_agent
 
 
-NIGHT_START = items.night_start_tick()
+NIGHT_START = items.night_start_tick(items.DEFAULT_DAY_LENGTH_TICKS)
 
 
 def moon_clock(
@@ -332,14 +335,81 @@ async def test_a_settler_whose_planner_has_not_parked_is_not_drained(
     assert agent.drained().reason == "the planner turn has not ended yet"
 
 
-async def test_a_queued_stint_keeps_a_settler_from_being_drained(
+async def test_a_stint_asked_for_by_a_sleeper_is_refused_not_queued(
     tmp_path: Path,
 ) -> None:
-    agent = await drained_agent(tmp_path)
-    asyncio.create_task(agent.run_stint(Brief("go", "never", 3)))
-    await asyncio.sleep(0)
+    """A multi-phase `build` kept asking after the sleep drain had run once.
 
-    assert agent.drained().reason == "a stint is queued"
+    `_drain_for_sleep` sweeps the queues on the tick the body falls asleep;
+    the tool's own Python loop then called `run_stint` for its next phase, the
+    request sat in the queue all night, and `drained()` answered "a stint is
+    queued", which abandoned the whole save.
+    """
+    agent = await drained_agent(tmp_path)
+
+    report = await agent.run_stint(Brief("go", "never", 3))
+
+    assert report.end_reason == END_NEW_MOON
+    assert report.ticks_used == 0
+    assert agent.drained() == DrainState(drained=True, reason="")
+
+
+async def test_every_request_a_sleeper_makes_is_refused_at_once(
+    tmp_path: Path,
+) -> None:
+    """Every entry point on the bridge, so no loop can park on one all night."""
+    agent = await drained_agent(tmp_path)
+
+    outcome = await agent.direct_action(pb.Intent(wait=pb.WaitIntent()), "wait")
+    assert outcome.not_run == ASLEEP_REJECTION
+    assert "failed: asleep" in await agent.wait_ticks(2)
+    assert await agent.await_conversation() is None
+    assert agent.drained() == DrainState(drained=True, reason="")
+
+
+async def test_a_builds_resupply_rounds_stop_on_a_sleepers_refused_stint(
+    tmp_path: Path,
+) -> None:
+    """`build` runs up to three stints per call; each refusal must end one.
+
+    The tool's loop breaks on any end reason other than `build_out_of_items`,
+    so the refused report is what gets it out of the shape and out of the
+    call.
+    """
+    agent = await drained_agent(tmp_path)
+    brief = Brief("lay the road", "every tile has a road", 60)
+
+    reasons = [(await agent.run_stint(brief)).end_reason for _ in range(3)]
+
+    assert reasons == [END_NEW_MOON, END_NEW_MOON, END_NEW_MOON]
+    assert reasons[0] != BUILD_OUT_OF_ITEMS
+    assert agent.drained() == DrainState(drained=True, reason="")
+
+
+async def test_a_craft_loop_forced_asleep_stops_on_the_first_refusal(
+    tmp_path: Path,
+) -> None:
+    """`craft_once` repeats its action per unit of work; one refusal ends it."""
+    agent = await drained_agent(tmp_path)
+
+    text = await craft_once(agent, items.PLANK, items.RECIPES[items.PLANK])
+
+    assert text.count(ASLEEP_REJECTION) == 1
+    assert agent.drained() == DrainState(drained=True, reason="")
+
+
+async def test_a_craft_chain_forced_asleep_gives_up_rather_than_spinning(
+    tmp_path: Path,
+) -> None:
+    """The chain's `while` loop ends when a craft makes nothing (docs/14)."""
+    agent = await drained_agent(tmp_path)
+    tally = CraftTally()
+
+    await craft_chain(agent, items.PLANK, 4, tally)
+
+    assert tally.total == 0
+    assert tally.stopped
+    assert agent.drained() == DrainState(drained=True, reason="")
 
 
 def test_the_drain_wait_comes_from_the_environment(

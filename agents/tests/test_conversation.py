@@ -240,7 +240,8 @@ def test_a_join_is_recognised_as_taking_a_seat() -> None:
         model, 2, events=[acted_event("ada", "converse", True, "join conv_7")]
     )
 
-    assert joined_conversation(digest) == ("conv_7", "join")  # type: ignore[arg-type]
+    seat = joined_conversation(digest)  # type: ignore[arg-type]
+    assert (seat.conversation_id, seat.action) == ("conv_7", "join")
 
 
 def test_a_hail_is_recognised_as_taking_a_seat() -> None:
@@ -249,7 +250,12 @@ def test_a_hail_is_recognised_as_taking_a_seat() -> None:
         model, 2, events=[acted_event("ada", "converse", True, "hail conv_7 mira")]
     )
 
-    assert joined_conversation(digest) == ("conv_7", "hail")  # type: ignore[arg-type]
+    seat = joined_conversation(digest)  # type: ignore[arg-type]
+    assert (seat.conversation_id, seat.action, seat.target) == (
+        "conv_7",
+        "hail",
+        "mira",
+    )
 
 
 def test_being_hailed_is_recognised_as_taking_a_seat() -> None:
@@ -258,7 +264,8 @@ def test_being_hailed_is_recognised_as_taking_a_seat() -> None:
         model, 2, events=[acted_event("ada", "converse", True, "hailed conv_7 ivo")]
     )
 
-    assert joined_conversation(digest) == ("conv_7", "hailed")  # type: ignore[arg-type]
+    seat = joined_conversation(digest)  # type: ignore[arg-type]
+    assert (seat.conversation_id, seat.action) == ("conv_7", "hailed")
 
 
 def test_a_failed_accept_takes_no_seat() -> None:
@@ -267,7 +274,8 @@ def test_a_failed_accept_takes_no_seat() -> None:
         model, 2, events=[acted_event("ada", "converse", False, "not next to mira")]
     )
 
-    assert joined_conversation(digest) == ("", "")  # type: ignore[arg-type]
+    seat = joined_conversation(digest)  # type: ignore[arg-type]
+    assert (seat.conversation_id, seat.action) == ("", "")
 
 
 # -- the session -------------------------------------------------------------

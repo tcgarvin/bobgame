@@ -36,7 +36,7 @@ from .enclosure import (
     would_seal,
 )
 from .briefs import DriverChoice, Option
-from .options import can_place_ground
+from .actions import can_place_ground
 from .pathfinding import find_path
 from .walk import stand_candidates
 from .stint import DANGER_HEALTH_FLOOR
@@ -544,9 +544,7 @@ def supply_text(kind: str, count: int) -> str:
     if recipe is None:
         return f"{kind} cannot be crafted"
     crafts = -(-count // recipe.output_count)
-    totals = " + ".join(
-        f"{amount * crafts} {name}" for name, amount in recipe.inputs.items()
-    )
+    totals = " + ".join(f"{amount * crafts} {name}" for name, amount in recipe.inputs)
     where = f"at a {recipe.station}" if recipe.station else "by hand"
     each = f"{recipe.cost_text()} each" + (
         f", yields {recipe.output_count}" if recipe.output_count > 1 else ""

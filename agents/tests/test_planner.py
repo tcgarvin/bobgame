@@ -64,6 +64,7 @@ from agents.jev_agent.journal import (
     SECTION_TOMORROW,
     Journal,
 )
+from agents.jev_agent.outcomes import ActionOutcome
 from agents.jev_agent.options import BriefHail
 from agents.jev_agent.reflex import EMPTY_REFLEX, NO_REFLEX_LINE, ReflexBrief
 from agents.jev_agent.stint import (
@@ -77,6 +78,7 @@ from agents.jev_agent.tracelog import AgentTrace
 from agents.jev_agent.worldmodel import TranscriptLine, WorldModel
 
 from helpers import (
+    canned_outcome,
     converse_object,
     damaged_event,
     died_event,
@@ -144,13 +146,13 @@ class RecordingBridge:
             tail=["t3 extract:tree_1 -> accepted (eject 0.80, danger 0.01)"],
         )
 
-    async def direct_action(self, intent: pb.Intent, description: str) -> str:
+    async def direct_action(self, intent: pb.Intent, description: str) -> ActionOutcome:
         self.actions.append((intent, description))
         if self.direct_results:
-            return self.direct_results.pop(0)
+            return canned_outcome(self.direct_results.pop(0))
         if self.direct_result:
-            return self.direct_result
-        return f"{description} -> ok"
+            return canned_outcome(self.direct_result)
+        return ActionOutcome.from_event(description, "action", True, "")
 
     async def wait_ticks(self, ticks: int) -> str:
         self.waits.append(ticks)
@@ -264,7 +266,6 @@ async def test_a_failed_pickup_names_the_nearest_piles(
             ],
         )
     )
-    bridge.direct_result = "pickup 1 axe -> pickup failed: no item pile here"
     agent = build_planner_agent("test")
     with agent.override(model=one_tool_call("pickup", {"kind": "axe"})):
         result = await agent.run("go", deps=deps)
@@ -274,7 +275,10 @@ async def test_a_failed_pickup_names_the_nearest_piles(
         for part in message.parts
         if isinstance(part, ToolReturnPart)
     ]
-    assert "no item pile here" in returned[0]
+    # The pile is four tiles off, so the refusal comes before the world sees it.
+    assert "no item pile lies on the tile you stand on" in returned[0]
+    assert "No tick spent." in returned[0]
+    assert bridge.actions == []
     assert "item_pile_3 at (14, 10) (d4): axe x1" in returned[0]
 
 
@@ -1221,14 +1225,39 @@ async def test_a_structure_without_a_direction_is_refused(
 async def test_dismantle_and_rest_submit_their_intents(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
+    bridge.model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            objects=[make_object("wood_wall_1", "wood_wall", (11, 10))],
+        )
+    )
     agent = build_planner_agent("test")
     with agent.override(model=one_tool_call("rest", {"object_id": "bed_1"})):
         await agent.run("go", deps=deps)
-    with agent.override(model=one_tool_call("dismantle", {"object_id": "w_1"})):
+    with agent.override(model=one_tool_call("dismantle", {"object_id": "wood_wall_1"})):
         await agent.run("go", deps=deps)
     submitted = [intent for intent, _ in bridge.actions]
     assert any(intent.HasField("rest") for intent in submitted)
     assert any(intent.HasField("extract") for intent in submitted)
+
+
+async def test_dismantle_refuses_a_piece_out_of_reach(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    """The planner used to spend a tick finding out; now it is told the fact."""
+    bridge.model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            objects=[make_object("wood_wall_9", "wood_wall", (15, 10))],
+        )
+    )
+    agent = build_planner_agent("test")
+    with agent.override(model=one_tool_call("dismantle", {"object_id": "wood_wall_9"})):
+        result = await agent.run("go", deps=deps)
+    assert "5 tiles away" in _returned_text(result)[0]
+    assert bridge.actions == []
 
 
 # -- reflex and conversation tools (docs/09) ---------------------------------
@@ -1421,6 +1450,9 @@ async def test_join_conversation_walks_then_joins(
 async def test_give_submits_a_give_intent(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
+    bridge.model.update(
+        make_observation(6, make_entity("ada", (10, 10), inventory={"plank": 4}))
+    )
     agent = build_planner_agent("test")
     with agent.override(
         model=_call_tool("give", {"entity_id": "mira", "kind": "plank", "amount": 3})
@@ -1432,6 +1464,19 @@ async def test_give_submits_a_give_intent(
     assert intent.give.kind == "plank"
     assert intent.give.amount == 3
     assert description == "give 3 plank to mira"
+
+
+async def test_give_what_you_do_not_carry_is_refused_without_a_tick(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool("give", {"entity_id": "mira", "kind": "plank", "amount": 3})
+    ):
+        result = await agent.run("go", deps=deps)
+
+    assert "you carry no plank to give" in _returned_text(result)[0]
+    assert bridge.actions == []
 
 
 # --- stations, work and sleep (docs/10_metal_and_sleep.md) ------------------
@@ -2338,21 +2383,25 @@ class CraftingBridge(RecordingBridge):
 
     objects: list[pb.WorldObject] = []
 
-    async def direct_action(self, intent: pb.Intent, description: str) -> str:
+    async def direct_action(self, intent: pb.Intent, description: str) -> ActionOutcome:
         self.actions.append((intent, description))
         if not intent.HasField("craft"):
-            return f"{description} -> ok"
+            return ActionOutcome.from_event(description, "action", True, "")
         recipe = RECIPES[intent.craft.recipe]
-        for kind, amount in recipe.inputs.items():
+        for kind, amount in recipe.inputs:
             if self.inventory.get(kind, 0) < amount:
                 self._observe()
-                return f"{description} -> craft failed: not enough {kind}"
+                return ActionOutcome.from_event(
+                    description, "craft", False, f"not enough {kind}"
+                )
             self.inventory[kind] -= amount
         self.inventory[intent.craft.recipe] = (
             self.inventory.get(intent.craft.recipe, 0) + recipe.output_count
         )
         self._observe()
-        return f"{description} -> craft ok: crafted {intent.craft.recipe}"
+        return ActionOutcome.from_event(
+            description, "craft", True, f"crafted {intent.craft.recipe}"
+        )
 
 
 def _build_call(kind: str) -> FunctionModel:

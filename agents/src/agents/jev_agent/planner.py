@@ -9,7 +9,6 @@ moments (craft this, place that) where a whole stint would be overkill.
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -29,7 +28,10 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset, ToolsetTool, WrapperToolset
+from pydantic_ai.toolsets.abstract import SchemaValidatorProt
+from pydantic_core import SchemaValidator
 
 from .. import world_pb2 as pb
 from . import items
@@ -73,15 +75,7 @@ from .build import (
     plan_tiles,
 )
 from .enclosure import enclosed_fact, own_pieces_line
-from .geometry import (
-    NAME_TO_DIRECTION,
-    NO_DIRECTION,
-    ORDERED_DIRECTIONS,
-    Coord,
-    chebyshev,
-    direction_name,
-    offset,
-)
+from .geometry import NAME_TO_DIRECTION, NO_DIRECTION, Coord, chebyshev
 from . import walk
 from .walk import WalkDriver
 from .pathfinding import NO_PATH, path_length
@@ -97,11 +91,30 @@ from .options import (
     MAX_BRIEF_SHOUTS,
     MAX_SHOUT_LENGTH,
     WOLF_ALERT_RADIUS,
-    can_place_ground,
-    can_place_structure,
 )
-from .actions import converse_intent, give_intent, shout_attempt, sleep_attempt
-from .outcomes import CRAFTED_DETAIL, action_succeeded
+from . import actions
+from .actions import (
+    Attempt,
+    collect_here_attempt,
+    converse_intent,
+    deposit_attempt,
+    dismantle_attempt,
+    drop_attempt,
+    eat_attempt,
+    eat_now,
+    give_attempt,
+    hail_attempt,
+    hail_refusal,
+    pickup_attempt,
+    place_attempt,
+    place_failure_lines,
+    shout_attempt,
+    sleep_attempt,
+    withdraw_attempt,
+    write_note_attempt,
+    write_sign_attempt,
+)
+from .outcomes import CRAFTED_DETAIL, ActionOutcome
 from .pricing import CostLedger, usage_from_messages
 from . import recipes
 from .recipes import (
@@ -142,7 +155,7 @@ RECENT_ATTACK_TICKS = 5
 # run for hundreds of ticks, and food falls one point every four of them. The
 # number lives in `items.py` because `stint.py` ends a stint on the same line.
 FOOD_ALERT_AT = items.FOOD_ALERT_AT
-# Fatigue within this much of `items.MAX_FATIGUE` gets the same treatment.
+# Fatigue within this much of `items.PLAYER_MAX_FATIGUE` gets the same treatment.
 FATIGUE_ALERT_MARGIN = 10
 TURN_RETRY_SECONDS = 5.0
 # `craft`, its chain and the "where does this come from" lines live in
@@ -164,9 +177,6 @@ BUSHES_SHOWN = 6
 SIGNS_SHOWN = 8
 # How many known objects of a raw material's source type a failed craft names.
 SOURCES_SHOWN = recipes.SOURCES_SHOWN
-# The world detail for a placed object is "placed <id> at (x, y)".
-SIGN_ID_RE = re.compile(r"\b(sign_\d+)\b")
-
 # pydantic-ai's default retry count per tool call, raised from 2: a validation
 # retry (wrong kwarg name) should not burn the model's only chances to fix a
 # real logic error too (docs/09 section 10, item 3).
@@ -213,14 +223,14 @@ Bodies:
   is ever gone for good. There is no armor: nothing you can make or wear
   softens a bite.
 - Resting on a bed heals {items.REST_HEAL} health per rest.
-- Fatigue runs from 0 to {items.MAX_FATIGUE} and rises 1 every {items.FATIGUE_INTERVAL_DAY} ticks by day and every
+- Fatigue runs from 0 to {items.PLAYER_MAX_FATIGUE} and rises 1 every {items.FATIGUE_INTERVAL_DAY} ticks by day and every
   {items.FATIGUE_INTERVAL_NIGHT} ticks at night. From {items.TIRED_FATIGUE} you are tired: the work a tool adds per
   extract action is halved (bare hands and dismantling stay at 1), your attacks
-  hit for 1 less, and health stops regenerating. At {items.MAX_FATIGUE} you collapse where you stand and sleep until fatigue
+  hit for 1 less, and health stops regenerating. At {items.PLAYER_MAX_FATIGUE} you collapse where you stand and sleep until fatigue
   falls to {items.COLLAPSE_WAKE_FATIGUE}; damage does not wake a collapsed sleeper.
 
 The day and sleep:
-- A day is {items.DEFAULT_DAY_LENGTH} ticks. The first two thirds are light and the last third is
+- A day is {items.DEFAULT_DAY_LENGTH_TICKS} ticks. The first two thirds are light and the last third is
   night. Every tool result says which day it is and how far into it you are.
 - `sleep` lies you down on a bed on or next to your tile, or on the ground
   where you stand, and returns when you wake. A bed recovers {items.sleep_recovery_text(True, True)} at
@@ -234,7 +244,7 @@ The day and sleep:
   food falls to {items.HUNGRY_WAKE_FOOD}, when the bed under you is removed, or on `wake`. It is
   the same number both ways: you cannot lie down that hungry, and if you get
   that hungry while asleep you are woken.
-- On the night of a new moon, at tick-of-day {items.night_start_tick()}, every one of you falls
+- On the night of a new moon, at tick-of-day {items.night_start_tick(items.DEFAULT_DAY_LENGTH_TICKS)}, every one of you falls
   asleep where you stand: in a free bed you are standing next to if there is
   one, otherwise on the ground. It is not a collapse, and the usual refusals
   (fatigue, food) do not apply. Every open conversation closes on that tick.
@@ -246,9 +256,9 @@ The day and sleep:
 
 Wolves and fighting:
 - Wolves roam the island and keep coming for the whole game, a few at a time.
-  A wolf hunts whoever is nearest, has {items.WOLF_HEALTH} health, moves as fast as you do and
-  bites an adjacent settler for {items.WOLF_DAMAGE} every tick.
-- You hit for {items.UNARMED_DAMAGE} unarmed. Wielded, these add damage:
+  A wolf hunts whoever is nearest, has {items.WOLF_MAX_HEALTH} health, moves as fast as you do and
+  bites an adjacent settler for {items.WOLF_ATTACK_DAMAGE} every tick.
+- You hit for {items.DEFAULT_ATTACK_DAMAGE} unarmed. Wielded, these add damage:
   {items.wield_damage_text()}. A weapon only counts while it is equipped.
 - All damage in a tick lands at once: everyone attacking the same wolf hits it
   on the same tick, and it bites back on that tick too.
@@ -267,13 +277,13 @@ Reaching the others, and what each way is good for:
   the conversation); `open_conversation` is good for gathering several around
   a spot.
 - A message board: twenty notes; read from anywhere in view of it
-  ({items.SIGN_READ_RADIUS} tiles), written from on or next to it. Great for
+  ({items.VIEW_RADIUS} tiles), written from on or next to it. Great for
   announcements and standing information many should see over time: plans,
   who is doing what, where things are. It reaches only those who come and
   read it; `look` shows which notes are new to you.
 - Sign: holds one line of at most {items.SIGN_TEXT_MAX} characters, with who wrote it and
   when; shown once to every settler who comes within view of it
-  ({items.SIGN_READ_RADIUS} tiles), and again when it changes. Good for very short permanent
+  ({items.VIEW_RADIUS} tiles), and again when it changes. Good for very short permanent
   messages tied to a place, because everyone who passes is guaranteed to be
   shown it. Not good for temporary messages: it stays until someone rewrites
   or dismantles it. `place_sign` crafts one from 2 wood if you need it, places
@@ -573,10 +583,10 @@ def body_alerts(model: WorldModel) -> list[str]:
             f"{items.STARVATION_INTERVAL_TICKS} ticks. One berry restores "
             f"{items.BERRY_FOOD_RESTORE} food."
         )
-    if info.fatigue >= items.MAX_FATIGUE - FATIGUE_ALERT_MARGIN:
+    if info.fatigue >= items.PLAYER_MAX_FATIGUE - FATIGUE_ALERT_MARGIN:
         alerts.append(
             f"!! FATIGUE {info.fatigue}/{info.max_fatigue}: at "
-            f"{items.MAX_FATIGUE} you collapse where you stand and sleep "
+            f"{items.PLAYER_MAX_FATIGUE} you collapse where you stand and sleep "
             f"until fatigue {items.COLLAPSE_WAKE_FATIGUE}."
         )
     enclosed = enclosed_fact(model)
@@ -649,7 +659,7 @@ class PlannerDeps:
     day_log: DayLog = field(default_factory=DayLog)
 
 
-def _tool_signature_line(tool_def: Any) -> str:
+def _tool_signature_line(tool_def: ToolDefinition) -> str:
     """`sleep takes: bed (optional), other_arg` from a tool's JSON schema.
 
     pydantic-ai's own validation-error text names only the field that was
@@ -677,7 +687,9 @@ class _FriendlyArgsValidator:
     itself (docs/09 section 10, item 3).
     """
 
-    def __init__(self, inner: Any, tool_def: Any) -> None:
+    def __init__(
+        self, inner: SchemaValidator | SchemaValidatorProt, tool_def: ToolDefinition
+    ) -> None:
         self._inner = inner
         self._tool_def = tool_def
 
@@ -685,12 +697,14 @@ class _FriendlyArgsValidator:
         raise ModelRetry(f"{error}\n{_tool_signature_line(self._tool_def)}") from error
 
     def validate_json(self, *args: Any, **kwargs: Any) -> Any:
+        """`SchemaValidator.validate_json`, with a friendlier failure."""
         try:
             return self._inner.validate_json(*args, **kwargs)
         except ValidationError as error:
             self._retry(error)
 
     def validate_python(self, *args: Any, **kwargs: Any) -> Any:
+        """`SchemaValidator.validate_python`, with a friendlier failure."""
         try:
             return self._inner.validate_python(*args, **kwargs)
         except ValidationError as error:
@@ -1222,8 +1236,8 @@ async def _stock_for_build(
     return tally
 
 
-@dataclass
-class _PhaseResult:
+@dataclass(frozen=True)
+class _BuildPhase:
     """What one shape's worth of crafting and building produced."""
 
     lines: list[str]
@@ -1233,7 +1247,7 @@ class _PhaseResult:
 
 async def _build_phase(
     ctx: RunContext[PlannerDeps], plan: BuildPlan, max_ticks: int
-) -> _PhaseResult:
+) -> _BuildPhase:
     """Craft what the shape needs, build it, and craft again when it runs dry.
 
     Crafting and building share one tick budget: every craft action and every
@@ -1259,7 +1273,7 @@ async def _build_phase(
         refusal = [missing_pieces_text(plan, bridge.model.self_info.inventory)]
         if made.stopped:
             refusal.append(f"nothing crafted: {made.stopped}")
-        return _PhaseResult(refusal, None, max_ticks - ticks_left)
+        return _BuildPhase(refusal, None, max_ticks - ticks_left)
 
     executor = BuildExecutor(plan)
     instruction, success = build_brief_text(plan)
@@ -1292,12 +1306,12 @@ async def _build_phase(
             f"no ticks left to build: crafting used the whole "
             f"{max_ticks}-tick budget"
         )
-        return _PhaseResult(lines, executor, max_ticks - ticks_left)
+        return _BuildPhase(lines, executor, max_ticks - ticks_left)
     lines.append(report.to_text())
     lines.append(executor.summary())
     if report.end_reason == BUILD_OUT_OF_ITEMS and made.stopped:
         lines.append(f"  could not craft more {plan.kind}: {made.stopped}")
-    return _PhaseResult(lines, executor, max_ticks - ticks_left)
+    return _BuildPhase(lines, executor, max_ticks - ticks_left)
 
 
 def _door_plan(
@@ -1568,83 +1582,47 @@ def build_planner_agent(
     return agent
 
 
-def _tile_occupants_text(model: WorldModel, target: Coord) -> str:
-    """What is standing on `target`, as the planner's own model sees it."""
-    parts = [obj.object_id for obj in model.object_at(target)]
-    parts.extend(
-        entity.entity_id
-        for entity in model.entities_near(VIEW_RADIUS)
-        if entity.position == target
-    )
-    tile = model.tiles.get(target)
-    if tile is not None and not tile.walkable:
-        parts.append(f"{tile.floor_type} you cannot stand on")
-    if not parts:
-        if tile is None:
-            return f"{target} is not in your model of the world"
-        return f"{target} looks empty to you"
-    return f"{target} holds {', '.join(parts)}"
+def _speak_result(outcome: ActionOutcome, verb: str, radius: int) -> str:
+    """Name who heard a say, in place of the world's raw hearer list.
 
-
-def _free_direction_text(model: WorldModel, kind: str) -> str:
-    """Which neighbouring directions would take `kind`, for the layer it is on."""
-    position = model.position
-    check = can_place_ground if items.is_ground_kind(kind) else can_place_structure
-    free = [
-        direction_name(direction)
-        for direction in ORDERED_DIRECTIONS
-        if check(model, offset(position, direction))
-    ]
-    if not free:
-        return f"no neighbouring tile would take a {kind} either"
-    return f"neighbouring tiles that would take a {kind}: {', '.join(free)}"
-
-
-def place_failure_lines(model: WorldModel, kind: str, direction: pb.Direction) -> str:
-    """Why a refused placement was refused, from the model, plus the free sides.
-
-    The world's own refusal says "target already holds an object" and nothing
-    more, so a planner that cannot see the tile places blind; three blind
-    `place door` calls in the 2026-09-20 run all failed that way.
+    Anything that is not a successful say (a failure, an `interrupted: ...`,
+    an asleep rejection) is rendered as it stands.
     """
-    target = (
-        model.position
-        if direction == NO_DIRECTION
-        else offset(model.position, direction)
-    )
-    return f"{_tile_occupants_text(model, target)}; {_free_direction_text(model, kind)}"
-
-
-# `tick._process_say_phase` (world/src/world/tick.py) reports a successful
-# `say` as `"say ok: heard: <comma-separated entity ids>"` (empty when nobody
-# was in earshot); `direct_action` wraps that as `"<description> -> <that>"`.
-_HEARD_MARKER = "say ok: heard: "
-
-
-def _speak_result(outcome: str, verb: str, radius: int) -> str:
-    """Replace the raw hearer list with a plain sentence naming who heard.
-
-    Anything that is not a successful say/shout (a failure, an
-    `interrupted: ...`, an asleep rejection) passes through unchanged.
-    """
-    marker_index = outcome.find(_HEARD_MARKER)
-    if marker_index == -1:
-        return outcome
-    ids_csv = outcome[marker_index + len(_HEARD_MARKER) :]
-    heard = [entity_id.strip() for entity_id in ids_csv.split(",") if entity_id.strip()]
+    if not outcome.ok or outcome.action != actions.SAY_ACTION_TYPE:
+        return outcome.text()
+    heard = outcome.heard
     if not heard:
         return f"nobody was within {radius} tiles to hear it"
     return f"{verb} to {', '.join(heard)} (within {radius} tiles)"
 
 
-async def _sit_through(ctx: RunContext[PlannerDeps], outcome: str) -> str:
+async def _sit_through(ctx: RunContext[PlannerDeps], outcome: ActionOutcome) -> str:
     """Wait out the conversation the last action started, then report it."""
-    if not action_succeeded(outcome):
-        return outcome
+    if not outcome.ok:
+        return outcome.text()
     report = await ctx.deps.bridge.await_conversation()
     if report is None:
-        return f"{outcome}\nno conversation started"
-    return f"{outcome}\n{report.to_text()}"
+        return f"{outcome.text()}\nno conversation started"
+    return f"{outcome.text()}\n{report.to_text()}"
+
+
+async def _run(ctx: RunContext[PlannerDeps], attempt: Attempt) -> ActionOutcome:
+    """Submit an allowed attempt; a refused one never reaches the world.
+
+    A refused attempt is rendered as the sentence `actions.py` wrote, with no
+    arrow and no world action, because nothing was submitted.
+    """
+    if not attempt.allowed:
+        return ActionOutcome(description=attempt.description, not_run=attempt.refusal)
+    return await ctx.deps.bridge.direct_action(attempt.intent, attempt.description)
+
+
+async def _attempt_text(ctx: RunContext[PlannerDeps], attempt: Attempt) -> str:
+    """The tool result for an attempt: its refusal, or what the world did."""
+    if not attempt.allowed:
+        return attempt.refusal
+    outcome = await ctx.deps.bridge.direct_action(attempt.intent, attempt.description)
+    return outcome.text()
 
 
 def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
@@ -1676,7 +1654,7 @@ def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
                 converse_intent(ACTION_OPEN, text=opening_line, direction=value),
                 f"open a conversation to the {direction.strip().upper()}",
             )
-            return await _sit_through(ctx, outcome)
+            return await _sit_through(ctx, outcome)  # noqa: RET504
         finally:
             ctx.deps.bridge.set_conversation_purpose("")
 
@@ -1777,9 +1755,8 @@ def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
             kind: the item name, exactly as your inventory spells it.
             amount: how many.
         """
-        return await ctx.deps.bridge.direct_action(
-            give_intent(entity_id, kind, amount),
-            f"give {max(1, amount)} {kind} to {entity_id}",
+        return await _attempt_text(
+            ctx, give_attempt(ctx.deps.bridge.model, entity_id, kind, amount)
         )
 
 
@@ -1799,30 +1776,23 @@ async def _hail(
     line = opening_line.strip()
     if not line:
         return f"a hail needs an opening line: what you say when you reach {entity_id}"
-    known = bridge.model.entities.get(entity_id)
-    if known is None or known.entity_type == WOLF_ENTITY_TYPE:
-        return f"you have never seen a settler called {entity_id}"
-    if known.asleep and known.last_seen == bridge.model.tick:
-        return f"{entity_id} is asleep right now and cannot be hailed"
+    refusal = hail_refusal(bridge.model, entity_id)
+    if refusal:
+        return refusal
 
     walked = await _walk_to_settler(ctx, entity_id, max_ticks)
     known = bridge.model.entities.get(entity_id)
     head = f"{walked}\n" if walked else ""
     if known is None:
         return f"{head}you have lost track of {entity_id}"
-    if chebyshev(bridge.model.position, known.position) != 1:
-        return (
-            f"{head}you are not next to {entity_id} yet; last seen at "
-            f"{known.position} on tick {known.last_seen}"
-        )
     if known.asleep and known.last_seen == bridge.model.tick:
         return f"{head}{entity_id} is asleep now that you have reached them"
-    outcome = await bridge.direct_action(
-        converse_intent(ACTION_HAIL, target_entity_id=entity_id, text=line),
-        f"hail {entity_id} with {line!r}",
-    )
+    attempt = hail_attempt(bridge.model, entity_id, line)
+    if not attempt.allowed:
+        return f"{head}{attempt.refusal}"
+    outcome = await bridge.direct_action(attempt.intent, attempt.description)
     seated = await _sit_through(ctx, outcome)
-    if not action_succeeded(outcome):
+    if not outcome.ok:
         return f"{head}{seated}; {entity_id} was last seen at {known.position}"
     return f"{head}{seated}"
 
@@ -1951,43 +1921,11 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         return "reflex cleared"
 
 
-def _refuse_wrong_note_target(
-    ctx: RunContext[PlannerDeps], object_id: str, wanted_kind: str, right_tool: str
-) -> str:
-    """`""` when `object_id` is a `wanted_kind`, else why and what to use instead.
-
-    Only checked against what this actor has actually seen; an object it has
-    never observed is left to the world, which still refuses it by id.
-    """
-    obj = ctx.deps.bridge.model.objects.get(object_id)
-    if obj is None or obj.object_type == wanted_kind:
-        return ""
-    return f"{object_id} is a {obj.object_type}, not a {wanted_kind}; use {right_tool}"
-
-
 async def _submit_sign_text(
     ctx: RunContext[PlannerDeps], sign_id: str, text: str
-) -> str:
+) -> ActionOutcome:
     """Write `text` on `sign_id` with the world's one-slot note intent."""
-    what = f'write "{text}" on {sign_id}' if text else f"blank {sign_id}"
-    return await ctx.deps.bridge.direct_action(
-        pb.Intent(
-            write_note=pb.WriteNoteIntent(
-                object_id=sign_id,
-                slot=items.SIGN_SLOT,
-                title="",
-                text=text,
-            )
-        ),
-        what,
-    )
-
-
-async def _eat_one(ctx: RunContext[PlannerDeps], kind: str) -> str:
-    """Submit one `EatIntent` and report what the world made of it."""
-    return await ctx.deps.bridge.direct_action(
-        pb.Intent(eat=pb.EatIntent(item_type=kind, amount=1)), f"eat {kind}"
-    )
+    return await _run(ctx, write_sign_attempt(ctx.deps.bridge.model, sign_id, text))
 
 
 def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
@@ -2006,22 +1944,17 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
             kind: what to eat; `berry` is the only food in the world.
         """
         bridge = ctx.deps.bridge
-        if bridge.model.self_info.inventory.get(kind, 0) > 0:
-            return await _eat_one(ctx, kind)
+        from_pack = eat_attempt(bridge.model, kind)
+        if from_pack.allowed:
+            return (await _run(ctx, from_pack)).text()
         if kind == items.BERRY:
-            bush_id = _bush_with_berry_here(bridge.model)
-            if bush_id:
-                picked = await bridge.direct_action(
-                    pb.Intent(
-                        collect=pb.CollectIntent(
-                            object_id=bush_id, item_type=items.BERRY, amount=1
-                        )
-                    ),
-                    f"pick a berry off {bush_id}",
-                )
-                if not action_succeeded(picked):
-                    return picked
-                return f"{picked}\n{await _eat_one(ctx, kind)}"
+            pick = collect_here_attempt(bridge.model)
+            if pick.allowed:
+                picked = await _run(ctx, pick)
+                if not picked.ok:
+                    return picked.text()
+                eaten = await _run(ctx, eat_now(kind))
+                return f"{picked.text()}\n{eaten.text()}"
         lines = [f"you carry no {kind}, and there is none to pick where you stand"]
         bushes = _berry_bush_lines(bridge.model, BUSHES_SHOWN)
         if bushes:
@@ -2037,23 +1970,19 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         position first. If there is no pile under you, the result names the
         nearest piles you know of and what they hold.
         """
-        outcome = await ctx.deps.bridge.direct_action(
-            pb.Intent(pickup=pb.PickupIntent(kind=kind, amount=amount)),
-            f"pickup {amount} {kind}",
-        )
-        if action_succeeded(outcome):
-            return outcome
+        outcome = await _run(ctx, pickup_attempt(ctx.deps.bridge.model, kind, amount))
+        if outcome.ok:
+            return outcome.text()
         piles = _pile_lines(ctx.deps.bridge.model, PILES_SHOWN)
         if not piles:
-            return outcome
-        return "\n".join([outcome, "piles you know of:", *piles])
+            return outcome.text()
+        return "\n".join([outcome.text(), "piles you know of:", *piles])
 
     @tools.tool
     async def drop(ctx: RunContext[PlannerDeps], kind: str, amount: int = 1) -> str:
         """Drop items onto your tile as a pile."""
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(drop=pb.DropIntent(kind=kind, amount=amount)),
-            f"drop {amount} {kind}",
+        return await _attempt_text(
+            ctx, drop_attempt(ctx.deps.bridge.model, kind, amount)
         )
 
     @tools.tool
@@ -2061,11 +1990,8 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         ctx: RunContext[PlannerDeps], object_id: str, kind: str, amount: int = 1
     ) -> str:
         """Put items into a chest on your tile or next to it."""
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(
-                deposit=pb.DepositIntent(object_id=object_id, kind=kind, amount=amount)
-            ),
-            f"deposit {amount} {kind} into {object_id}",
+        return await _attempt_text(
+            ctx, deposit_attempt(ctx.deps.bridge.model, object_id, kind, amount)
         )
 
     @tools.tool
@@ -2073,13 +1999,8 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         ctx: RunContext[PlannerDeps], object_id: str, kind: str, amount: int = 1
     ) -> str:
         """Take items out of a chest on your tile or next to it."""
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(
-                withdraw=pb.WithdrawIntent(
-                    object_id=object_id, kind=kind, amount=amount
-                )
-            ),
-            f"withdraw {amount} {kind} from {object_id}",
+        return await _attempt_text(
+            ctx, withdraw_attempt(ctx.deps.bridge.model, object_id, kind, amount)
         )
 
     @tools.tool
@@ -2112,30 +2033,32 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
             return attempt.refusal
         since_tick = bridge.model.tick
         outcome = await bridge.direct_action(attempt.intent, attempt.description)
-        if not action_succeeded(outcome):
-            return outcome
+        if not outcome.ok:
+            return outcome.text()
         slept = await bridge.await_wake(since_tick)
         woke = slept or "you did not stay asleep"
         # The turn is over whatever the model wanted next: the journal rewrite
         # started when the body lay down, and this turn's history is stale.
         ctx.deps.budget.spend()
-        return f"{outcome}\n{woke}\n{TURN_ENDS_AFTER_SLEEP}"
+        return f"{outcome.text()}\n{woke}\n{TURN_ENDS_AFTER_SLEEP}"
 
     @tools.tool
     async def wake(ctx: RunContext[PlannerDeps]) -> str:
         """Stop sleeping. While you are asleep this is the only thing you can do."""
         if not ctx.deps.bridge.model.self_info.asleep:
             return "you are not asleep"
-        return await ctx.deps.bridge.direct_action(
+        outcome = await ctx.deps.bridge.direct_action(
             pb.Intent(wake=pb.WakeIntent()), "wake up"
         )
+        return outcome.text()
 
     @tools.tool
     async def equip(ctx: RunContext[PlannerDeps], kind: str = "") -> str:
         """Wield an item from your pack, or pass an empty string to unequip."""
-        return await ctx.deps.bridge.direct_action(
+        outcome = await ctx.deps.bridge.direct_action(
             pb.Intent(equip=pb.EquipIntent(kind=kind)), f"equip {kind or '(nothing)'}"
         )
+        return outcome.text()
 
     @tools.tool
     async def place(
@@ -2164,27 +2087,20 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
                 "use place_sign to put a sign up: it places the sign and writes "
                 "its line in one call, and a blank sign says nothing to anybody"
             )
-        if direction:
-            value = _direction_value(direction)
-        elif items.is_ground_kind(kind):
-            value = NO_DIRECTION
-        else:
-            return (
-                f"{kind} is a structure and needs a direction; only "
-                f"{sorted(items.GROUND_LAYER_KINDS)} go on your own tile"
-            )
+        value = _direction_value(direction) if direction else NO_DIRECTION
+        model = ctx.deps.bridge.model
+        attempt = place_attempt(model, kind, value)
+        if not attempt.allowed:
+            return attempt.refusal
         lines: list[str] = []
         if carried(ctx.deps.bridge, kind) <= 0 and kind in items.RECIPES:
             lines.extend(await stock_one(ctx.deps.bridge, kind))
             if carried(ctx.deps.bridge, kind) <= 0:
                 return "\n".join(lines)
-        outcome = await ctx.deps.bridge.direct_action(
-            pb.Intent(place=pb.PlaceIntent(kind=kind, direction=value)),
-            f"place {kind} {direction or 'here'}",
-        )
-        lines.append(outcome)
-        if not action_succeeded(outcome):
-            lines.append(place_failure_lines(ctx.deps.bridge.model, kind, value))
+        outcome = await _run(ctx, attempt)
+        lines.append(outcome.text())
+        if not outcome.ok:
+            lines.append(place_failure_lines(model, kind, value))
         return "\n".join(lines)
 
     @tools.tool
@@ -2222,7 +2138,7 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         bridge = ctx.deps.bridge
         if bridge.model.self_info.inventory.get(items.SIGN, 0) <= 0:
             recipe = items.RECIPES[items.SIGN]
-            needed = recipe.inputs.get(items.WOOD, 0)
+            needed = dict(recipe.inputs).get(items.WOOD, 0)
             have = bridge.model.self_info.inventory.get(items.WOOD, 0)
             if have < needed:
                 return (
@@ -2237,21 +2153,20 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
             pb.Intent(place=pb.PlaceIntent(kind=items.SIGN, direction=value)),
             f"place sign {direction}",
         )
-        lines.append(placed)
-        if not action_succeeded(placed):
+        lines.append(placed.text())
+        if not placed.ok:
             lines.append(place_failure_lines(bridge.model, items.SIGN, value))
             return "\n".join(lines)
-        match = SIGN_ID_RE.search(placed)
-        if match is None:
+        sign_id = placed.placed_object_id
+        if not sign_id:
             lines.append(
                 "the sign is standing but the world did not name it; "
                 "use look to find its id and write_sign to write on it"
             )
             return "\n".join(lines)
-        sign_id = match.group(1)
         wrote = await _submit_sign_text(ctx, sign_id, text)
-        lines.append(wrote)
-        if not action_succeeded(wrote):
+        lines.append(wrote.text())
+        if not wrote.ok:
             lines.append(f"{sign_id} is standing but still blank; use write_sign")
             return "\n".join(lines)
         lines.append(f'{sign_id} now reads: "{text}"')
@@ -2273,15 +2188,15 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
             sign_id: the id of the sign, as `look` lists it.
             text: the new line, at most 80 characters; empty wipes the sign.
         """
-        refusal = _refuse_wrong_note_target(ctx, sign_id, items.SIGN, "write_note")
-        if refusal:
-            return refusal
         if len(text) > items.SIGN_TEXT_MAX:
             raise ModelRetry(
                 f"a sign holds at most {items.SIGN_TEXT_MAX} characters; "
                 f"that line is {len(text)}"
             )
-        return await _submit_sign_text(ctx, sign_id, text)
+        attempt = write_sign_attempt(ctx.deps.bridge.model, sign_id, text)
+        if not attempt.allowed:
+            return attempt.refusal
+        return (await _run(ctx, attempt)).text()
 
     @tools.tool
     async def rest(ctx: RunContext[PlannerDeps], object_id: str) -> str:
@@ -2290,9 +2205,10 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         One settler per bed per tick; if someone beat you to it the world says
         the bed is taken.
         """
-        return await ctx.deps.bridge.direct_action(
+        outcome = await ctx.deps.bridge.direct_action(
             pb.Intent(rest=pb.RestIntent(object_id=object_id)), f"rest on {object_id}"
         )
+        return outcome.text()
 
     @tools.tool
     async def dismantle(ctx: RunContext[PlannerDeps], object_id: str) -> str:
@@ -2302,9 +2218,8 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         to fix your own mistakes, not to undo other settlers' work without
         saying so on the message board first.
         """
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(extract=pb.ExtractIntent(object_id=object_id)),
-            f"dismantle {object_id}",
+        return await _attempt_text(
+            ctx, dismantle_attempt(ctx.deps.bridge.model, object_id)
         )
 
     @tools.tool
@@ -2351,21 +2266,9 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
             title: shown in `look`'s listing, at most 60 characters.
             text: the note's body, at most 500 characters.
         """
-        refusal = _refuse_wrong_note_target(
-            ctx, board_id, items.MESSAGE_BOARD, "write_sign"
-        )
-        if refusal:
-            return refusal
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(
-                write_note=pb.WriteNoteIntent(
-                    object_id=board_id,
-                    slot=slot,
-                    title=title[:60],
-                    text=text[:500],
-                )
-            ),
-            f"write note {slot} on {board_id}",
+        return await _attempt_text(
+            ctx,
+            write_note_attempt(ctx.deps.bridge.model, board_id, slot, title, text),
         )
 
     @tools.tool

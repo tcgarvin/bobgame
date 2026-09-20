@@ -895,9 +895,13 @@ def _find_option(options: Sequence[Option], key: str) -> Option | None:
     return None
 
 
-def _stats(model: WorldModel) -> str:
+def stint_stats(model: WorldModel) -> str:
+    """The two numbers a report opens and closes with."""
     info = model.self_info
     return f"hp {info.health}/{info.max_health}, food {info.food}/{info.max_food}"
+
+
+_stats = stint_stats
 
 
 def _dedupe(items: Sequence[str]) -> list[str]:

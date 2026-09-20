@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
 from agents import world_pb2 as pb
 from agents.jev_agent.conversation import ConverserMove, MoveCall, NoteCall
 from agents.jev_agent.jevclient import JevDecision
+from agents.jev_agent.outcomes import NO_DETAIL, SUBMITTED, ActionOutcome
 
 GRASS = "grass"
 WATER = "deep_water"
@@ -312,4 +314,31 @@ def respawned_event(
         entity_respawned=pb.EntityRespawned(
             entity_id=entity_id, position=pb.Position(x=position[0], y=position[1])
         )
+    )
+
+
+_RESULT_RE = re.compile(r"^(?P<action>\S+) (?P<status>ok|failed): (?P<detail>.*)$")
+
+
+def canned_outcome(text: str) -> ActionOutcome:
+    """An `ActionOutcome` that renders back to `text`, for a fake bridge.
+
+    Tests write what the world said as the one line the planner used to see,
+    which is more readable than four keyword arguments; this turns that line
+    back into the record the real tick loop would have built.
+    """
+    description, _, tail = text.partition(" -> ")
+    if not tail:
+        return ActionOutcome.submitted_only(description)
+    if tail == SUBMITTED:
+        return ActionOutcome.submitted_only(description)
+    match = _RESULT_RE.match(tail)
+    if match is None:
+        return ActionOutcome.never_ran(description, tail)
+    detail = match.group("detail")
+    return ActionOutcome.from_event(
+        description,
+        match.group("action"),
+        match.group("status") == "ok",
+        "" if detail == NO_DETAIL else detail,
     )

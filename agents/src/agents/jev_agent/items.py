@@ -1,219 +1,351 @@
-"""The agent-side mirror of the world's item, recipe and object tables.
+"""The agent's view of the game's rules, plus the prose it wraps them in.
 
-The agents package cannot import `world`, so this module restates the contract
-in `world/src/world/items.py`, `docs/08_building.md` and
-`docs/10_metal_and_sleep.md`. Keep the two in step: if a recipe or a kind
-changes there, change it here in the same commit.
+The rules themselves — kinds, recipes, blocking sets, extraction tables and
+every number behind food, fatigue, sleep, combat, wolves, conversations and
+signs — live in `bobgame_rules` (repo root `rules/`), which the world enforces
+from the same definitions. This module re-exports them under the names the
+agent code uses and adds what is genuinely agent-side: where things grow, how
+a recipe or a habitat reads in a prompt, and the planner-side thresholds that
+are not world physics.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Mapping
 
-# --- Raw and intermediate materials ---------------------------------------
+from bobgame_rules.body import (
+    COLLAPSE_WAKE_FATIGUE,
+    FATIGUE_INTERVAL_DAY,
+    FATIGUE_INTERVAL_NIGHT,
+    FOOD_INTERVAL_TICKS,
+    HUNGRY_WAKE_FOOD,
+    MIN_SLEEP_FATIGUE,
+    REGEN_FOOD_THRESHOLD,
+    REGEN_INTERVAL_TICKS,
+    RESPAWN_DELAY_TICKS,
+    RESPAWN_FATIGUE,
+    RESPAWN_FOOD,
+    SLEEP_RECOVERY,
+    STARVATION_DAMAGE,
+    STARVATION_INTERVAL_TICKS,
+    TIRED_FATIGUE,
+)
+from bobgame_rules.clock import (
+    DEFAULT_DAY_LENGTH_TICKS,
+    NEW_MOON_STILL_TICKS,
+    night_start_tick,
+)
+from bobgame_rules.entities import (
+    DEFAULT_ATTACK_DAMAGE,
+    PLAYER_MAX_FATIGUE,
+    PLAYER_MAX_HEALTH,
+    WIELD_DAMAGE_BONUS,
+    WIELDABLE_KINDS,
+    WOLF_ATTACK_DAMAGE,
+    WOLF_MAX_HEALTH,
+)
+from bobgame_rules.items import (
+    ANVIL,
+    AXE,
+    AXE_TOOLS,
+    BED,
+    BERRY,
+    BERRY_FOOD_RESTORE,
+    BLOCKING_OBJECT_TYPES,
+    BUILDING_KINDS,
+    BUSH,
+    CHAIR,
+    CHARCOAL,
+    CHEST,
+    CLAY,
+    CLAY_DEPOSIT,
+    COPPER_AXE,
+    COPPER_INGOT,
+    COPPER_ORE,
+    COPPER_PICKAXE,
+    COPPER_VEIN,
+    DEFAULT_REMAINING,
+    DISMANTLE_WORK,
+    DOOR,
+    EXTRACT_THRESHOLD,
+    EXTRACT_TOOLS,
+    EXTRACT_WORK_BARE,
+    EXTRACT_WORK_BY_TOOL,
+    EXTRACT_YIELD,
+    EXTRACTABLE_TYPES,
+    FIBER,
+    FURNACE,
+    GROUND_LAYER_KINDS,
+    IRON_AXE,
+    IRON_INGOT,
+    IRON_ORE,
+    IRON_PICKAXE,
+    IRON_SWORD,
+    IRON_VEIN,
+    ITEM_PILE,
+    MESSAGE_BOARD,
+    METAL_PICKAXE_TOOLS,
+    NATURAL_OBJECT_TYPES,
+    OWNER_KEY,
+    PICKAXE,
+    PICKAXE_TOOLS,
+    PLACEABLE_KINDS,
+    PLANK,
+    REEDS,
+    REST_HEAL,
+    ROAD,
+    ROCK_TYPES,
+    ROPE,
+    SIGN,
+    STATION_KINDS,
+    STONE,
+    STONE_FLOOR,
+    STONE_WALL,
+    SWORD,
+    TABLE,
+    TREE,
+    VEIN_REQUIRED_TOOLS,
+    VEIN_TYPES,
+    WOOD,
+    WOOD_FLOOR,
+    WOOD_WALL,
+    WORKSHOP_TABLE,
+    can_extract,
+    extract_work,
+    source_object_types,
+)
+from bobgame_rules.recipes import CRAFT_PROGRESS_PREFIX, RECIPES, Recipe
+from bobgame_rules.social import (
+    CONVERSATION,
+    CONVERSATION_CHANNEL,
+    CONVERSATION_MAX_PARTICIPANTS,
+    CONVERSATION_MAX_UTTERANCES,
+    CONVERSATION_TEXT_LIMIT,
+    CONVERSATION_TRANSCRIPT_KEPT,
+    CONVERSATION_TURN_TICKS,
+    CONVERSATION_LONELY_TICKS,
+    CONVERSE_ACTION_TYPE,
+    CONVERSE_HAIL,
+    HAIL_COOLDOWN_TICKS,
+    HAILED_DETAIL,
+    LOCAL_CHANNEL,
+    SAY_RADIUS,
+    SHOUT_CHANNEL,
+    SHOUT_RADIUS,
+    SIGN_AUTHOR_KEY,
+    SIGN_SLOT,
+    SIGN_TEXT_KEY,
+    SIGN_TEXT_MAX,
+    SIGN_TICK_KEY,
+    VIEW_RADIUS,
+)
+from bobgame_rules.terrain import FloorType
 
-BERRY = "berry"
-WOOD = "wood"
-STONE = "stone"
-FIBER = "fiber"
-CLAY = "clay"
-PLANK = "plank"
-ROPE = "rope"
+__all__ = [
+    "ACTION_HAIL",
+    "ACTION_HAILED",
+    "ANVIL",
+    "AXE",
+    "AXE_TOOLS",
+    "BED",
+    "BERRY",
+    "BERRY_FOOD_RESTORE",
+    "BLOCKING_OBJECT_TYPES",
+    "BUILDING_KINDS",
+    "BUSH",
+    "BUSH_WATER_MAX_DISTANCE",
+    "BUSH_WATER_MIN_DISTANCE",
+    "CHAIR",
+    "CHARCOAL",
+    "CHEST",
+    "CLAY",
+    "CLAY_DEPOSIT",
+    "CLAY_MAX_DISTANCE",
+    "CLAY_MIN_DISTANCE",
+    "COLLAPSE_WAKE_FATIGUE",
+    "CONVERSATION",
+    "CONVERSATION_CHANNEL",
+    "CONVERSATION_LONELY_TICKS",
+    "CONVERSATION_MAX_PARTICIPANTS",
+    "CONVERSATION_MAX_UTTERANCES",
+    "CONVERSATION_TEXT_LIMIT",
+    "CONVERSATION_TRANSCRIPT_KEPT",
+    "CONVERSATION_TURN_TICKS",
+    "CONVERSE_ACTION_TYPE",
+    "CONVERSE_HAIL",
+    "COPPER_AXE",
+    "COPPER_INGOT",
+    "COPPER_ORE",
+    "COPPER_PICKAXE",
+    "COPPER_VEIN",
+    "CRAFT_PROGRESS_PREFIX",
+    "CRAFT_RECIPES",
+    "DEFAULT_ATTACK_DAMAGE",
+    "DEFAULT_DAY_LENGTH_TICKS",
+    "DEFAULT_REMAINING",
+    "DEFAULT_SETTLER_COUNT",
+    "DISMANTLE_WORK",
+    "DOOR",
+    "EXHAUSTED",
+    "EXTRACTABLE_TYPES",
+    "EXTRACT_THRESHOLD",
+    "EXTRACT_TOOLS",
+    "EXTRACT_WORK_BARE",
+    "EXTRACT_WORK_BY_TOOL",
+    "EXTRACT_YIELD",
+    "FATIGUE_INTERVAL_DAY",
+    "FATIGUE_INTERVAL_NIGHT",
+    "FIBER",
+    "FOOD_ALERT_AT",
+    "FOOD_INTERVAL_TICKS",
+    "FRESH",
+    "FURNACE",
+    "FloorType",
+    "GROUND_LAYER_KINDS",
+    "HABITAT_TEXT",
+    "HAILED_DETAIL",
+    "HAIL_COOLDOWN_TICKS",
+    "HUNGRY_WAKE_FOOD",
+    "IRON_AXE",
+    "IRON_INGOT",
+    "IRON_ORE",
+    "IRON_PICKAXE",
+    "IRON_SWORD",
+    "IRON_VEIN",
+    "ITEM_PILE",
+    "LOCAL_CHANNEL",
+    "MESSAGE_BOARD",
+    "METAL_PICKAXE_TOOLS",
+    "MIN_SLEEP_FATIGUE",
+    "NATURAL_OBJECT_TYPES",
+    "NEW_MOON_STILL_TICKS",
+    "ORE_EXCLUSION_RADIUS",
+    "OWNER_KEY",
+    "PICKAXE",
+    "PICKAXE_TOOLS",
+    "PLACEABLE_KINDS",
+    "PLANK",
+    "PLAYER_MAX_FATIGUE",
+    "PLAYER_MAX_HEALTH",
+    "RECIPES",
+    "REEDS",
+    "REED_BANK_WIDTH",
+    "REED_COAST_EXCLUSION",
+    "REGEN_FOOD_THRESHOLD",
+    "REGEN_INTERVAL_TICKS",
+    "RESPAWN_DELAY_TICKS",
+    "RESPAWN_FATIGUE",
+    "RESPAWN_FOOD",
+    "RESPAWN_RING_TEXT",
+    "REST_HEAL",
+    "ROAD",
+    "ROCK_TYPES",
+    "ROPE",
+    "Recipe",
+    "SAY_RADIUS",
+    "SHOUT_CHANNEL",
+    "SHOUT_RADIUS",
+    "SIGN",
+    "SIGN_AUTHOR_KEY",
+    "SIGN_SLOT",
+    "SIGN_TEXT_KEY",
+    "SIGN_TEXT_MAX",
+    "SIGN_TICK_KEY",
+    "SLEEP_RECOVERY",
+    "STARVATION_DAMAGE",
+    "STARVATION_INTERVAL_TICKS",
+    "STATION_KINDS",
+    "STONE",
+    "STONE_FLOOR",
+    "STONE_WALL",
+    "SWORD",
+    "TABLE",
+    "TIRED",
+    "TIRED_FATIGUE",
+    "TREE",
+    "TREE_COAST_DISTANCE",
+    "VEIN_REQUIRED_TOOLS",
+    "VEIN_TYPES",
+    "VIEW_RADIUS",
+    "WATER_BOUND_TYPES",
+    "WATER_FLOOR_TYPES",
+    "WIELDABLE_KINDS",
+    "WIELD_DAMAGE_BONUS",
+    "WOLF_ATTACK_DAMAGE",
+    "WOLF_MAX_HEALTH",
+    "WOOD",
+    "WOOD_FLOOR",
+    "WOOD_WALL",
+    "WORKSHOP_TABLE",
+    "can_extract",
+    "extract_work",
+    "extraction_text",
+    "fatigue_word",
+    "habitat_lines",
+    "habitat_table_text",
+    "habitat_text",
+    "is_ground_kind",
+    "is_water_bound",
+    "island_opening",
+    "night_start_tick",
+    "recipe_table_text",
+    "settler_count_word",
+    "sleep_recovery_text",
+    "source_object_types",
+    "source_text",
+    "wield_damage_text",
+]
 
-COPPER_ORE = "copper_ore"
-IRON_ORE = "iron_ore"
-CHARCOAL = "charcoal"
-COPPER_INGOT = "copper_ingot"
-IRON_INGOT = "iron_ingot"
+# The `ConverseIntent` action that walks up to a settler and addresses it
+# (docs/09 section 9), under the names the agent's conversation code uses. The
+# world reports it to the hailer as `hail conv_N <target>` and to the target as
+# `hailed conv_N <hailer>`.
+ACTION_HAIL = CONVERSE_HAIL
+ACTION_HAILED = HAILED_DETAIL
 
-AXE = "axe"
-PICKAXE = "pickaxe"
-SWORD = "sword"
-COPPER_AXE = "copper_axe"
-COPPER_PICKAXE = "copper_pickaxe"
-IRON_AXE = "iron_axe"
-IRON_PICKAXE = "iron_pickaxe"
-IRON_SWORD = "iron_sword"
-CHEST = "chest"
-MESSAGE_BOARD = "message_board"
-
-# --- Building items (the placed object's type equals the item kind) --------
-
-ROAD = "road"
-WOOD_FLOOR = "wood_floor"
-STONE_FLOOR = "stone_floor"
-WOOD_WALL = "wood_wall"
-STONE_WALL = "stone_wall"
-DOOR = "door"
-SIGN = "sign"
-BED = "bed"
-CHAIR = "chair"
-TABLE = "table"
-WORKSHOP_TABLE = "workshop_table"
-FURNACE = "furnace"
-ANVIL = "anvil"
-
-# The three crafting stations. A recipe with a station must be crafted while
-# standing on or next to a placed one of that type.
-STATION_KINDS: frozenset[str] = frozenset({WORKSHOP_TABLE, FURNACE, ANVIL})
-
-# Ground-layer kinds lie under structures, never block, and are placed on the
-# placer's own tile with no direction.
-GROUND_LAYER_KINDS: frozenset[str] = frozenset({ROAD, WOOD_FLOOR, STONE_FLOOR})
-
-BUILDING_KINDS: frozenset[str] = (
-    GROUND_LAYER_KINDS
-    | frozenset({WOOD_WALL, STONE_WALL, DOOR, SIGN, BED, CHAIR, TABLE})
-    | STATION_KINDS
+# `Tile.floor_type` values that are water. The observation does not say
+# whether a water tile is fresh or salt, so anything built on this set must
+# say "water", not "fresh water".
+WATER_FLOOR_TYPES: frozenset[str] = frozenset(
+    {FloorType.SHALLOW_WATER.value, FloorType.DEEP_WATER.value}
 )
 
-PLACEABLE_KINDS: frozenset[str] = frozenset({CHEST, MESSAGE_BOARD}) | BUILDING_KINDS
-
-# The object state key a placed object records its placer under
-# (`world/containers.py`, `OWNER_KEY`).
-OWNER_KEY = "owner"
-
-WIELDABLE_KINDS: frozenset[str] = frozenset(
-    {
-        AXE,
-        PICKAXE,
-        SWORD,
-        COPPER_AXE,
-        COPPER_PICKAXE,
-        IRON_AXE,
-        IRON_PICKAXE,
-        IRON_SWORD,
-    }
-)
-
-# --- Signs (mirrors world/items.py, docs/08_building.md "Signs") ------------
-
-# One line, refused outright when it is longer; never truncated.
-SIGN_TEXT_MAX = 80
-# Object state keys a placed sign carries.
-SIGN_TEXT_KEY = "text"
-SIGN_AUTHOR_KEY = "author"
-SIGN_TICK_KEY = "tick"
-# A sign has one slot, so `WriteNoteIntent.slot` is always this.
-SIGN_SLOT = 0
-# How far away a sign is read from: the observation view radius.
-SIGN_READ_RADIUS = 8
-
-# --- Natural objects -------------------------------------------------------
-
-TREE = "tree"
-BUSH = "bush"
-REEDS = "reeds"
-CLAY_DEPOSIT = "clay_deposit"
-COPPER_VEIN = "copper_vein"
-IRON_VEIN = "iron_vein"
-ITEM_PILE = "item_pile"
-
-ROCK_TYPES: frozenset[str] = frozenset(
-    {"rock_small", "rock_medium", "rock_large", "boulder"}
-)
-VEIN_TYPES: frozenset[str] = frozenset({COPPER_VEIN, IRON_VEIN})
-EXTRACTABLE_TYPES: frozenset[str] = (
-    frozenset({TREE, REEDS, CLAY_DEPOSIT}) | ROCK_TYPES | VEIN_TYPES
-)
-
-# Ground-layer items may not be placed on a tile holding one of these.
-NATURAL_OBJECT_TYPES: frozenset[str] = EXTRACTABLE_TYPES | frozenset({BUSH})
-
-# Object types nobody may walk through. A door blocks wolves only, so the agent
-# treats it as walkable.
-BLOCKING_OBJECT_TYPES: frozenset[str] = frozenset({WOOD_WALL, STONE_WALL})
-
-DEFAULT_REMAINING: Mapping[str, int] = {
-    TREE: 4,
-    "rock_small": 1,
-    "rock_medium": 2,
-    "rock_large": 4,
-    "boulder": 6,
-    REEDS: 3,
-    CLAY_DEPOSIT: 6,
-    COPPER_VEIN: 4,
-    IRON_VEIN: 4,
+# Legacy view used by callers that only care about a recipe's inputs.
+CRAFT_RECIPES: Mapping[str, Mapping[str, int]] = {
+    name: dict(recipe.inputs) for name, recipe in RECIPES.items()
 }
 
-# object_type -> the item one unit of extraction yields.
-EXTRACT_YIELD: Mapping[str, str] = {
-    TREE: WOOD,
-    "rock_small": STONE,
-    "rock_medium": STONE,
-    "rock_large": STONE,
-    "boulder": STONE,
-    REEDS: FIBER,
-    CLAY_DEPOSIT: CLAY,
-    COPPER_VEIN: COPPER_ORE,
-    IRON_VEIN: IRON_ORE,
-}
+# --- Agent-side thresholds -------------------------------------------------
+#
+# Not world physics: nothing in the world changes at these numbers. They are
+# the levels at which this agent tells itself something.
 
-AXE_TOOLS: frozenset[str] = frozenset({AXE, COPPER_AXE, IRON_AXE})
-PICKAXE_TOOLS: frozenset[str] = frozenset({PICKAXE, COPPER_PICKAXE, IRON_PICKAXE})
-# Iron ore is hard: a plain stone pickaxe does not bite into it.
-METAL_PICKAXE_TOOLS: frozenset[str] = frozenset({COPPER_PICKAXE, IRON_PICKAXE})
+# Food at or below this is stated as a `!!` line on every planner tool result,
+# and it is the level a Jev stint hands the body back at (`stint.py`).
+FOOD_ALERT_AT = 25
 
-# object_type -> the wielded tools that speed extraction up. Anything else in
-# the hand (or an empty hand) adds one unit of work per action.
-EXTRACT_TOOLS: Mapping[str, frozenset[str]] = {
-    TREE: AXE_TOOLS,
-    "rock_small": PICKAXE_TOOLS,
-    "rock_medium": PICKAXE_TOOLS,
-    "rock_large": PICKAXE_TOOLS,
-    "boulder": PICKAXE_TOOLS,
-    CLAY_DEPOSIT: PICKAXE_TOOLS,
-    COPPER_VEIN: PICKAXE_TOOLS,
-    IRON_VEIN: METAL_PICKAXE_TOOLS,
-}
+# How many settlers a scenario starts with. `settlement.toml` has twelve;
+# `hamlet.toml` has six and passes `--settlers 6` to every agent process.
+DEFAULT_SETTLER_COUNT = 12
 
-# object_type -> the tools without which extraction fails outright. Trees,
-# rocks, reeds and clay can be worked bare-handed; veins cannot.
-EXTRACT_REQUIRED_TOOLS: Mapping[str, frozenset[str]] = {
-    COPPER_VEIN: PICKAXE_TOOLS,
-    IRON_VEIN: METAL_PICKAXE_TOOLS,
-}
+# Where a respawn puts you, as the prompt says it (`RESPAWN_RING_DISTANCES`).
+RESPAWN_RING_TEXT = "12 or 24 tiles"
 
-# Work units one extract action adds, by wielded tool ("" is bare hands).
-EXTRACT_WORK_BY_TOOL: Mapping[str, int] = {
-    "": 1,
-    AXE: 3,
-    PICKAXE: 3,
-    COPPER_AXE: 4,
-    COPPER_PICKAXE: 4,
-    IRON_AXE: 5,
-    IRON_PICKAXE: 5,
-}
-
-# Work units one unit of material costs.
-EXTRACT_THRESHOLD = 3
-
-# Extract actions needed to dismantle one placed building object.
-DISMANTLE_WORK = 3
-
-# Health one successful rest on a bed restores.
-REST_HEAL = 2
+# The words this agent uses for its own fatigue.
+FRESH = "fresh"
+TIRED = "tired"
+EXHAUSTED = "exhausted"
 
 
-def extract_work_per_action(object_type: str, wielded: str) -> int:
-    """Work units one extract action on `object_type` adds while wielding `wielded`."""
-    if wielded not in EXTRACT_TOOLS.get(object_type, frozenset()):
-        return EXTRACT_WORK_BY_TOOL[""]
-    return EXTRACT_WORK_BY_TOOL.get(wielded, EXTRACT_WORK_BY_TOOL[""])
-
-
-def can_extract(object_type: str, wielded: str) -> bool:
-    """Whether `wielded` is good enough to extract from `object_type` at all."""
-    required = EXTRACT_REQUIRED_TOOLS.get(object_type, frozenset())
-    return not required or wielded in required
-
-
-def source_object_types(kind: str) -> list[str]:
-    """The object types one unit of extraction turns into `kind`, sorted."""
-    return sorted(
-        object_type for object_type, yielded in EXTRACT_YIELD.items() if yielded == kind
-    )
+def extraction_text(object_type: str) -> str:
+    """How an object is worked: bare hands, faster with a tool, or tool-only."""
+    required = VEIN_REQUIRED_TOOLS.get(object_type, frozenset())
+    if required:
+        return f"needs {_tool_phrase(required)} in hand"
+    speeds = EXTRACT_TOOLS.get(object_type, frozenset())
+    if speeds:
+        return f"bare hands, faster with {_tool_phrase(speeds)}"
+    return "bare hands"
 
 
 def _tool_phrase(tools: frozenset[str]) -> str:
@@ -222,17 +354,6 @@ def _tool_phrase(tools: frozenset[str]) -> str:
         if name in tools:
             return f"a {name}"
     return "a " + sorted(tools)[0]
-
-
-def extraction_text(object_type: str) -> str:
-    """How an object is worked: bare hands, faster with a tool, or tool-only."""
-    required = EXTRACT_REQUIRED_TOOLS.get(object_type, frozenset())
-    if required:
-        return f"needs {_tool_phrase(required)} in hand"
-    speeds = EXTRACT_TOOLS.get(object_type, frozenset())
-    if speeds:
-        return f"bare hands, faster with {_tool_phrase(speeds)}"
-    return "bare hands"
 
 
 def source_text(kind: str) -> str:
@@ -260,9 +381,10 @@ def source_text(kind: str) -> str:
 # --- Where things grow (mirrors world/terrain/objects.py and its config) -----
 #
 # The numbers are `ObjectPlacementConfig` in `world/src/world/terrain/config.py`
-# and `ORE_EXCLUSION_RADIUS` in `world/src/world/settlement.py`. "Fresh water"
-# is what the generator's `dist_to_fresh` field measures: lakes, rivers and
-# the fords across them, never the sea.
+# and `ORE_EXCLUSION_RADIUS` in `world/src/world/settlement.py`. Both are
+# generation-time configuration rather than rules of play, so they are not in
+# `bobgame_rules`. "Fresh water" is what the generator's `dist_to_fresh` field
+# measures: lakes, rivers and the fords across them, never the sea.
 
 # `reed_bank_width`: how far from fresh water a bank reed grows.
 REED_BANK_WIDTH = 2
@@ -325,11 +447,6 @@ HABITAT_TEXT = {
 # nearest water is narrows the search.
 WATER_BOUND_TYPES: frozenset[str] = frozenset({REEDS, CLAY_DEPOSIT})
 
-# `Tile.floor_type` values that are water (`world/terrain_types.py`). The
-# observation does not say whether a water tile is fresh or salt, so anything
-# built on this set must say "water", not "fresh water".
-WATER_FLOOR_TYPES: frozenset[str] = frozenset({"shallow_water", "deep_water"})
-
 
 def habitat_text(object_type: str) -> str:
     """Where `object_type` is found on the island, or `""` if no rule is stated."""
@@ -368,96 +485,8 @@ def habitat_table_text() -> str:
     return "\n".join(lines)
 
 
-# --- Combat and speech (mirrors world/items.py, world/wolves.py) -------------
+# --- Prompt lines over the rules -------------------------------------------
 
-PLAYER_MAX_HEALTH = 20
-UNARMED_DAMAGE = 2
-WIELD_DAMAGE_BONUS: Mapping[str, int] = {
-    SWORD: 3,
-    IRON_SWORD: 5,
-    AXE: 2,
-    COPPER_AXE: 2,
-    IRON_AXE: 3,
-    PICKAXE: 1,
-    COPPER_PICKAXE: 1,
-    IRON_PICKAXE: 2,
-}
-WOLF_HEALTH = 16
-WOLF_DAMAGE = 3
-
-# --- Food and health (mirrors world/stats.py) -----------------------------
-
-# Ticks per point of food lost while awake.
-FOOD_INTERVAL_TICKS = 4
-# At food 0, this much damage every this many ticks.
-STARVATION_INTERVAL_TICKS = 4
-STARVATION_DAMAGE = 1
-# Health only regrows above this food (and only while not tired).
-REGEN_FOOD_THRESHOLD = 50
-BERRY_FOOD_RESTORE = 20
-# Food at or below this is stated as a `!!` line on every planner tool result,
-# and it is the level a Jev stint hands the body back at (`stint.py`).
-FOOD_ALERT_AT = 25
-
-LOCAL_CHANNEL = "local"
-SHOUT_CHANNEL = "shout"
-SAY_RADIUS = 10
-SHOUT_RADIUS = 60
-
-# --- The day and sleep (mirrors world/stats.py, docs/10 sections 3 and 4) ----
-
-DEFAULT_DAY_LENGTH = 300
-# The first two thirds of a day are light; the rest is night.
-NIGHT_START_FRACTION = 2 / 3
-
-MAX_FATIGUE = 100
-# At or above this, tool extraction work per action is halved (minimum 1)
-# (minimum 1), attack damage is 1 less (minimum 1), and health stops regrowing.
-TIRED_FATIGUE = 60
-# A collapsed sleeper wakes at this fatigue and not before.
-COLLAPSE_WAKE_FATIGUE = 70
-RESPAWN_FATIGUE = 30
-# Dying: how long the body is gone, what it comes back with, and where
-# (`world/stats.py`: RESPAWN_DELAY_TICKS, RESPAWN_FOOD, RESPAWN_RING_DISTANCES).
-RESPAWN_DELAY_TICKS = 10
-RESPAWN_FOOD = 50
-RESPAWN_RING_TEXT = "12 or 24 tiles"
-# Ticks per fatigue point gained while awake.
-FATIGUE_INTERVAL_DAY = 4
-FATIGUE_INTERVAL_NIGHT = 3
-# Ticks a bed sleeper needs per point of health healed.
-REGEN_INTERVAL_TICKS = 5
-# Food at or below which a sleeper wakes, and below which it cannot fall asleep
-# at all (`world/sleep.py`, `HUNGRY_WAKE_FOOD`). One coherent rule: you do not
-# lie down that hungry, and if you get that hungry asleep, you wake.
-HUNGRY_WAKE_FOOD = 20
-# Fatigue below which the world refuses a `sleep` (`world/sleep.py`,
-# `MIN_SLEEP_FATIGUE`). Collapse at MAX_FATIGUE is unaffected.
-MIN_SLEEP_FATIGUE = 20
-# The new moon (docs/14_new_moon_and_saves.md section 1). How long after the
-# forced sleep nothing at all wakes a sleeper; mirrors the world's
-# `NEW_MOON_STILL_TICKS`. How often a new moon falls is *not* a constant: it is
-# world config, and the clock reports it.
-NEW_MOON_STILL_TICKS = 6
-
-FRESH = "fresh"
-TIRED = "tired"
-EXHAUSTED = "exhausted"
-
-# (on a bed, at night) -> (fatigue points recovered, every this many ticks).
-# Mirrors `world/sleep.py`: BED_NIGHT_RECOVERY, BED_DAY_RECOVERY,
-# GROUND_NIGHT_RECOVERY, GROUND_DAY_RECOVERY.
-SLEEP_RECOVERY: Mapping[tuple[bool, bool], tuple[int, int]] = {
-    (True, True): (1, 1),
-    (True, False): (2, 3),
-    (False, True): (2, 3),
-    (False, False): (1, 2),
-}
-
-
-# How many settlers a scenario starts with. `settlement.toml` has twelve;
-# `hamlet.toml` has six and passes `--settlers 6` to every agent process.
-DEFAULT_SETTLER_COUNT = 12
 
 _NUMBER_WORDS: Mapping[int, str] = {
     2: "two",
@@ -503,16 +532,11 @@ def wield_damage_text() -> str:
 
 def fatigue_word(fatigue: int) -> str:
     """`fresh`, `tired` or `exhausted` for a fatigue value."""
-    if fatigue >= MAX_FATIGUE:
+    if fatigue >= PLAYER_MAX_FATIGUE:
         return EXHAUSTED
     if fatigue >= TIRED_FATIGUE:
         return TIRED
     return FRESH
-
-
-def night_start_tick(day_length: int = DEFAULT_DAY_LENGTH) -> int:
-    """The tick of day night begins on, the same arithmetic the world uses."""
-    return int(day_length * NIGHT_START_FRACTION)
 
 
 def sleep_recovery_text(on_bed: bool, night: bool) -> str:
@@ -521,95 +545,6 @@ def sleep_recovery_text(on_bed: bool, night: bool) -> str:
     if ticks == 1:
         return f"{points} fatigue per tick"
     return f"{points} fatigue per {ticks} ticks"
-
-
-# --- Conversations (mirrors world/items.py, docs/09) -------------------------
-
-CONVERSATION = "conversation"
-CONVERSATION_CHANNEL = "conversation"
-CONVERSATION_MAX_PARTICIPANTS = 4
-# A turn nobody used within this many ticks counts as a pass.
-CONVERSATION_TURN_TICKS = 10
-# A conversation with only its opener closes after this many ticks.
-CONVERSATION_LONELY_TICKS = 20
-CONVERSATION_MAX_UTTERANCES = 40
-CONVERSATION_TEXT_LIMIT = 300
-CONVERSATION_TRANSCRIPT_KEPT = 12
-
-# The `ConverseIntent` action that walks up to a settler and addresses it
-# (docs/09 section 9). The world reports it to the
-# hailer as `hail conv_N <target>` and to the target as
-# `hailed conv_N <hailer>`.
-ACTION_HAIL = "hail"
-ACTION_HAILED = "hailed"
-# A settler cannot be hailed until this many ticks after its last conversation
-# ended. Opening and joining are unaffected.
-HAIL_COOLDOWN_TICKS = 60
-# `EntityActed.action_type` for every `ConverseIntent`, whatever its action.
-CONVERSE_ACTION_TYPE = "converse"
-
-
-# --- Recipes ---------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Recipe:
-    """One craftable item: what it eats, how many it yields, where and how long.
-
-    `station` is `""` for a hand recipe, otherwise the object type that must be
-    on or next to the crafter. `work` is the number of craft actions the recipe
-    takes; every hand recipe takes one and finishes at once.
-    """
-
-    inputs: Mapping[str, int]
-    output_count: int = 1
-    station: str = ""
-    work: int = 1
-
-    def cost_text(self) -> str:
-        """`"2 wood + 1 stone"`, in the table's order."""
-        return " + ".join(f"{amount} {kind}" for kind, amount in self.inputs.items())
-
-
-RECIPES: Mapping[str, Recipe] = {
-    AXE: Recipe({WOOD: 2, STONE: 1}),
-    PICKAXE: Recipe({WOOD: 2, STONE: 2}),
-    SWORD: Recipe({WOOD: 1, STONE: 3}),
-    CHEST: Recipe({WOOD: 6}),
-    MESSAGE_BOARD: Recipe({WOOD: 4, STONE: 1}),
-    SIGN: Recipe({WOOD: 2}),
-    PLANK: Recipe({WOOD: 1}, output_count=2),
-    ROPE: Recipe({FIBER: 2}),
-    ROAD: Recipe({STONE: 2}, output_count=4),
-    WOOD_WALL: Recipe({PLANK: 2}),
-    WOOD_FLOOR: Recipe({PLANK: 1}, output_count=2),
-    WORKSHOP_TABLE: Recipe({PLANK: 4, STONE: 2}),
-    STONE_WALL: Recipe({STONE: 2, CLAY: 1}, station=WORKSHOP_TABLE),
-    STONE_FLOOR: Recipe({STONE: 1, CLAY: 1}, output_count=2, station=WORKSHOP_TABLE),
-    DOOR: Recipe({PLANK: 3, ROPE: 1}, station=WORKSHOP_TABLE),
-    BED: Recipe({PLANK: 4, FIBER: 3}, station=WORKSHOP_TABLE),
-    CHAIR: Recipe({PLANK: 2}, station=WORKSHOP_TABLE),
-    TABLE: Recipe({PLANK: 4}, station=WORKSHOP_TABLE),
-    FURNACE: Recipe({STONE: 8, CLAY: 4}, station=WORKSHOP_TABLE, work=3),
-    CHARCOAL: Recipe({WOOD: 3}, output_count=2, station=FURNACE, work=2),
-    COPPER_INGOT: Recipe({COPPER_ORE: 2, CHARCOAL: 1}, station=FURNACE, work=3),
-    IRON_INGOT: Recipe({IRON_ORE: 2, CHARCOAL: 2}, station=FURNACE, work=4),
-    COPPER_AXE: Recipe({PLANK: 2, COPPER_INGOT: 2}, station=WORKSHOP_TABLE, work=2),
-    COPPER_PICKAXE: Recipe({PLANK: 2, COPPER_INGOT: 2}, station=WORKSHOP_TABLE, work=2),
-    ANVIL: Recipe({IRON_INGOT: 5, STONE: 2}, station=WORKSHOP_TABLE, work=4),
-    IRON_AXE: Recipe({PLANK: 2, IRON_INGOT: 2}, station=ANVIL, work=2),
-    IRON_PICKAXE: Recipe({PLANK: 2, IRON_INGOT: 2}, station=ANVIL, work=2),
-    IRON_SWORD: Recipe({PLANK: 1, IRON_INGOT: 3}, station=ANVIL, work=3),
-}
-
-# Legacy view used by callers that only care about the inputs.
-CRAFT_RECIPES: Mapping[str, Mapping[str, int]] = {
-    name: recipe.inputs for name, recipe in RECIPES.items()
-}
-
-# The progress of a multi-action craft is kept in the station object's state
-# under this key plus the crafter's entity id, as `"<recipe>:<actions done>"`.
-CRAFT_PROGRESS_PREFIX = "craft:"
 
 
 def recipe_table_text() -> str:
