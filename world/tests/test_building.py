@@ -334,6 +334,31 @@ class TestDismantling:
 
         assert not world.is_blocked(Position(x=6, y=5))
 
+    def test_a_settler_walled_in_can_dismantle_its_way_out(self) -> None:
+        """esme sat in a 1-tile cell for 64 ticks and starved (hamlet round 2).
+
+        The planner's `dismantle` is an ExtractIntent on an adjacent object,
+        so being shut in does not stop it: bob at (5, 5) with walls on all
+        eight neighbours can still take one of them apart.
+        """
+        world = _world()
+        neighbours = [
+            (5 + dx, 5 + dy)
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            if (dx, dy) != (0, 0)
+        ]
+        for index, (x, y) in enumerate(neighbours):
+            _add_object(world, f"wall_{index}", "wood_wall", x, y)
+        assert world.get_entity("bob").position == Position(x=5, y=5)
+
+        for _ in range(DISMANTLE_WORK):
+            events = self._dismantle(world, "wall_0", "bob")
+            assert events.action_results[0].success
+
+        assert "wall_0" not in world.all_objects()
+        assert not world.is_blocked(Position(x=4, y=4))
+
     def test_tools_do_not_speed_dismantling_up(self) -> None:
         world = _world(axe=1)
         world.set_entity(world.get_entity("bob").with_wielded("axe"))

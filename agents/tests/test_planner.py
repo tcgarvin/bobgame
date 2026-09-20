@@ -29,7 +29,7 @@ from pydantic_ai.models.function import (
 from pydantic_ai.models.test import TestModel
 
 from agents import world_pb2 as pb
-from agents.jev_agent import planner as planner_module
+from agents.jev_agent import items, planner as planner_module
 from agents.jev_agent.build import BuildExecutor
 from agents.jev_agent.items import RECIPES
 from agents.jev_agent.planner import (
@@ -65,7 +65,13 @@ from agents.jev_agent.journal import (
 )
 from agents.jev_agent.options import BriefHail
 from agents.jev_agent.reflex import EMPTY_REFLEX, NO_REFLEX_LINE, ReflexBrief
-from agents.jev_agent.stint import Brief, StintReport, never_ends
+from agents.jev_agent.stint import (
+    INTERRUPTED_BY_REFLEX,
+    Brief,
+    StintReport,
+    conversation_interruption,
+    never_ends,
+)
 from agents.jev_agent.tracelog import AgentTrace
 from agents.jev_agent.worldmodel import TranscriptLine, WorldModel
 
@@ -2371,3 +2377,134 @@ async def test_a_build_that_runs_dry_crafts_again_and_gives_up_in_the_end(
     with agent.override(model=_build_call("wood_wall")):
         await agent.run("go", deps=deps)
     assert len(bridge.briefs) == planner_module.BUILD_RESUPPLY_ROUNDS
+
+
+# --- Hamlet round 2 ---------------------------------------------------------
+
+
+async def test_an_interrupted_call_costs_no_budget(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    """bram spent 8 of 20 calls on tools that each bounced off one conversation."""
+    deps.budget.reset(20, tick=5)
+    bridge.direct_result = "drop 1 wood -> " + conversation_interruption("conv_38")
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("drop", {"kind": "wood", "amount": 1})):
+        result = await agent.run("go", deps=deps)
+    assert deps.budget.left == 20
+    assert "[tool budget: 20 of 20 calls left this turn]" in result.output
+
+
+async def test_a_reflex_interruption_costs_no_budget(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    deps.budget.reset(20, tick=5)
+    bridge.direct_result = f"drop 1 wood -> {INTERRUPTED_BY_REFLEX}"
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("drop", {"kind": "wood", "amount": 1})):
+        await agent.run("go", deps=deps)
+    assert deps.budget.left == 20
+
+
+async def test_an_ordinary_call_still_costs_budget(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    deps.budget.reset(20, tick=5)
+    bridge.direct_result = "drop 1 wood -> drop ok: dropped"
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("drop", {"kind": "wood", "amount": 1})):
+        await agent.run("go", deps=deps)
+    assert deps.budget.left == 19
+
+
+async def test_a_failed_craft_says_where_the_missing_input_comes_from(
+    deps: PlannerDeps, bridge: RecordingBridge, world_model: WorldModel
+) -> None:
+    """`craft bed -> bed needs 4 plank + 3 fiber` never mentioned reeds."""
+    world_model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10), inventory={"plank": 4}),
+            objects=[make_object("reeds_9", "reeds", (14, 12))],
+        )
+    )
+    bridge.direct_result = "craft bed -> craft failed: bed needs 4 plank + 3 fiber"
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("craft", {"recipe": "bed"})):
+        result = await agent.run("go", deps=deps)
+    assert "fiber comes from reeds (bare hands)" in result.output
+    assert "reeds_9 at (14, 12)" in result.output
+
+
+async def test_a_failed_craft_names_no_source_for_a_crafted_input(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.direct_result = "craft wood_wall -> craft failed: needs 2 plank"
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("craft", {"recipe": "wood_wall"})):
+        result = await agent.run("go", deps=deps)
+    assert "comes from" not in result.output
+
+
+def test_the_source_text_is_generic_over_the_extraction_map() -> None:
+    assert items.source_text("clay") == (
+        "clay comes from clay_deposit (bare hands, faster with a pickaxe)"
+    )
+    assert items.source_text("copper_ore") == (
+        "copper_ore comes from copper_vein (needs a pickaxe in hand)"
+    )
+    assert items.source_text("stone").startswith("stone comes from boulder or ")
+    assert items.source_text("plank") == ""
+
+
+def test_look_lists_your_own_placed_pieces(world_model: WorldModel) -> None:
+    """Journals carried goals across days but never the build site."""
+    world_model.update(
+        make_observation(
+            7,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object("wood_wall_1", "wood_wall", (12, 12), {"owner": "ada"}),
+                make_object("wood_wall_2", "wood_wall", (13, 12), {"owner": "ada"}),
+                make_object("bed_4", "bed", (16, 16), {"owner": "ada"}),
+                make_object("wood_wall_9", "wood_wall", (4, 4), {"owner": "cleo"}),
+            ],
+        )
+    )
+    text = describe_world(world_model)
+    assert "your placed pieces: 2 wood_wall within (12, 12)-(13, 12)" in text
+    assert "1 bed at (16, 16)" in text
+    assert "wood_wall_9" not in text.split("your placed pieces:")[1].splitlines()[0]
+
+
+def test_the_turn_prompt_states_being_enclosed(world_model: WorldModel) -> None:
+    """esme sat in a 1-tile cell for 64 ticks and her planner never knew."""
+    ring = [
+        (10 + dx, 10 + dy)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        if (dx, dy) != (0, 0)
+    ]
+    world_model.update(
+        make_observation(
+            8,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object(f"wood_wall_{i}", "wood_wall", tile, {"owner": "ada"})
+                for i, tile in enumerate(ring)
+            ],
+        )
+    )
+    alerts = body_alerts(world_model)
+    assert any(line.startswith("!! ENCLOSED:") for line in alerts)
+    assert any("dismantle removes a placed piece" in line for line in alerts)
+
+
+def test_the_prompt_states_the_one_hunger_number_for_sleep() -> None:
+    assert (
+        f"Falling asleep needs food above {items.HUNGRY_WAKE_FOOD}"
+        in SETTLEMENT_NARRATIVE
+    )
+    assert (
+        f"when your\n  food falls to {items.HUNGRY_WAKE_FOOD}" in SETTLEMENT_NARRATIVE
+    )

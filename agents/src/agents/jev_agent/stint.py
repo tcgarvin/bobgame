@@ -63,6 +63,34 @@ LOST_EXPLANATION = (
 # The world's intent deadline is 1200 ms after tick start; leave room for the
 # gRPC round trip and the state build.
 JEV_TICK_BUDGET_SECONDS = 0.9
+# Every target the brief named is unreachable: A* finds no route to any of the
+# places or object ids it mentions, several ticks running. A settler once spent
+# 108 ticks stepping north and south inside a pocket of her own walls, toward a
+# bush four tiles away with no way round; ending promptly and naming the target
+# is what lets the planner do something else (docs: hamlet round 2).
+END_NO_PATH = "no_path"
+NO_PATH_PATIENCE = 3
+NO_PATH_EXPLANATION = (
+    "No route to what the brief named ({targets}) for {ticks} ticks running: "
+    "every path is blocked. Nothing about the body or the brief changes that "
+    "from here."
+)
+
+# Food crossed down past a threshold during the stint. Crossing only: a stint
+# that starts below the line is not ended on its first tick.
+END_FOOD_LOW = "food_low"
+END_FOOD_ZERO = "food_zero"
+FOOD_LOW_EXPLANATION = (
+    "Food crossed down to {food}/{max_food} at tick {tick} (it was {before} "
+    "when this stint started). Food falls 1 every {interval} ticks; at 0 you "
+    "lose {damage} health every {starve} ticks. One berry restores {berry}."
+)
+FOOD_ZERO_EXPLANATION = (
+    "Food reached 0/{max_food} at tick {tick}. You lose {damage} health every "
+    "{starve} ticks until you eat; health is {health}/{max_health}. One berry "
+    "restores {berry}."
+)
+
 END_TICKS = "ticks_exhausted"
 END_DEATH = "death"
 END_REPEATED_FAILURE = "repeated_failure"
@@ -75,6 +103,32 @@ END_JOINED_CONVERSATION = "joined_conversation"
 # `kind` on the `stint_start` trace line: what sort of stint this is.
 STINT_KIND_ORDINARY = "stint"
 STINT_KIND_REFLEX = "reflex"
+
+# What a planner single-tick action is answered with when something else took
+# the body before it could run. Nothing happened, so the planner's tool budget
+# is not charged for it (`BudgetedToolset.call_tool`). They live here rather
+# than in `agent.py` because `planner.py` has to recognise them and `agent.py`
+# already imports this module.
+INTERRUPTED_BY_REFLEX = "interrupted: reflex stint started"
+# A conversation can start while the planner is mid-turn, because someone
+# hailed this settler (docs/09 sections 8.3 and 9). The conversation owns the
+# body from that tick, so single-tick actions are answered with this instead.
+INTERRUPTED_BY_CONVERSATION = "interrupted: conversation {conversation_id} started"
+_INTERRUPTION_PREFIX = "interrupted: "
+
+
+def conversation_interruption(conversation_id: str) -> str:
+    """The answer a single-tick action gets when a conversation took the body."""
+    return INTERRUPTED_BY_CONVERSATION.format(conversation_id=conversation_id)
+
+
+def was_interrupted(result: str) -> bool:
+    """Whether a tool result says the action never ran because of an interruption.
+
+    Both forms are rendered as `"<what> -> interrupted: ..."`, so one substring
+    covers the reflex and the conversation alike.
+    """
+    return f"-> {_INTERRUPTION_PREFIX}" in result
 
 
 def never_ends(model: "WorldModel") -> str:
@@ -249,6 +303,9 @@ class StintReport:
     action_counts: Mapping[str, tuple[int, int]]
     notable: Sequence[str]
     tail: Sequence[str]
+    # One line of numbers explaining a code-owned end reason (`no_path`,
+    # `food_low`, `food_zero`); empty for the reasons that explain themselves.
+    end_note: str = ""
     # Blocks appended after the report body: the reflex line for a stint a
     # reflex cut short, and the conversation report for a stint that ended by
     # joining one. The planner's tool call returns all of it in one result.
@@ -269,6 +326,8 @@ class StintReport:
         ]
         if self.end_reason == END_LOST:
             lines.append(f"  {LOST_EXPLANATION}")
+        if self.end_note:
+            lines.append(f"  {self.end_note}")
         lines += [
             f"  position: {self.start_position} -> {self.end_position}",
             f"  stats: {self.start_stats} -> {self.end_stats}",
@@ -333,6 +392,12 @@ class Stint:
         self._unflushed = -1
         self._eject_streak = 0
         self._lost_streak = 0
+        self._no_path_streak = 0
+        # Food as of the previous tick and as of the stint's first tick; -1
+        # until the stint has run one tick, so nothing "crosses" on tick one.
+        self._food_last = -1
+        self._start_food = -1
+        self._end_note = ""
         self._failure_action = ""
         self._failure_count = 0
         self._last_option: Option | None = None
@@ -355,6 +420,8 @@ class Stint:
             self._start_position = self.model.position
             self._start_stats = _stats(self.model)
             self._start_inventory = dict(self.model.self_info.inventory)
+            self._food_last = self.model.self_info.food
+            self._start_food = self._food_last
             self.stint_id = f"{self.model.entity_id}-{self.model.tick}"
             self.trace.stints.write(
                 {
@@ -393,6 +460,11 @@ class Stint:
             brief_text=self.brief.text,
             max_options=MAX_OPTIONS,
         )
+
+        no_path = self._no_path_reason(options)
+        if no_path:
+            self.finish(no_path)
+            return pb.Intent(wait=pb.WaitIntent())
 
         if self._should_repeat_last(options):
             option = _find_option(options, self._last_option.key)  # type: ignore[union-attr]
@@ -626,9 +698,90 @@ class Stint:
             self._failure_action = key
             self._failure_count = 1
 
+    def _food_crossing(self) -> str:
+        """The end reason when food crossed a threshold on this tick, else `""`.
+
+        Crossing only, so a stint started on an empty stomach is not ended on
+        its first tick, and never for a reflex: a reflex runs because a wolf
+        is there, and hunger is not what should call it off. Mutates the
+        remembered food, so it is asked exactly once per tick.
+        """
+        food = self.model.self_info.food
+        before = self._food_last
+        self._food_last = food
+        if self.kind == STINT_KIND_REFLEX or before < 0:
+            return ""
+        info = self.model.self_info
+        if food <= 0 < before:
+            self._end_note = FOOD_ZERO_EXPLANATION.format(
+                max_food=info.max_food,
+                tick=self.model.tick,
+                damage=items.STARVATION_DAMAGE,
+                starve=items.STARVATION_INTERVAL_TICKS,
+                health=info.health,
+                max_health=info.max_health,
+                berry=items.BERRY_FOOD_RESTORE,
+            )
+            return END_FOOD_ZERO
+        if food <= items.FOOD_ALERT_AT < before:
+            self._end_note = FOOD_LOW_EXPLANATION.format(
+                food=food,
+                max_food=info.max_food,
+                tick=self.model.tick,
+                before=self._start_food,
+                interval=items.FOOD_INTERVAL_TICKS,
+                damage=items.STARVATION_DAMAGE,
+                starve=items.STARVATION_INTERVAL_TICKS,
+                berry=items.BERRY_FOOD_RESTORE,
+            )
+            return END_FOOD_LOW
+        return ""
+
+    def _brief_targets(self) -> list[str]:
+        """The names and object ids the brief told Jev to walk to."""
+        return list(self.brief.places) + brief_object_ids(self.model, self.brief.text)
+
+    def _at_a_brief_target(self, targets: Sequence[str]) -> bool:
+        """Whether the body already stands on or next to one of them.
+
+        An arrived-at target gets no step option either, and that is success,
+        not a missing route.
+        """
+        position = self.model.position
+        for name in targets:
+            place = self.brief.places.get(name)
+            if place is not None and chebyshev(place, position) <= 1:
+                return True
+            obj = self.model.objects.get(name)
+            if obj is not None and chebyshev(obj.position, position) <= 1:
+                return True
+        return False
+
+    def _no_path_reason(self, options: Sequence[Option]) -> str:
+        """`no_path` once every brief target has been unreachable long enough."""
+        targets = self._brief_targets()
+        offered = step_target_ids(options)
+        if (
+            not targets
+            or any(target in offered for target in targets)
+            or self._at_a_brief_target(targets)
+        ):
+            self._no_path_streak = 0
+            return ""
+        self._no_path_streak += 1
+        if self._no_path_streak < NO_PATH_PATIENCE:
+            return ""
+        self._end_note = NO_PATH_EXPLANATION.format(
+            targets=", ".join(targets), ticks=self._no_path_streak
+        )
+        return END_NO_PATH
+
     def _termination_reason(self) -> str:
         if not self.model.self_info.alive:
             return END_DEATH
+        food_reason = self._food_crossing()
+        if food_reason:
+            return food_reason
         if self.ticks_used >= self.brief.max_ticks:
             return END_TICKS
         if self._eject_streak >= EJECT_STREAK_TO_END:
@@ -778,6 +931,7 @@ class Stint:
             action_counts=counts,
             notable=_dedupe(self._notable),
             tail=[record.as_line() for record in self.records[-5:]],
+            end_note=self._end_note,
         )
 
     def status_json(self) -> str:

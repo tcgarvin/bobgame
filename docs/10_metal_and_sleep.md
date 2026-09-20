@@ -161,8 +161,15 @@ New intents: `SleepIntent { string object_id = 1; }` (`Intent.sleep = 20`) and
 the sleeper; empty means sleeping on the ground where the entity stands.
 One sleeper per bed (lexicographically smallest entity id wins on the same
 tick; a bed already occupied by a sleeper fails with `"<bed> is taken"`).
-Sleeping needs food above 0 (`"too hungry to sleep"`) and fatigue above 0
-(`"not tired"`).
+Sleeping needs food above `HUNGRY_WAKE_FOOD` (20) and fatigue above 0
+(`"not tired"`). Below the food line the refusal names both numbers:
+`"too hungry to sleep: food F, and a sleeper wakes at food 20"`.
+
+**Changed 2026-09-20 (hamlet round 2).** The line used to be food 0 both
+ways. A settler called `sleep` at food 39 and health 2, the world kept him
+asleep for 156 ticks because only food 0 woke a sleeper, and he died four
+ticks after waking. One number now reads both ways: you cannot lie down at or
+below 20 food, and a sleeper that falls to 20 is woken.
 
 Sleep is a state, not an action: `Entity.asleep` stays true across ticks. While
 asleep, every intent other than `wake` fails with `"asleep"` and the entity
@@ -180,8 +187,9 @@ of food and fatigue. A ground sleeper heals only through the ordinary regen
 rules. Food drops at the normal rate while asleep.
 
 Waking: a voluntary sleeper wakes when fatigue reaches 0, when it takes any
-damage, when its food reaches 0, when the bed it sleeps on is removed, or on
-`WakeIntent`. A collapsed sleeper wakes only at fatigue 70 or on bed removal
+damage, when its food falls to `HUNGRY_WAKE_FOOD` (20), when the bed it sleeps
+on is removed, or on `WakeIntent`. Waking ends the sleep, so the hunger wake
+happens at most once per sleep. A collapsed sleeper wakes only at fatigue 70 or on bed removal
 (it never was on a bed). Waking is reported as an action event
 `("wake", true, "woke up: <reason>")` where reason is one of `rested`,
 `damaged`, `hungry`, `bed removed`, `asked`. Falling asleep is

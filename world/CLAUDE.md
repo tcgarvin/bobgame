@@ -484,6 +484,16 @@ the guard for intents the world injects itself. Waking on damage reads
 `combat.apply_damage`, which keeps combat unaware of sleep and makes
 starvation damage (applied in the food phase, just before) behave the same.
 
+**The hungry wake (2026-09-20, hamlet round 2).** `sleep.HUNGRY_WAKE_FOOD`
+(20) is one number read both ways: `_apply_sleep_intents` refuses a settler at
+or below it (`"too hungry to sleep: food F, and a sleeper wakes at food 20"`)
+and `_wake_reason` returns `hungry` when a non-collapsed sleeper falls to it.
+Waking ends the sleep, so it fires at most once per sleep, and a collapsed
+sleeper still ignores hunger entirely. The old line was food 0 both ways, and
+a settler slept from food 39 through 156 ticks and died four ticks after
+waking. The agent mirror is `agents/.../items.py: HUNGRY_WAKE_FOOD`, which
+feeds the planner prompt's sleep physics and Jev's `sleep:` option text.
+
 `is_tired(entity)` (fatigue >= 60) is the one predicate other modules use:
 `stats.process_health_regen` skips the tired, and extraction and combat apply
 their penalties through it.

@@ -70,6 +70,10 @@ BUILDING_KINDS: frozenset[str] = (
 
 PLACEABLE_KINDS: frozenset[str] = frozenset({CHEST, MESSAGE_BOARD}) | BUILDING_KINDS
 
+# The object state key a placed object records its placer under
+# (`world/containers.py`, `OWNER_KEY`).
+OWNER_KEY = "owner"
+
 WIELDABLE_KINDS: frozenset[str] = frozenset(
     {
         AXE,
@@ -205,6 +209,50 @@ def can_extract(object_type: str, wielded: str) -> bool:
     return not required or wielded in required
 
 
+def source_object_types(kind: str) -> list[str]:
+    """The object types one unit of extraction turns into `kind`, sorted."""
+    return sorted(
+        object_type for object_type, yielded in EXTRACT_YIELD.items() if yielded == kind
+    )
+
+
+def _tool_phrase(tools: frozenset[str]) -> str:
+    """`"a pickaxe"` for a family of tools, naming the plainest one."""
+    for name in (AXE, PICKAXE, COPPER_PICKAXE, IRON_PICKAXE):
+        if name in tools:
+            return f"a {name}"
+    return "a " + sorted(tools)[0]
+
+
+def extraction_text(object_type: str) -> str:
+    """How an object is worked: bare hands, faster with a tool, or tool-only."""
+    required = EXTRACT_REQUIRED_TOOLS.get(object_type, frozenset())
+    if required:
+        return f"needs {_tool_phrase(required)} in hand"
+    speeds = EXTRACT_TOOLS.get(object_type, frozenset())
+    if speeds:
+        return f"bare hands, faster with {_tool_phrase(speeds)}"
+    return "bare hands"
+
+
+def source_text(kind: str) -> str:
+    """`"fiber comes from reeds (bare hands)"`, or `""` when nothing yields it.
+
+    Generic over the extraction map, so a new material needs no new code here.
+    """
+    sources = source_object_types(kind)
+    if not sources:
+        return ""
+    # Four kinds of rock all yield stone the same way; say it once.
+    by_method: dict[str, list[str]] = {}
+    for object_type in sources:
+        by_method.setdefault(extraction_text(object_type), []).append(object_type)
+    parts = ", ".join(
+        f"{' or '.join(types)} ({method})" for method, types in by_method.items()
+    )
+    return f"{kind} comes from {parts}"
+
+
 # --- Combat and speech (mirrors world/items.py, world/wolves.py) -------------
 
 PLAYER_MAX_HEALTH = 20
@@ -232,6 +280,9 @@ STARVATION_DAMAGE = 1
 # Health only regrows above this food (and only while not tired).
 REGEN_FOOD_THRESHOLD = 50
 BERRY_FOOD_RESTORE = 20
+# Food at or below this is stated as a `!!` line on every planner tool result,
+# and it is the level a Jev stint hands the body back at (`stint.py`).
+FOOD_ALERT_AT = 25
 
 LOCAL_CHANNEL = "local"
 SHOUT_CHANNEL = "shout"
@@ -261,6 +312,10 @@ FATIGUE_INTERVAL_DAY = 4
 FATIGUE_INTERVAL_NIGHT = 3
 # Ticks a bed sleeper needs per point of health healed.
 REGEN_INTERVAL_TICKS = 5
+# Food at or below which a sleeper wakes, and below which it cannot fall asleep
+# at all (`world/sleep.py`, `HUNGRY_WAKE_FOOD`). One coherent rule: you do not
+# lie down that hungry, and if you get that hungry asleep, you wake.
+HUNGRY_WAKE_FOOD = 20
 
 FRESH = "fresh"
 TIRED = "tired"

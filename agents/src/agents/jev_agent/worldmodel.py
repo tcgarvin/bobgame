@@ -85,6 +85,11 @@ class ObjectInfo:
         return DEFAULT_REMAINING.get(self.object_type, 0)
 
     @property
+    def owner(self) -> str:
+        """Who placed this object; `""` for anything the world grew or dropped."""
+        return self.state.get(items.OWNER_KEY, "")
+
+    @property
     def has_berry(self) -> bool:
         """Whether this bush currently carries a berry."""
         return self.state.get("berry_count", "0") not in ("", "0")

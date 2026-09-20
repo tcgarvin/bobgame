@@ -322,3 +322,54 @@ def test_a_furnace_and_an_anvil_are_placeable_structures() -> None:
         assert plan.tiles == ((12, 10),)
         assert not plan.is_ground
         assert not plan.blocks
+
+
+# --- Hamlet round 2: the build says what its walls now form ------------------
+
+
+def _ring(centre: Coord, radius: int = 1) -> list[Coord]:
+    x, y = centre
+    return [
+        (x + dx, y + dy)
+        for dx in range(-radius, radius + 1)
+        for dy in range(-radius, radius + 1)
+        if max(abs(dx), abs(dy)) == radius
+    ]
+
+
+def test_geometry_lines_report_the_interior_of_a_finished_ring() -> None:
+    ring = _ring((10, 10))
+    walls = [
+        make_object(f"wood_wall_{index}", "wood_wall", tile)
+        for index, tile in enumerate(ring)
+    ]
+    model = build_model(position=(13, 13), objects=walls)
+    executor = BuildExecutor(make_plan("wood_wall", "rect", (9, 9), (11, 11)))
+    text = "\n".join(executor.geometry_lines(model))
+    assert "enclose 1 interior tile(s)" in text
+    assert "you are outside" in text
+
+
+def test_geometry_lines_say_nothing_about_a_road() -> None:
+    model = build_model()
+    executor = BuildExecutor(make_plan("road", "line", (10, 10), (12, 10)))
+    assert executor.geometry_lines(model) == []
+
+
+def test_the_refused_tile_is_named_when_a_build_would_seal_the_builder_in() -> None:
+    """`build_would_seal_you_in` used to stop without saying which tile."""
+    # Every way of standing next to (10, 9) but the builder's own tile is
+    # walled off, so there is no outside to close the ring from.
+    standing = [tile for tile in _ring((10, 10)) if tile != (10, 9)]
+    standing += [(9, 8), (10, 8), (11, 8)]
+    walls = [
+        make_object(f"wood_wall_{index}", "wood_wall", tile)
+        for index, tile in enumerate(standing)
+    ]
+    model = build_model(position=(10, 10), inventory={"wood_wall": 2}, objects=walls)
+    executor = BuildExecutor(
+        make_plan("wood_wall", "tiles", (0, 0), (0, 0), explicit=[(10, 9)])
+    )
+    assert executor.stop_reason(model) == BUILD_WOULD_SEAL
+    text = "\n".join(executor.geometry_lines(model))
+    assert "refused as sealing you in: (10, 9)" in text

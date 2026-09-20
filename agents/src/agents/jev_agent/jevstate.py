@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Collection, Mapping, Sequence
 
 from . import items
+from .enclosure import enclosed_fact
 from .geometry import Coord, chebyshev, direction_name
 from .options import EMPTY_PLACES, BriefHail, TravelState
 from .pathfinding import NO_PATH, next_step, path_length
@@ -249,7 +250,7 @@ def build_state(
             "at_anvil": model.station_near(items.ANVIL) is not None,
         },
         "so_far": progress.as_entry(),
-        "facts": list(FACTS),
+        "facts": _facts(model),
         "clock": _clock_entry(model),
         "settlement": {"dx": settlement_dx, "dy": settlement_dy},
         "travel": _travel_entry(model, travel),
@@ -367,6 +368,20 @@ FOOD_FACTS = (
 # different blocks meant Jev read the wolf physics only when a wolf was already
 # in view, and never read the food physics at all.
 FACTS: tuple[str, ...] = (FOOD_FACTS, WOLF_FACTS, FATIGUE_FACTS, DAY_FACTS)
+
+
+def _facts(model: WorldModel) -> list[str]:
+    """The always-present physics, plus anything true of this body right now.
+
+    Being shut into a pocket is the one situation the map alone does not make
+    plain: the glyphs are all there, but "there is no way out of these six
+    tiles" is a fact about reachability, not about a glyph.
+    """
+    facts = list(FACTS)
+    enclosed = enclosed_fact(model)
+    if enclosed:
+        facts.append(enclosed)
+    return facts
 
 
 def _clock_entry(model: WorldModel) -> dict[str, Any]:

@@ -114,6 +114,29 @@ and three refills per call; and `tools/analyze_run.py` no longer counts a
 wolf's death as a settler's, reporting `deaths: N settlers by={wolf,
 starvation, unknown, <settler>}` and `wolf kills: N by={<settler>}`
 separately.
+**Hamlet-run fixes, round 2 (2026-09-20)**: the same run, read for the
+shelter goal. esme walled the six free neighbours of her own tile and starved
+in the 1-tile cell; cleo built a 3x3 ring with no door and was never told what
+it enclosed; dov slept from food 39 to death because only food 0 woke a
+sleeper; ada stepped north and south for 108 ticks inside her own walls toward
+a bush four tiles away; bram spent 8 of 20 tool calls on calls that each
+bounced off one conversation; nobody knew fiber comes from reeds (0 doors, 1
+bed); and no journal carried the build site, so each day started a new wall
+cluster (5 disjoint ones). Fixed, all facts and no advice: a new
+`agents/.../enclosure.py` holds one set of flood fills, so `build` now reports
+what its walls form (`the walls here now enclose N interior tile(s) spanning
+WxH; doors: D; gaps: G; you are inside/outside`) and names the tiles it refused
+as sealing; Jev's `place` will not offer the wall that shuts the actor in (a
+door never seals); a `!! ENCLOSED: you can reach only N tile(s); the pieces
+around you: ...` line goes on every tool result, the turn prompt and Jev's
+`facts`; a stint ends `food_low` / `food_zero` the tick food crosses 25 or 0
+(reflexes exempt) and `no_path` after 3 ticks with no route to anything the
+brief named; an interrupted tool call costs no budget; a failed `craft` names
+where the missing raw input comes from and the nearest such objects; `look`
+lists your own standing pieces by 8-connected cluster; and the world wakes a
+sleeper at `HUNGRY_WAKE_FOOD` (20), which is also the level below which it
+refuses to lie down. Details: "Hamlet-run fixes, round 2" in
+[agents/CLAUDE.md](agents/CLAUDE.md).
 **In progress**: milestone 7, run recording & replay — every run is recorded to `runs/<run_id>/` as gzip JSONL (not Parquet) and a replay server serves it to the viewer with seeking, playback and deep links. Contract: [docs/07_replay.md](docs/07_replay.md).
 **Not done**: milestone 8 (LLM agents) is superseded by `agents.jev_agent`.
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)

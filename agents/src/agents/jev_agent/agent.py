@@ -34,6 +34,7 @@ import structlog
 
 from .. import world_pb2 as pb
 from .client import WorldClient
+from . import items
 from .items import DEFAULT_SETTLER_COUNT
 from .conversation import (
     ACTION_HAIL,
@@ -80,6 +81,8 @@ from .reflex import (
     reflex_report_line,
 )
 from .stint import (
+    INTERRUPTED_BY_CONVERSATION,
+    INTERRUPTED_BY_REFLEX,
     END_JOINED_CONVERSATION,
     END_PREEMPTED_BY_REFLEX,
     STINT_KIND_REFLEX,
@@ -87,6 +90,7 @@ from .stint import (
     Stint,
     StintDriver,
     StintReport,
+    conversation_interruption,
     never_ends,
 )
 from .pricing import CostLedger, LedgerJevClient, pricing_payload
@@ -108,17 +112,8 @@ _T = TypeVar("_T")
 
 THOUGHT_CHANNEL = "thought"
 
-INTERRUPTED_BY_REFLEX = "interrupted: reflex stint started"
-# A conversation can start while the planner is mid-turn, because someone
-# accepted its invitation (docs/09 section 8.3). The conversation owns the body
-# from that tick, so single-tick actions are answered with this instead.
-INTERRUPTED_BY_CONVERSATION = "interrupted: conversation {conversation_id} started"
-
-
-def conversation_interruption(conversation_id: str) -> str:
-    """The answer a single-tick action gets when a conversation took the body."""
-    return INTERRUPTED_BY_CONVERSATION.format(conversation_id=conversation_id)
-
+# Defined in `stint.py` and re-exported here, where they have always been
+# imported from: `planner.py` needs them too, and it cannot import `agent.py`.
 
 # How long a planner tool that has just opened or joined a conversation waits
 # for the tick loop to see the object before it gives up on it.
@@ -134,6 +129,9 @@ COLLAPSE_ACTION = "collapse"
 WAKE_ACTION = "wake"
 GROUND_SLEEP_PLACE = "the ground"
 UNKNOWN_WAKE_REASON = "unknown"
+# The world's word for "your food fell to the wake threshold" (`world/sleep.py`,
+# WAKE_HUNGRY). The sleep report spells the numbers out when it sees it.
+WAKE_HUNGRY_REASON = "hungry"
 
 ASLEEP_REJECTION = "failed: asleep"
 
@@ -152,6 +150,7 @@ class SleepRecord:
     fatigue_before: int
     fatigue_after: int
     where: str
+    food_after: int = 0
 
     @property
     def ticks_slept(self) -> int:
@@ -160,11 +159,18 @@ class SleepRecord:
 
     def to_text(self) -> str:
         """The line the `sleep` tool returns."""
-        return (
+        line = (
             f"slept on {self.where} from tick {self.start_tick} to "
             f"{self.end_tick} ({self.ticks_slept} ticks); woke because "
             f"{self.reason}; fatigue {self.fatigue_before} -> {self.fatigue_after}"
         )
+        if self.reason == WAKE_HUNGRY_REASON:
+            line += (
+                f"; food is {self.food_after} and a sleeper wakes at food "
+                f"{items.HUNGRY_WAKE_FOOD}, which is also the level below "
+                "which you cannot fall asleep at all"
+            )
+        return line
 
 
 def sleep_place(digest: TickDigest) -> str:
@@ -858,6 +864,7 @@ class JevAgent:
             fatigue_before=self._sleep_fatigue_before,
             fatigue_after=info.fatigue,
             where=self._sleep_place,
+            food_after=info.food,
         )
         self._asleep_since = -1
         self._last_sleep = record

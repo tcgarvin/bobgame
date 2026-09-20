@@ -73,6 +73,7 @@ from .build import (
     make_plan,
     missing_pieces_text,
 )
+from .enclosure import enclosed_fact, own_pieces_line
 from .geometry import NAME_TO_DIRECTION, NO_DIRECTION, Coord, chebyshev
 from .options import (
     MAX_BRIEF_HAILS,
@@ -85,7 +86,7 @@ from .options import (
     TravelState,
 )
 from .pricing import CostLedger, usage_from_messages
-from .stint import Brief, StintDriver, StintReport, never_ends
+from .stint import Brief, StintDriver, StintReport, never_ends, was_interrupted
 from .tracelog import AgentTrace
 from .worldmodel import VIEW_RADIUS, HeardUtterance, WorldModel
 
@@ -110,8 +111,9 @@ STINT_REPORTS_KEPT = 10
 # A new turn opens with an alert when the actor was bitten this recently.
 RECENT_ATTACK_TICKS = 5
 # Food at or below this gets its own `!!` line on every tool result: a turn can
-# run for hundreds of ticks, and food falls one point every four of them.
-FOOD_ALERT_AT = 25
+# run for hundreds of ticks, and food falls one point every four of them. The
+# number lives in `items.py` because `stint.py` ends a stint on the same line.
+FOOD_ALERT_AT = items.FOOD_ALERT_AT
 # Fatigue within this much of `items.MAX_FATIGUE` gets the same treatment.
 FATIGUE_ALERT_MARGIN = 10
 TURN_RETRY_SECONDS = 5.0
@@ -136,6 +138,8 @@ BUSHES_SHOWN = 6
 # How many signs `look` lists, nearest first: everything in view plus a few
 # more the actor remembers.
 SIGNS_SHOWN = 8
+# How many known objects of a raw material's source type a failed craft names.
+SOURCES_SHOWN = 3
 # The world detail for a placed object is "placed <id> at (x, y)".
 SIGN_ID_RE = re.compile(r"\b(sign_\d+)\b")
 
@@ -205,10 +209,12 @@ The day and sleep:
   night and {items.sleep_recovery_text(True, False)} by day; the ground recovers {items.sleep_recovery_text(False, True)} at night
   and {items.sleep_recovery_text(False, False)} by day. On a bed you also heal 1 health every
   {items.REGEN_INTERVAL_TICKS} ticks while you sleep.
-- One sleeper per bed. Falling asleep needs food above 0 and fatigue above 0.
+- One sleeper per bed. Falling asleep needs food above {items.HUNGRY_WAKE_FOOD} and fatigue above 0.
   While you are asleep nothing you or Jev does reaches the world, food keeps
   dropping, and you wake at fatigue 0, when something damages you, when your
-  food reaches 0, when the bed under you is removed, or on `wake`.
+  food falls to {items.HUNGRY_WAKE_FOOD}, when the bed under you is removed, or on `wake`. It is
+  the same number both ways: you cannot lie down that hungry, and if you get
+  that hungry while asleep you are woken.
 
 Wolves and fighting:
 - Wolves roam the island and keep coming for the whole game, a few at a time.
@@ -603,6 +609,9 @@ def body_alerts(model: WorldModel) -> list[str]:
             f"{items.MAX_FATIGUE} you collapse where you stand and sleep "
             f"until fatigue {items.COLLAPSE_WAKE_FATIGUE}."
         )
+    enclosed = enclosed_fact(model)
+    if enclosed:
+        alerts.append(enclosed)
     return alerts
 
 
@@ -755,6 +764,11 @@ class BudgetedToolset(WrapperToolset[PlannerDeps]):
         day_log = ctx.deps.day_log
         day_log.add(model.tick, KIND_CALL, f"{name}({compact_args(tool_args)})")
         result = await self.wrapped.call_tool(name, tool_args, ctx, tool)
+        if was_interrupted(str(result)):
+            # A reflex or a conversation took the body before the action ran,
+            # so nothing happened and nothing is charged. One settler spent 8
+            # of its 20 calls on tools that each bounced off one conversation.
+            budget.used = max(0, budget.used - 1)
         # Recorded before the footer lines below: the journal wants what the
         # tool said, not the clock and the budget.
         day_log.add(model.tick, KIND_RESULT, str(result), tool=name)
@@ -1065,6 +1079,40 @@ def _pile_lines(model: WorldModel, limit: int) -> list[str]:
     return lines
 
 
+def _source_lines(
+    model: WorldModel, kind: str, limit: int = SOURCES_SHOWN
+) -> list[str]:
+    """Where a raw material comes from, and the nearest such objects known.
+
+    Generic over the extraction map in `items.py`: a material nothing yields
+    (a crafted one, say) produces no lines at all.
+    """
+    where = items.source_text(kind)
+    if not where:
+        return []
+    lines = [where]
+    position = model.self_info.position
+    for obj in model.objects_by_type(items.source_object_types(kind))[:limit]:
+        lines.append(
+            f"  {obj.object_id} at {obj.position} "
+            f"(d{chebyshev(obj.position, position)})"
+        )
+    if len(lines) == 1:
+        lines.append("  you know of none yet")
+    return lines
+
+
+def missing_input_lines(model: WorldModel, recipe: items.Recipe) -> list[str]:
+    """For every input the pack is short of, where that input comes from."""
+    inventory = model.self_info.inventory
+    lines: list[str] = []
+    for name, amount in sorted(recipe.inputs.items()):
+        if inventory.get(name, 0) >= amount:
+            continue
+        lines.extend(_source_lines(model, name))
+    return lines
+
+
 def _sign_lines(model: WorldModel, limit: int) -> list[str]:
     """Every sign in view plus the nearest few known, with what each reads."""
     signs = model.signs_known()
@@ -1125,6 +1173,10 @@ def describe_world(model: WorldModel) -> str:
             lines.append(f"  {object_type}: {count} known; nearest {examples}")
     else:
         lines.append("known objects: none yet")
+
+    own = own_pieces_line(model)
+    if own:
+        lines.append(own)
 
     lines.extend(_build_site_lines(model))
 
@@ -1257,6 +1309,7 @@ async def _run_build(
         return "\n".join(lines)
     lines.append(report.to_text())
     lines.append(executor.summary())
+    lines.extend(executor.geometry_lines(bridge.model))
     if report.end_reason == BUILD_OUT_OF_ITEMS and made.stopped:
         lines.append(f"  could not craft more {plan.kind}: {made.stopped}")
     return "\n".join(lines)
@@ -1801,15 +1854,27 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
 async def _craft_recipe(
     ctx: RunContext[PlannerDeps], recipe: str, known: items.Recipe
 ) -> str:
-    """Repeat the craft action for `recipe` until it finishes or an action fails."""
+    """Repeat the craft action for `recipe` until it finishes or an action fails.
+
+    A failure caused by a missing raw input ends with where that input comes
+    from and the nearest such objects the actor knows of: `"craft failed: bed
+    needs 4 plank + 3 fiber"` on its own never told anybody that fiber is cut
+    from reeds, and in a whole six-settler run one settler gathered reeds.
+    """
     lines: list[str] = []
+    failed = False
     for _ in range(known.work + CRAFT_ACTION_MARGIN):
         outcome = await ctx.deps.bridge.direct_action(
             pb.Intent(craft=pb.CraftIntent(recipe=recipe)), f"craft {recipe}"
         )
         lines.append(outcome)
-        if not action_succeeded(outcome) or CRAFTED_DETAIL in outcome:
+        if not action_succeeded(outcome):
+            failed = True
             break
+        if CRAFTED_DETAIL in outcome:
+            break
+    if failed:
+        lines.extend(missing_input_lines(ctx.deps.bridge.model, known))
     return "\n".join(lines)
 
 
@@ -1867,9 +1932,11 @@ async def _craft_inputs(
         if _carried(ctx, name) >= amount:
             continue
         if depth <= 0 or name not in items.RECIPES:
-            tally.stopped = (
+            shortfall = (
                 f"{kind} takes {amount} {name} and you carry {_carried(ctx, name)}"
             )
+            where = _source_lines(ctx.deps.bridge.model, name)
+            tally.stopped = "\n".join([shortfall, *where]) if where else shortfall
             return False
         await _craft_chain(ctx, name, amount - _carried(ctx, name), tally, depth - 1)
         if _carried(ctx, name) < amount:

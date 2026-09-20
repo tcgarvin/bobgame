@@ -28,8 +28,15 @@ from .geometry import (
     direction_name,
     offset,
 )
+from .enclosure import (
+    SEAL_MAX_FREE_TILES,
+    SEAL_MIN_FREE_TILES,
+    build_geometry_lines,
+    free_tile_cap,
+    would_seal,
+)
 from .options import Option, can_place_ground
-from .pathfinding import find_path, legal_directions
+from .pathfinding import find_path
 from .stint import DANGER_HEALTH_FLOOR, DriverChoice
 from .worldmodel import WorldModel
 
@@ -58,12 +65,12 @@ BUILD_DANGER_RADIUS = 4
 # driver looks at a handful of candidates rather than the whole plan.
 MAX_TARGET_SCAN = 6
 MAX_STAND_SCAN = 4
-# The seal check counts free tiles reachable from where the builder would
-# stand; anything below the cap is a pocket it should not shut itself into.
-SEAL_MIN_FREE_TILES = 64
-SEAL_MAX_FREE_TILES = 200
 
 MAX_PLAN_TILES = 400
+
+# `SEAL_MIN_FREE_TILES` / `SEAL_MAX_FREE_TILES` and the flood fill behind them
+# live in `enclosure.py` now that Jev's own `place` option uses the same rule.
+# They are imported above, so `build.SEAL_MIN_FREE_TILES` still resolves.
 
 
 class BuildPlanError(ValueError):
@@ -246,43 +253,6 @@ class _Step:
     path: tuple[Coord, ...]
 
 
-class _BlockedView:
-    """A terrain view with extra tiles pretended impassable (the seal check)."""
-
-    def __init__(self, model: WorldModel, blocked: frozenset[Coord]) -> None:
-        self._model = model
-        self._blocked = blocked
-
-    def is_walkable(self, position: Coord) -> bool:
-        """Walkable in the real model and not one of the pretend walls."""
-        if position in self._blocked:
-            return False
-        return self._model.is_walkable(position)
-
-    def is_known(self, position: Coord) -> bool:
-        """Whether the underlying model has ever seen this tile."""
-        return self._model.is_known(position)
-
-
-def _reachable_within(view: _BlockedView, start: Coord, cap: int) -> int:
-    """How many tiles are reachable from `start`, counting no further than `cap`."""
-    if not view.is_walkable(start):
-        return 0
-    seen: set[Coord] = {start}
-    frontier: list[Coord] = [start]
-    while frontier and len(seen) < cap:
-        current = frontier.pop()
-        for direction in legal_directions(view, current):
-            neighbour = offset(current, direction)
-            if neighbour in seen:
-                continue
-            seen.add(neighbour)
-            if len(seen) >= cap:
-                break
-            frontier.append(neighbour)
-    return len(seen)
-
-
 @dataclass
 class BuildProgress:
     """What the build has achieved so far."""
@@ -305,6 +275,9 @@ class BuildExecutor:
         self._already: list[Coord] = []
         self._skipped: list[tuple[Coord, str]] = []
         self._sealing: set[Coord] = set()
+        # True once a placement was made from a tile chosen because the nearer
+        # one would have shut the builder in: the ring got closed from outside.
+        self._avoided_seal = False
         self._first_refresh = True
         self._stop_reason = ""
         self._step_tick = -1
@@ -367,6 +340,22 @@ class BuildExecutor:
                 f"    {tile}: {reason}" for tile, reason in progress.skipped[:6]
             )
         return "\n".join(lines)
+
+    def geometry_lines(self, model: WorldModel) -> list[str]:
+        """What the standing pieces around this shape now form.
+
+        Kept apart from `summary()` because it needs the world model, and the
+        `StintDriver` protocol's summary deliberately takes nothing. Only
+        walls and doors bound a room, so nothing is said about a road or a bed.
+        """
+        if not self.plan.blocks and self.plan.kind != items.DOOR:
+            return []
+        return build_geometry_lines(
+            model,
+            self.plan.tiles,
+            refused=sorted(self._sealing),
+            stood_outside=self._avoided_seal,
+        )
 
     def progress(self) -> BuildProgress:
         """A snapshot of placed, pre-existing, skipped and remaining tiles."""
@@ -478,12 +467,16 @@ class BuildExecutor:
             return _Step(target=target, stand=target, path=tuple(path))
 
         checked = 0
+        refused_for_seal = 0
         for stand in self._stand_candidates(model, target):
             if checked >= MAX_STAND_SCAN:
                 break
             checked += 1
             if self.plan.blocks and self._would_seal(model, stand, target):
+                refused_for_seal += 1
                 continue
+            if refused_for_seal:
+                self._avoided_seal = True
             if stand == model.position:
                 return _Step(target=target, stand=stand, path=())
             path = find_path(model, model.position, stand)
@@ -516,19 +509,14 @@ class BuildExecutor:
     def _would_seal(self, model: WorldModel, stand: Coord, target: Coord) -> bool:
         """Whether placing a blocking piece on `target` would shut the builder in.
 
-        No anchor, no map knowledge: flood fill from where the builder would be
-        standing, with the new wall in place, and stop as soon as enough free
-        tiles have been counted. A fill that runs out early means the builder
-        is in a pocket.
+        The shared rule in `enclosure.py`, with a cap scaled to the plan: a
+        big ring legitimately encloses more ground than a small one.
         """
-        view = _BlockedView(model, frozenset({target}))
-        cap = self._free_tile_cap()
-        return _reachable_within(view, stand, cap) < cap
+        return would_seal(model, stand, target, self._free_tile_cap())
 
     def _free_tile_cap(self) -> int:
         """How much open ground counts as "not shut in" for this plan."""
-        wanted = max(SEAL_MIN_FREE_TILES, 2 * len(self.plan.tiles))
-        return min(wanted, SEAL_MAX_FREE_TILES)
+        return free_tile_cap(len(self.plan.tiles))
 
     def _place_option(self, step: _Step) -> Option:
         kind = self.plan.kind

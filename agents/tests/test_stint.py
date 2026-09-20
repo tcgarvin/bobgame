@@ -13,8 +13,14 @@ from agents.jev_agent.build import BUILD_OUT_OF_ITEMS, BuildExecutor, make_plan
 from agents.jev_agent.jevclient import JevDecision
 from agents.jev_agent.options import BriefHail, TravelState
 from agents.jev_agent.pricing import jev_cost_usd
+from agents.jev_agent.items import FOOD_ALERT_AT
 from agents.jev_agent.stint import (
     END_DEATH,
+    END_FOOD_LOW,
+    END_FOOD_ZERO,
+    END_NO_PATH,
+    NO_PATH_PATIENCE,
+    STINT_KIND_REFLEX,
     END_LOST,
     LOST_EXPLANATION,
     END_REPEATED_FAILURE,
@@ -33,6 +39,7 @@ from helpers import (
     make_entity,
     make_object,
     make_observation,
+    make_tiles,
 )
 
 
@@ -788,3 +795,132 @@ async def test_an_end_check_ends_the_stint_with_its_own_reason(
     assert intent.HasField("wait")
     assert harness.stint.end_reason == "arrived"
     assert harness.stint.ticks_used == 1
+
+
+# --- Hamlet round 2: food crossings and unreachable targets -----------------
+
+
+class TestFoodEndsAStint:
+    """A stint hands the body back when food crosses a threshold downwards."""
+
+    async def test_crossing_the_alert_level_ends_the_stint(
+        self, trace: AgentTrace
+    ) -> None:
+        jev = FakeJevClient(script=[decision("wait"), decision("wait")])
+        harness = StintHarness(jev, make_brief(max_ticks=10), trace)
+        await harness.tick(
+            make_observation(1, make_entity("ada", (10, 10), food=FOOD_ALERT_AT + 1))
+        )
+        await harness.tick(
+            make_observation(2, make_entity("ada", (10, 10), food=FOOD_ALERT_AT))
+        )
+        assert harness.stint.end_reason == END_FOOD_LOW
+        report = harness.stint.build_report().to_text()
+        assert f"Food crossed down to {FOOD_ALERT_AT}/100 at tick 2" in report
+        assert f"it was {FOOD_ALERT_AT + 1} when this stint started" in report
+
+    async def test_a_stint_that_starts_low_is_not_ended_at_once(
+        self, trace: AgentTrace
+    ) -> None:
+        jev = FakeJevClient(script=[decision("wait"), decision("wait")])
+        harness = StintHarness(jev, make_brief(max_ticks=10), trace)
+        await harness.tick(
+            make_observation(1, make_entity("ada", (10, 10), food=FOOD_ALERT_AT - 5))
+        )
+        await harness.tick(
+            make_observation(2, make_entity("ada", (10, 10), food=FOOD_ALERT_AT - 6))
+        )
+        assert harness.stint.end_reason == ""
+
+    async def test_crossing_to_zero_ends_the_stint(self, trace: AgentTrace) -> None:
+        jev = FakeJevClient(script=[decision("wait"), decision("wait")])
+        harness = StintHarness(jev, make_brief(max_ticks=10), trace)
+        await harness.tick(make_observation(1, make_entity("ada", (10, 10), food=1)))
+        await harness.tick(make_observation(2, make_entity("ada", (10, 10), food=0)))
+        assert harness.stint.end_reason == END_FOOD_ZERO
+        assert "Food reached 0/100 at tick 2" in harness.stint.build_report().to_text()
+
+    async def test_a_reflex_stint_is_exempt(self, trace: AgentTrace) -> None:
+        jev = FakeJevClient(script=[decision("wait"), decision("wait")])
+        harness = StintHarness(jev, make_brief(max_ticks=10), trace)
+        harness.stint.kind = STINT_KIND_REFLEX
+        await harness.tick(make_observation(1, make_entity("ada", (10, 10), food=1)))
+        await harness.tick(make_observation(2, make_entity("ada", (10, 10), food=0)))
+        assert harness.stint.end_reason == ""
+
+
+def _sealed_observation(tick: int, food: int = 40) -> object:
+    """ada in her own 2-tile pocket, with a berry bush she cannot reach.
+
+    Taken from `runs/20260920-030501-hamlet`: walls on (1548, 961),
+    (1548, 962), (1548, 963), (1549, 963), (1550, 963), rocks either side, and
+    `bush_17351` with a berry at (1552, 965).
+    """
+    walls = [(1548, 961), (1548, 962), (1548, 963), (1549, 963), (1550, 963)]
+    rocks = [(1550, 961), (1550, 962)]
+    trees = [(1548, 960), (1549, 960), (1550, 960)]
+    objects = [
+        make_object(f"wood_wall_{index}", "wood_wall", tile)
+        for index, tile in enumerate(walls)
+    ]
+    objects += [
+        make_object(f"rock_{index}", "rock_small", tile)
+        for index, tile in enumerate(rocks)
+    ]
+    objects += [
+        make_object(f"tree_{index}", "tree", tile) for index, tile in enumerate(trees)
+    ]
+    objects.append(make_object("bush_17351", "bush", (1552, 965), {"berry_count": "1"}))
+    return make_observation(
+        tick,
+        make_entity("ada", (1549, 961 + (tick % 2)), food=food),
+        tiles=make_tiles((1549, 962), radius=8, blocked=walls + rocks + trees),
+        objects=objects,
+    )
+
+
+class TestNoPathEndsAStint:
+    """ada's oscillation: 108 ticks of stepping N and S inside her own walls."""
+
+    async def test_an_unreachable_named_place_ends_the_stint(
+        self, trace: AgentTrace
+    ) -> None:
+        jev = FakeJevClient(script=[decision("wait") for _ in range(6)])
+        brief = make_brief(
+            instruction="Walk to bush_17351 and eat the berry.",
+            max_ticks=30,
+            places={"target_bush": (1552, 965)},
+        )
+        harness = StintHarness(jev, brief, trace)
+        for tick in range(1, 1 + NO_PATH_PATIENCE):
+            await harness.tick(_sealed_observation(tick))
+        assert harness.stint.end_reason == END_NO_PATH
+        report = harness.stint.build_report().to_text()
+        assert "No route to what the brief named (target_bush, bush_17351)" in report
+
+    async def test_a_reachable_target_never_trips_it(self, trace: AgentTrace) -> None:
+        jev = FakeJevClient(script=[decision("wait") for _ in range(6)])
+        brief = make_brief(max_ticks=30, places={"over_there": (1020, 1010)})
+        harness = StintHarness(jev, brief, trace)
+        for tick in range(1, 1 + NO_PATH_PATIENCE + 1):
+            await harness.tick(make_observation(tick, make_entity("ada", (1010, 1010))))
+        assert harness.stint.end_reason == ""
+
+    async def test_standing_at_the_target_is_not_a_missing_route(
+        self, trace: AgentTrace
+    ) -> None:
+        jev = FakeJevClient(script=[decision("wait") for _ in range(6)])
+        brief = make_brief(max_ticks=30, places={"here": (10, 10)})
+        harness = StintHarness(jev, brief, trace)
+        for tick in range(1, 1 + NO_PATH_PATIENCE + 1):
+            await harness.tick(make_observation(tick, make_entity("ada", (10, 10))))
+        assert harness.stint.end_reason == ""
+
+    async def test_a_brief_with_no_targets_is_untouched(
+        self, trace: AgentTrace
+    ) -> None:
+        jev = FakeJevClient(script=[decision("wait") for _ in range(6)])
+        harness = StintHarness(jev, make_brief(max_ticks=30), trace)
+        for tick in range(1, 1 + NO_PATH_PATIENCE + 1):
+            await harness.tick(_sealed_observation(tick))
+        assert harness.stint.end_reason == ""

@@ -791,3 +791,52 @@ def test_a_hail_is_not_offered_for_a_settler_never_seen() -> None:
     model = build_model()
 
     assert "hail:zeno" not in keys_with(model, hails=[BriefHail("zeno", "Hello?")])
+
+
+# --- Hamlet round 2: no hopeful step toward a tile we know we cannot reach ---
+
+
+class TestPlaceStepsWhenThereIsNoPath:
+    """ada stepped N and S for 108 ticks toward a bush 4 tiles away.
+
+    A* had no route (she was sealed into a 2-tile pocket of her own walls),
+    and the greedy fallback offered a step on the tile where stepping south
+    shortened the distance and nothing on the tile where it lengthened it. The
+    fallback is now only for a destination the actor has never seen.
+    """
+
+    @staticmethod
+    def _pocket_model(position: tuple[int, int]) -> WorldModel:
+        walls = [(1548, 961), (1548, 962), (1548, 963), (1549, 963), (1550, 963)]
+        blockers = walls + [(1550, 961), (1550, 962)]
+        blockers += [(1548, 960), (1549, 960), (1550, 960)]
+        objects = [
+            make_object(f"wood_wall_{index}", "wood_wall", tile)
+            for index, tile in enumerate(walls)
+        ]
+        objects.append(
+            make_object("bush_17351", "bush", (1552, 965), {"berry_count": "1"})
+        )
+        model = WorldModel("ada")
+        model.update(
+            make_observation(
+                1,
+                make_entity("ada", position),
+                tiles=make_tiles((1549, 962), radius=8, blocked=blockers),
+                objects=objects,
+            )
+        )
+        return model
+
+    def test_a_known_unreachable_place_gets_no_step_option(self) -> None:
+        for position in ((1549, 961), (1549, 962)):
+            model = self._pocket_model(position)
+            options = enumerate_options(model, places={"target_bush": (1552, 965)})
+            assert "step_towards:target_bush" not in {o.key for o in options}
+
+    def test_an_unseen_place_still_gets_a_hopeful_step(self) -> None:
+        model = WorldModel("ada")
+        model.update(make_observation(1, make_entity("ada", (10, 10))))
+        options = enumerate_options(model, places={"far_off": (400, 400)})
+        option = next(o for o in options if o.key == "step_towards:far_off")
+        assert "beyond what you can see" in option.description

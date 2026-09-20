@@ -542,3 +542,33 @@ def test_a_reached_target_says_arrived_and_an_unreachable_one_says_blocked() -> 
     )
     assert blocked["travel"]["next_step"] == "blocked"
     assert blocked["travel"]["steps_left"] is None
+
+
+def test_being_shut_in_is_a_fact_jev_is_told() -> None:
+    """esme's Jev saw only `wait`, `extract:rock` and `sleep:ground` for 64 ticks."""
+    ring = [
+        (10 + dx, 10 + dy)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        if (dx, dy) != (0, 0)
+    ]
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object(f"wood_wall_{index}", "wood_wall", tile)
+                for index, tile in enumerate(ring)
+            ],
+        )
+    )
+    state = build_state(model, instruction="Build a shelter.", success_condition="done")
+    assert any(fact.startswith("!! ENCLOSED:") for fact in state["facts"])
+
+
+def test_open_ground_carries_only_the_standing_facts() -> None:
+    model = WorldModel("ada")
+    model.update(make_observation(5, make_entity("ada", (10, 10))))
+    state = build_state(model, instruction="Walk east.", success_condition="done")
+    assert not any(fact.startswith("!! ENCLOSED:") for fact in state["facts"])

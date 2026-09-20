@@ -30,6 +30,7 @@ from .geometry import (
     offset,
     same_or_adjacent,
 )
+from .enclosure import blocks_movement, would_seal
 from .pathfinding import find_path, legal_directions
 from .worldmodel import (
     EXTRACTABLE_TYPES,
@@ -628,7 +629,8 @@ def _sleep_options(model: WorldModel) -> list[Option]:
                     f"{items.sleep_recovery_text(True, night)} and heals 1 health "
                     f"every {items.REGEN_INTERVAL_TICKS} ticks while you sleep "
                     f"(fatigue {info.fatigue}/{info.max_fatigue}). You wake at "
-                    "fatigue 0, on damage, at food 0, or on a wake action"
+                    f"fatigue 0, on damage, at food {items.HUNGRY_WAKE_FOOD}, "
+                    "or on a wake action"
                 ),
                 intent=pb.Intent(sleep=pb.SleepIntent(object_id=obj.object_id)),
             )
@@ -641,7 +643,8 @@ def _sleep_options(model: WorldModel) -> list[Option]:
                 f"sleep on the ground where you stand: it recovers "
                 f"{items.sleep_recovery_text(False, night)} while you sleep "
                 f"(fatigue {info.fatigue}/{info.max_fatigue}). You wake at "
-                "fatigue 0, on damage, at food 0, or on a wake action"
+                f"fatigue 0, on damage, at food {items.HUNGRY_WAKE_FOOD}, "
+                "or on a wake action"
             ),
             intent=pb.Intent(sleep=pb.SleepIntent()),
         )
@@ -905,6 +908,11 @@ def _place_options(model: WorldModel, inventory: Mapping[str, int]) -> list[Opti
                 continue
             if any(entity.position == target for entity in model.entities_near(2)):
                 continue
+            # A settler once walled the six free neighbours of her own tile one
+            # by one and starved in the cell. A door lets settlers through, so
+            # placing one is never a seal.
+            if blocks_movement(kind) and would_seal(model, position, target):
+                continue
             name = direction_name(direction)
             options.append(
                 Option(
@@ -1020,6 +1028,13 @@ def _step_option_for_place(
         direction = direction_between(position, path[0])
         description = f"one step toward {name} {where}"
     else:
+        # A* has failed. Walking hopefully is only walking toward a tile the
+        # actor has never seen; when it *has* seen the tile and still has no
+        # route, there is no route, and offering a hopeful step is what kept a
+        # settler stepping north and south inside her own walls until she
+        # starved. Saying nothing here is what makes `lost` and `no_path` fire.
+        if model.is_known(target):
+            return None
         direction = _greedy_step(model, position, target)
         if direction == NO_DIRECTION:
             return None

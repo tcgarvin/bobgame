@@ -49,6 +49,14 @@ RECOVERY_PER_STEP = 1
 # `Entity.sleeping_on` when the sleeper lies on the bare ground.
 GROUND = ""
 
+# --- Hunger and sleep ------------------------------------------------------
+
+# One rule, read both ways: a settler will not lie down at or below this much
+# food, and a sleeper that falls to it wakes. Waking ends the sleep, so it
+# happens at most once per sleep. Before 2026-09-20 the line was food 0, and a
+# settler slept from food 39 through the night and died four ticks after waking.
+HUNGRY_WAKE_FOOD = 20
+
 # --- Wake reasons ----------------------------------------------------------
 
 WAKE_RESTED = "rested"
@@ -151,8 +159,14 @@ def _apply_sleep_intents(
         place = _sleep_place(world, entity, intents[entity_id].object_id, taken, events)
         if place is None:
             continue
-        if entity.food <= 0:
-            events.acted(entity_id, "sleep", False, "too hungry to sleep")
+        if entity.food <= HUNGRY_WAKE_FOOD:
+            events.acted(
+                entity_id,
+                "sleep",
+                False,
+                f"too hungry to sleep: food {entity.food}, and a sleeper wakes "
+                f"at food {HUNGRY_WAKE_FOOD}",
+            )
             continue
         if entity.fatigue <= 0:
             events.acted(entity_id, "sleep", False, "not tired")
@@ -296,7 +310,7 @@ def _wake_reason(world: World, entity: Entity, damaged: set[str]) -> str:
         return WAKE_RESTED
     if entity.entity_id in damaged:
         return WAKE_DAMAGED
-    if entity.food <= 0:
+    if entity.food <= HUNGRY_WAKE_FOOD:
         return WAKE_HUNGRY
     if entity.sleeping_on != GROUND and not _bed_exists(world, entity.sleeping_on):
         return WAKE_BED_REMOVED

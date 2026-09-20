@@ -8,6 +8,7 @@ from world.events import DamageEvent, TickEvents
 from world.recording import tick_record
 from world.sleep import (
     COLLAPSE_WAKE_FATIGUE,
+    HUNGRY_WAKE_FOOD,
     RESPAWN_FATIGUE,
     TIRED_FATIGUE,
     is_tired,
@@ -206,7 +207,26 @@ class TestSleepIntent:
         world = _world()
         _with_settler(world, fatigue=40, food=0)
         events = _sleep(world, "bob")
-        assert _details(events, "sleep") == ["too hungry to sleep"]
+        assert _details(events, "sleep") == [
+            "too hungry to sleep: food 0, and a sleeper wakes at food 20"
+        ]
+
+    def test_too_hungry_to_sleep_at_the_wake_threshold(self) -> None:
+        """The refusal and the wake share one number (hamlet round 2)."""
+        world = _world()
+        _with_settler(world, fatigue=40, food=HUNGRY_WAKE_FOOD)
+        events = _sleep(world, "bob")
+        assert _details(events, "sleep") == [
+            f"too hungry to sleep: food {HUNGRY_WAKE_FOOD}, and a sleeper "
+            f"wakes at food {HUNGRY_WAKE_FOOD}"
+        ]
+        assert world.get_entity("bob").asleep is False
+
+    def test_sleeps_just_above_the_threshold(self) -> None:
+        world = _world()
+        _with_settler(world, fatigue=40, food=HUNGRY_WAKE_FOOD + 1)
+        _sleep(world, "bob")
+        assert world.get_entity("bob").asleep is True
 
     def test_not_tired(self) -> None:
         world = _world()
@@ -340,6 +360,36 @@ class TestWaking:
         events = TickEvents()
         process_fatigue_phase(world, events)
         assert _details(events, "wake") == ["woke up: hungry"]
+
+    def test_wake_at_the_hungry_threshold(self) -> None:
+        """A sleeper wakes at food 20, not at food 0 (hamlet round 2).
+
+        The old rule let a settler sleep from food 39 through the night and
+        die four ticks after waking.
+        """
+        world = _world()
+        _with_settler(world, fatigue=40, food=HUNGRY_WAKE_FOOD, asleep=True)
+        world.tick = 7
+        events = TickEvents()
+        process_fatigue_phase(world, events)
+        assert world.get_entity("bob").asleep is False
+        assert _details(events, "wake") == ["woke up: hungry"]
+
+    def test_sleeps_on_above_the_hungry_threshold(self) -> None:
+        world = _world()
+        _with_settler(world, fatigue=40, food=HUNGRY_WAKE_FOOD + 1, asleep=True)
+        world.tick = 7
+        events = TickEvents()
+        process_fatigue_phase(world, events)
+        assert world.get_entity("bob").asleep is True
+
+    def test_collapsed_sleeper_ignores_hunger(self) -> None:
+        world = _world()
+        _with_settler(world, fatigue=90, food=0, asleep=True, collapsed=True)
+        world.tick = 7
+        events = TickEvents()
+        process_fatigue_phase(world, events)
+        assert world.get_entity("bob").asleep is True
 
     def test_wake_bed_removed(self) -> None:
         world = _world()

@@ -254,6 +254,7 @@ written at startup with the prices the run is billed at (`pricing.py`). Contract
 | `build.py` | Shape geometry and the `BuildExecutor` that drives the planner's `build` tool |
 | `pathfinding.py` | 8-connected A* with the world's diagonal-blocking rule; unknown tiles cost 3 |
 | `worldmodel.py` | Everything ever observed: tiles, objects, entities, own history, settlement |
+| `enclosure.py` | Seals, rooms, the enclosed fact and the actor's own pieces: the flood fills `build.py`, `options.py`, `planner.py` and `jevstate.py` share |
 | `options.py` | The legal actions for this tick, each carrying its proto Intent; walking is `step_towards:<target>` with a per-type quota (`STEP_GROUPS`), and `OPTION_SECTIONS` fixes what gets truncated first |
 | `jevstate.py` | The compact JSON state (17x17 ASCII map, one `facts` list, the `so_far` block, a `nearby` list of only what the map cannot say) Jev sees |
 | `jevclient.py` | The TypeSafe System One call; `JevClient` protocol for fakes |
@@ -468,6 +469,86 @@ Four things the first six-settler run showed, all in `planner.py`:
 `starvation` only when the tick's `entity_updates` show food 0, else
 `unknown`), and a wolf's death is a kill in `WorldFacts.wolf_kills`, keyed by
 the settler who landed it.
+
+### Hamlet-run fixes, round 2 (2026-09-20)
+
+The second pass over `runs/20260920-030501-hamlet` (goal: six enclosed personal
+rooms). New module `enclosure.py` holds the arithmetic three callers now share.
+
+- **Geometry in build results.** `BuildExecutor.geometry_lines(model)` (kept
+  apart from `summary()`, which the `StintDriver` protocol says takes nothing)
+  appends what the standing pieces around the shape now form, from a
+  4-connected room fill: `the walls here now enclose N interior tile(s)
+  spanning WxH; doors: D; gaps: G; you are inside/outside`, or `these walls
+  enclose nothing yet: K gap(s) remain at (x, y), ...`. A closed ring with no
+  door and no gap adds `the interior has no entrance: no door and no gap`, and
+  when the seal guard made the builder close it from outside, `; the last piece
+  was placed from outside, because placing it from inside would have shut you
+  in`. `build_would_seal_you_in` now names the tiles it refused. Nothing is
+  said about a road, a floor or a bed: only walls and doors bound a room.
+- **Seal guard for Jev's `place`.** `options._place_options` skips a structure
+  placement where `enclosure.would_seal` says the actor would be left with
+  fewer than `SEAL_MIN_FREE_TILES` (64) reachable tiles. A door is passable to
+  settlers, so placing one is never a seal. esme walled the six free
+  neighbours of her own tile one at a time and starved in the cell.
+- **The enclosed fact.** `enclosure.enclosed_fact` returns
+  `!! ENCLOSED: you can reach only N tile(s); the pieces around you:
+  wood_wall_31 (N), .... dismantle removes a placed piece (3 extract actions,
+  one item back).` whenever the body reaches fewer than `ENCLOSED_REACH_LIMIT`
+  (12) tiles. It is one of `planner.body_alerts`, so it reaches every tool
+  result and the turn prompt, and `jevstate._facts` appends it to Jev's always-
+  present `facts`. `dismantle` already worked from inside (it is an
+  `ExtractIntent` on an adjacent object); `world/tests/test_building.py` now
+  pins that.
+- **Food ends a stint.** `Stint` ends with `food_low` the tick food *crosses*
+  down to `items.FOOD_ALERT_AT` (25) and `food_zero` when it crosses to 0.
+  Crossing only, so a stint started hungry is not ended on its first tick, and
+  a reflex stint is exempt. `StintReport.end_note` carries the numbers.
+  `FOOD_ALERT_AT` moved to `items.py`, because `stint.py` cannot import
+  `planner.py`.
+- **`no_path`.** ada spent 108 ticks stepping north and south inside a 2-tile
+  pocket of her own walls, toward a bush four tiles away. Root cause:
+  `_step_option_for_place` fell back to `_greedy_step` when A* failed, and that
+  memoryless hill-climb offered a step on the tile where stepping south
+  shortened the chebyshev distance and nothing on the tile where it lengthened
+  it — a 2-cycle re-armed every tick, with the option worded "it is beyond what
+  you can see, so keep stepping", which is what kept `lost` at 0.3. The
+  fallback is now only for a destination `model.is_known` has never seen; a
+  known tile with no route gets no option at all. On top of that `Stint` ends
+  with `END_NO_PATH` after `NO_PATH_PATIENCE` (3) ticks on which no brief
+  target (a `places` name or an object id the brief text names) has a step
+  option and the body is not already beside one, naming the targets in the
+  report.
+- **Interrupted calls are free.** `stint.was_interrupted` spots a result of the
+  form `<what> -> interrupted: ...`, and `BudgetedToolset.call_tool` refunds
+  the call: nothing happened, so nothing is charged. bram spent 8 of 20 calls
+  bouncing off one conversation. `INTERRUPTED_BY_REFLEX`,
+  `INTERRUPTED_BY_CONVERSATION` and `conversation_interruption` moved from
+  `agent.py` to `stint.py` (and are re-imported there) so `planner.py` can see
+  them. The first interrupted result still does *not* carry the conversation
+  report — that would mean blocking a single-tick tool on the whole
+  conversation; the report arrives as a note in the next tool result as before.
+- **Craft failures name sources.** `items.source_text(kind)` is generic over
+  `EXTRACT_YIELD` / `EXTRACT_TOOLS` / `EXTRACT_REQUIRED_TOOLS`: `fiber comes
+  from reeds (bare hands)`, `clay comes from clay_deposit (bare hands, faster
+  with a pickaxe)`, `copper_ore comes from copper_vein (needs a pickaxe in
+  hand)`. `planner.missing_input_lines` appends it, plus the nearest
+  `SOURCES_SHOWN` (3) such objects, to a failed `craft` and to `_craft_inputs`'
+  shortfall inside `build`. In the whole run one settler gathered reeds and
+  `craft bed -> bed needs 4 plank + 3 fiber` never said where fiber comes from.
+- **Your own placed pieces.** `enclosure.own_pieces_line` reads
+  `ObjectInfo.owner` (the world's `owner` state key, mirrored as
+  `items.OWNER_KEY`) and groups this settler's standing building pieces into
+  8-connected clusters: `your placed pieces: 8 wood_wall within (1545, 973)-
+  (1547, 975); 1 bed at (1544, 973)`, capped at `OWN_PIECE_CLUSTERS_SHOWN` (6)
+  with `and N more group(s)`. It is part of `describe_world`, so the journal's
+  day log keeps it (it keeps the last `look`) and the site survives the nightly
+  history reset. Journals carried goals across days but never the build site,
+  and the run ended with five disjoint wall clusters.
+- **The hungry wake** is a world change (`world/CLAUDE.md`, docs/10):
+  `items.HUNGRY_WAKE_FOOD` (20) mirrors it into the prompt's sleep physics and
+  Jev's `sleep:` option text, and `SleepRecord.to_text` spells the numbers out
+  on a `hungry` wake.
 
 ### The eject question, split in three (docs/05)
 
