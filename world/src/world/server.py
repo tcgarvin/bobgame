@@ -4,15 +4,17 @@ import asyncio
 import signal
 from concurrent import futures
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import grpc
 import structlog
 
 from . import world_pb2 as pb
 from . import world_pb2_grpc
+from .exceptions import ResumeStartupError
 from .lease import LeaseManager
-from .recording import RunRecorder, default_run_dir, generate_run_id
+from .recording import RunRecorder, default_run_dir, file_sha256, generate_run_id
+from .save_coordinator import SaveCoordinator, SaveSettings
 from .services import (
     ActionServiceServicer,
     AgentStatusServiceServicer,
@@ -23,12 +25,23 @@ from .services import (
     ViewerWebSocketService,
 )
 from .settlement import find_settlement_site, nearest_free_walkable
+from .snapshot import (
+    SnapshotError,
+    WorldSnapshot,
+    check_map,
+    load_world_snapshot,
+    restore_wolf_simulator,
+    restore_world,
+)
 from .state import DEFAULT_DAY_LENGTH_TICKS, Entity, World, WorldObject
 from .tick import TickConfig, TickContext, TickLoop, TickResult
 from .types import Position
 from .wolves import WolfSettings
 
 logger = structlog.get_logger()
+
+# How often a resuming server looks for the settlers' observation streams.
+OBSERVER_POLL_INTERVAL_S = 0.25
 
 # Project root: the parent of the world/ package directory.
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
@@ -51,6 +64,7 @@ class WorldServer:
         tick_config: TickConfig | None = None,
         recorder: RunRecorder | None = None,
         wolf_settings: WolfSettings = WolfSettings(),
+        save_settings: SaveSettings | None = None,
     ):
         self.world = world
         self.port = port
@@ -67,6 +81,14 @@ class WorldServer:
             on_tick_start=self._on_tick_start,
             wolf_settings=wolf_settings,
         )
+        # The save coordinator needs the tick loop's wolf simulator, so it is
+        # built here rather than handed in (docs/14).
+        if save_settings is not None:
+            self.tick_loop.save_coordinator = SaveCoordinator(
+                world,
+                self.tick_loop.wolf_simulator,
+                save_settings,
+            )
 
         # gRPC services
         self.tick_service = TickServiceServicer(self.tick_loop)
@@ -160,8 +182,64 @@ class WorldServer:
         # Register with chunk manager so it gets sent to viewers
         self.viewer_ws_service.chunk_manager.add_object(obj.object_id, obj.position)
 
-    async def start(self) -> None:
-        """Start the gRPC server and tick loop."""
+    def restore_entity(self, entity: Entity) -> None:
+        """Put a snapshot's entity back, placed if alive and detached if dead.
+
+        Like `add_entity`, but it never raises on two dead settlers that share
+        the tile they died on: dead entities hold no tile (docs/14).
+        """
+        if entity.alive:
+            self.world.add_entity(entity)
+        else:
+            self.world.add_entity_unplaced(entity)
+        self.discovery_service.register_entity_spawn(entity.entity_id, self.world.tick)
+        self.viewer_ws_service.chunk_manager.add_entity(
+            entity.entity_id, entity.position
+        )
+
+    async def wait_for_observers(
+        self, entity_ids: Sequence[str], timeout_s: float
+    ) -> None:
+        """Block until every named entity has an observation stream open.
+
+        A resumed run holds its first tick until the settlers are back, so
+        none of them misses the tick they were saved on (docs/14, section 4).
+
+        Raises:
+            ResumeStartupError: If some of them never connected in time.
+        """
+        wanted = set(entity_ids)
+        if not wanted:
+            return
+        loop = asyncio.get_running_loop()
+        give_up_at = loop.time() + timeout_s
+        while True:
+            missing = sorted(wanted - self.observation_service.subscriber_ids())
+            if not missing:
+                logger.info("resume_observers_ready", entities=len(wanted))
+                return
+            if loop.time() >= give_up_at:
+                raise ResumeStartupError(
+                    "These settlers never opened an observation stream within "
+                    f"{timeout_s:.0f}s: {', '.join(missing)}"
+                )
+            await asyncio.sleep(OBSERVER_POLL_INTERVAL_S)
+
+    async def start(
+        self,
+        wait_for_entities: Sequence[str] = (),
+        wait_timeout_s: float = 0.0,
+    ) -> None:
+        """Start the gRPC server and tick loop.
+
+        Args:
+            wait_for_entities: Entity ids whose agents must be connected before
+                the first tick runs (a resume; empty for a fresh run).
+            wait_timeout_s: How long to wait for them.
+
+        Raises:
+            ResumeStartupError: If `wait_for_entities` do not all connect.
+        """
         if self.recorder is not None:
             self.recorder.start()
 
@@ -200,6 +278,15 @@ class WorldServer:
         # Start WebSocket server for viewers
         await self.viewer_ws_service.start()
 
+        # A resumed run holds tick T until every settler is back.
+        if wait_for_entities:
+            logger.info(
+                "resume_waiting_for_observers",
+                entities=len(wait_for_entities),
+                timeout_s=wait_timeout_s,
+            )
+            await self.wait_for_observers(wait_for_entities, wait_timeout_s)
+
         # Start tick loop
         self._tick_task = asyncio.create_task(self.tick_loop.run())
         logger.info("tick_loop_started")
@@ -226,13 +313,20 @@ class WorldServer:
         if self.recorder is not None:
             self.recorder.close()
 
-    async def run_forever(self) -> None:
+    async def run_forever(
+        self,
+        wait_for_entities: Sequence[str] = (),
+        wait_timeout_s: float = 0.0,
+    ) -> None:
         """Start and run until interrupted.
 
         SIGINT and SIGTERM stop the tick loop so `stop()` runs and the run
         recorder can close its files and finish `meta.json`.
+
+        Raises:
+            ResumeStartupError: If a resume's settlers do not all connect.
         """
-        await self.start()
+        await self.start(wait_for_entities, wait_timeout_s)
         loop = asyncio.get_running_loop()
         for signal_number in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -276,6 +370,63 @@ def _spawn_at_settlement(server: "WorldServer", entities: list[Entity]) -> None:
         )
 
 
+def _map_sha256(map_path: str) -> str:
+    """Hex sha256 of the run's map file, "" when there is none to hash."""
+    if not map_path:
+        return ""
+    map_file = PROJECT_ROOT / map_path
+    try:
+        return file_sha256(map_file)
+    except OSError as exc:
+        logger.warning("map_sha256_failed", path=str(map_file), error=str(exc))
+        return ""
+
+
+def _register_restored_world(server: "WorldServer") -> None:
+    """Tell the chunk manager and discovery list about a restored world."""
+    chunks = server.viewer_ws_service.chunk_manager
+    for obj in server.world.all_objects().values():
+        chunks.add_object(obj.object_id, obj.position)
+    for entity in server.world.all_entities().values():
+        server.discovery_service.register_entity_spawn(
+            entity.entity_id, server.world.tick
+        )
+        chunks.add_entity(entity.entity_id, entity.position)
+    logger.info(
+        "restored_world_registered",
+        objects=server.world.object_count(),
+        entities=server.world.entity_count(),
+    )
+
+
+def _load_resume(save_dir: Path) -> tuple[WorldSnapshot, World]:
+    """Load a save: check the map, build the world from it, restore the state.
+
+    Returns the snapshot and the world it was restored into.
+
+    Raises:
+        SnapshotError: If the save is incomplete, stale or unreadable.
+        FileNotFoundError: If the snapshot's map file is gone.
+    """
+    from .terrain import load_world
+
+    snapshot = load_world_snapshot(save_dir)
+    check_map(snapshot, PROJECT_ROOT)
+    if snapshot.map_path:
+        world, _terrain_objects = load_world(PROJECT_ROOT / snapshot.map_path)
+    else:
+        world = World(width=snapshot.width, height=snapshot.height)
+    restore_world(snapshot, save_dir, world)
+    logger.info(
+        "resumed_from_snapshot",
+        path=str(save_dir),
+        tick=snapshot.tick,
+        entities=len(snapshot.entities),
+        objects=world.object_count(),
+    )
+    return snapshot, world
+
+
 async def run_server(
     width: int = 100,
     height: int = 100,
@@ -295,6 +446,12 @@ async def run_server(
     config_path: str = "",
     map_path: str = "",
     day_length_ticks: int = DEFAULT_DAY_LENGTH_TICKS,
+    new_moon_every_days: int = 0,
+    save_on_new_moon: bool = True,
+    save_wait_seconds: int = 180,
+    run_config: dict[str, Any] | None = None,
+    resume: WorldSnapshot | None = None,
+    parent_run_id: str = "",
 ) -> None:
     """Run a world server with the given configuration.
 
@@ -318,10 +475,22 @@ async def run_server(
         config_path: Config path relative to the project root, recorded in meta.json
         map_path: Map file path relative to the project root, "" when there is none
         day_length_ticks: Ticks in one day/night cycle (docs/10)
+        new_moon_every_days: How often a new-moon night falls; 0 for never (docs/14)
+        save_on_new_moon: Whether a new-moon night also writes a save
+        save_wait_seconds: How long a save waits for the settlers' files
+        run_config: The full config this run was started with, saved with a snapshot
+        resume: A loaded snapshot whose entities and objects are already in
+            `world`; its wolf RNG is restored and its tick is held for the agents
+        parent_run_id: The run a resume continues, recorded in meta.json
+
+    Raises:
+        ResumeStartupError: If a resumed run's settlers do not all connect.
     """
     if world is None:
         world = World(width=width, height=height)
-    world.day_length_ticks = day_length_ticks
+    if resume is None:
+        world.day_length_ticks = day_length_ticks
+        world.new_moon_every_days = new_moon_every_days
     config = TickConfig(
         tick_duration_ms=tick_duration_ms,
         intent_deadline_ms=(
@@ -343,8 +512,25 @@ async def run_server(
             wolves=wolves,
             map_path=map_path,
             project_root=PROJECT_ROOT,
+            parent_run_id=parent_run_id,
+            resumed_from_tick=resume.tick if resume is not None else -1,
         )
         logger.info("run_dir", path=str(run_dir), run_id=recorder.run_id)
+
+    save_settings = SaveSettings(
+        run_dir=run_dir,
+        run_id=recorder.run_id if recorder is not None else run_id,
+        config=run_config or {},
+        config_name=config_name,
+        config_path=config_path,
+        map_path=map_path,
+        map_sha256=_map_sha256(map_path),
+        enabled=save_on_new_moon,
+        wait_seconds=save_wait_seconds,
+        # The tick a resume starts on already has a save; taking a second one
+        # would ask the settlers for files they have already written.
+        suppress_tick=resume.tick if resume is not None else -1,
+    )
 
     server = WorldServer(
         world,
@@ -353,25 +539,34 @@ async def run_server(
         tick_config=config,
         recorder=recorder,
         wolf_settings=wolf_settings,
+        save_settings=save_settings,
     )
+
+    if resume is not None:
+        restore_wolf_simulator(resume, server.tick_loop.wolf_simulator)
 
     # The mechanics track owns the wolf simulation; it reads this flag off the
     # tick loop. Set defensively so the two tracks can land independently.
     # See docs/05_jev_agents_design.md "Deviations".
     setattr(server.tick_loop, "wolves_enabled", wolves)
 
-    # Objects go in first: settlement spawning needs to know which tiles are
-    # occupied by trees and rocks.
-    if objects:
-        for obj in objects:
-            server.add_object(obj)
+    if resume is not None:
+        # Everything is already in the world; the chunk manager and the
+        # discovery list still have to learn about it.
+        _register_restored_world(server)
+    else:
+        # Objects go in first: settlement spawning needs to know which tiles are
+        # occupied by trees and rocks.
+        if objects:
+            for obj in objects:
+                server.add_object(obj)
 
-    if entities:
-        if spawn_mode == "settlement":
-            _spawn_at_settlement(server, entities)
-        else:
-            for entity in entities:
-                server.add_entity(entity)
+        if entities:
+            if spawn_mode == "settlement":
+                _spawn_at_settlement(server, entities)
+            else:
+                for entity in entities:
+                    server.add_entity(entity)
 
     logger.info(
         "starting_world_server",
@@ -389,9 +584,88 @@ async def run_server(
         wolf_spawn_interval_ticks=wolf_settings.spawn_interval_ticks,
         entities=len(entities) if entities else 0,
         objects=len(objects) if objects else 0,
+        new_moon_every_days=world.new_moon_every_days,
+        resumed_from_tick=resume.tick if resume is not None else None,
     )
 
-    await server.run_forever()
+    if resume is not None:
+        await server.run_forever(resume.settler_ids(), float(save_wait_seconds))
+    else:
+        await server.run_forever()
+
+
+def _configure_logging() -> None:
+    """Console logging at INFO for the CLI."""
+    structlog.configure(
+        processors=[
+            structlog.stdlib.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.dev.ConsoleRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(20),  # INFO level
+    )
+
+
+def _main_resume(args: Any) -> None:
+    """Continue a saved run: everything comes from the save (docs/14, section 4).
+
+    The config in the snapshot wins over the TOML on disk, which may have
+    changed since the run started.
+
+    Raises:
+        SystemExit: With status 1 when the save cannot be used or the settlers
+            never reconnect.
+    """
+    from .config import Config
+
+    save_dir = Path(args.resume)
+    try:
+        snapshot, world = _load_resume(save_dir)
+    except (SnapshotError, FileNotFoundError, ValueError) as exc:
+        logger.error("resume_failed", path=str(save_dir), error=str(exc))
+        raise SystemExit(1)
+
+    config = Config.model_validate(snapshot.config)
+    config_name = snapshot.config_name or DEFAULT_CONFIG
+    run_id = generate_run_id(config_name)
+    run_dir = (
+        Path(args.run_dir) if args.run_dir else default_run_dir(PROJECT_ROOT, run_id)
+    )
+    logger.info(
+        "resuming_run",
+        run_id=run_id,
+        run_dir=str(run_dir),
+        parent_run_id=args.parent_run_id or snapshot.run_id,
+        tick=snapshot.tick,
+    )
+
+    try:
+        asyncio.run(
+            run_server(
+                width=world.width,
+                height=world.height,
+                port=args.port,
+                ws_port=args.ws_port,
+                tick_duration_ms=config.world.tick_duration_ms,
+                world=world,
+                intent_deadline_ms=config.world.intent_deadline_ms,
+                wolves=config.world.wolves,
+                wolf_settings=config.world.wolf_settings(),
+                run_dir=run_dir,
+                run_id=run_id,
+                config_name=config_name,
+                config_path=snapshot.config_path,
+                map_path=snapshot.map_path,
+                run_config=snapshot.config,
+                save_on_new_moon=config.world.save_on_new_moon,
+                save_wait_seconds=config.world.save_wait_seconds,
+                resume=snapshot,
+                parent_run_id=args.parent_run_id or snapshot.run_id,
+            )
+        )
+    except ResumeStartupError as exc:
+        logger.error("resume_startup_failed", error=str(exc))
+        raise SystemExit(1)
 
 
 def main() -> None:
@@ -441,6 +715,19 @@ def main() -> None:
         "(default: $BOBGAME_RUN_DIR or <project_root>/runs/<run id>)",
     )
     parser.add_argument(
+        "--resume",
+        type=str,
+        default="",
+        help="Resume from a save directory (runs/<run>/saves/tick-<T>); the "
+        "world, its config and the map all come from the save (docs/14)",
+    )
+    parser.add_argument(
+        "--parent-run-id",
+        type=str,
+        default="",
+        help="Run id a --resume continues, recorded in the new meta.json",
+    )
+    parser.add_argument(
         "--spawn-bush",
         type=str,
         nargs="*",
@@ -449,6 +736,12 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    _configure_logging()
+
+    if args.resume:
+        _main_resume(args)
+        return
 
     # Load the named config. There is no built-in fallback world: a config
     # that cannot be found is an error naming what was looked for.
@@ -506,16 +799,6 @@ def main() -> None:
                 state=(("berry_count", "1"),),  # Binary state: has berry
             )
         )
-
-    # Configure structlog for CLI
-    structlog.configure(
-        processors=[
-            structlog.stdlib.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.dev.ConsoleRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(20),  # INFO level
-    )
 
     # Handle terrain generation mode
     world = None
@@ -653,6 +936,10 @@ def main() -> None:
             config_path=config_rel_path,
             map_path=recorded_map_path,
             day_length_ticks=config.world.day_length_ticks,
+            new_moon_every_days=config.world.new_moon_every_days,
+            save_on_new_moon=config.world.save_on_new_moon,
+            save_wait_seconds=config.world.save_wait_seconds,
+            run_config=config.model_dump(),
         )
     )
 

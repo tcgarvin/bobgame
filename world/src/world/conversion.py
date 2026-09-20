@@ -100,6 +100,9 @@ def clock_to_proto(clock: WorldClock) -> pb.WorldClock:
         tick_of_day=clock.tick_of_day,
         day_length=clock.day_length,
         night=clock.night,
+        new_moon_tonight=clock.new_moon_tonight,
+        next_new_moon_day=clock.next_new_moon_day,
+        save_tick=clock.save_tick,
     )
 
 
@@ -110,6 +113,9 @@ def clock_from_proto(proto_clock: pb.WorldClock) -> WorldClock:
         tick_of_day=proto_clock.tick_of_day,
         day_length=proto_clock.day_length,
         night=proto_clock.night,
+        new_moon_tonight=proto_clock.new_moon_tonight,
+        next_new_moon_day=proto_clock.next_new_moon_day,
+        save_tick=proto_clock.save_tick,
     )
 
 

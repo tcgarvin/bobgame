@@ -6,7 +6,7 @@ from pathlib import Path
 
 import structlog
 
-from .config import Config
+from .config import AgentConfig, Config
 from .discovery import DiscoveredEntity, discover_entities, wait_for_server
 from .process import AgentProcess, ProcessState
 
@@ -112,7 +112,7 @@ class ProcessManager:
             entity_id=entity_id,
             module=agent_config.module,
             server_address=self.config.runner.server,
-            args=list(agent_config.args),
+            args=self._agent_args(agent_config),
             env=dict(agent_config.env),
             log_dir=log_dir,
             working_dir=self.working_dir,
@@ -125,6 +125,18 @@ class ProcessManager:
         )
 
         return True
+
+    def _agent_args(self, agent_config: AgentConfig) -> list[str]:
+        """The agent's own args, plus `--resume-from` when this run resumes one.
+
+        Every agent is handed the same save directory; each reads its own
+        `agents/<entity_id>.json.gz` out of it (docs/14).
+        """
+        args = list(agent_config.args)
+        resume_from = self.config.runner.resume_from
+        if resume_from:
+            args += ["--resume-from", resume_from]
+        return args
 
     def run(self) -> None:
         """Run the process manager loop until shutdown."""

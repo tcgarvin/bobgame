@@ -243,3 +243,31 @@ class TestRestartState:
         assert state.attempts == 2
         assert state.last_restart_time == 1234.5
         assert state.next_backoff_ms == 500
+
+
+class TestResumeFrom:
+    """A resumed run hands every agent the save directory (docs/14)."""
+
+    def _manager(self, resume_from: str) -> ProcessManager:
+        config = Config(
+            runner=RunnerConfig(resume_from=resume_from),
+            agents={
+                "default": AgentConfig(module="tests.fake_agent", args=["-s", "6"])
+            },
+        )
+        return ProcessManager(config=config, working_dir=Path("."))
+
+    def test_the_save_dir_is_appended_to_every_agent_command(self) -> None:
+        manager = self._manager("/runs/parent/saves/tick-903")
+        args = manager._agent_args(manager.config.agents["default"])
+        assert args == ["-s", "6", "--resume-from", "/runs/parent/saves/tick-903"]
+
+    def test_a_fresh_run_passes_only_the_agent_args(self) -> None:
+        manager = self._manager("")
+        assert manager._agent_args(manager.config.agents["default"]) == ["-s", "6"]
+
+    def test_the_agents_own_args_are_not_mutated(self) -> None:
+        manager = self._manager("/saves/tick-1")
+        agent_config = manager.config.agents["default"]
+        manager._agent_args(agent_config)
+        assert agent_config.args == ["-s", "6"]

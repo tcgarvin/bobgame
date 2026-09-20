@@ -88,6 +88,10 @@ class TickContext:
     deadline_ms: int
     world: World | None = None
 
+    # The tick a save is being taken on (docs/14). 0 on every ordinary tick;
+    # `WorldClock.save_tick` in the observations pushed for this tick.
+    save_tick: int = 0
+
     # entity_id -> the single intent that entity submitted this tick
     intents: dict[str, EntityIntent] = field(default_factory=dict)
 

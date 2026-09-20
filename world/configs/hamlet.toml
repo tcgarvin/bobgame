@@ -29,6 +29,11 @@ tick_duration_ms = 2000
 intent_deadline_ms = 1200
 # A day is 300 ticks = 10 minutes at 2 s ticks; nights start at tick 200.
 day_length_ticks = 300
+# The new moon (docs/14_new_moon_and_saves.md): every third night everyone
+# falls asleep at tick-of-day 200 and the run is saved three ticks later.
+new_moon_every_days = 3
+save_on_new_moon = true
+save_wait_seconds = 180
 
 [[entities]]
 id = "ada"

@@ -255,6 +255,72 @@ def session(runs_dir: Path, tmp_path: Path) -> ReplaySession:
     return ReplaySession(RunLoader(runs_dir / RUN_ID), tmp_path)
 
 
+RESUMED_RUN_ID = "20260921-090000-testrun"
+RESUME_TICK = 903
+
+
+def build_resumed_run(runs_dir: Path) -> Path:
+    """A run that continues another one: first tick 903, three ticks long."""
+    run_dir = runs_dir / RESUMED_RUN_ID
+    world = World(width=20, height=20)
+    world.tick = RESUME_TICK
+    world.settlement = Position(x=10, y=10)
+    world.add_entity(Entity(entity_id="alice", position=Position(x=2, y=2)))
+    world.add_object(
+        WorldObject(object_id="bed_1", position=Position(x=2, y=3), object_type="bed")
+    )
+
+    recorder = RunRecorder(
+        run_dir=run_dir,
+        run_id=RESUMED_RUN_ID,
+        config_name="testrun",
+        config_path="world/configs/testrun.toml",
+        world=world,
+        tick_config=TickConfig(tick_duration_ms=100, intent_deadline_ms=50),
+        parent_run_id=RUN_ID,
+        resumed_from_tick=RESUME_TICK,
+    )
+    recorder.start()
+    for offset in range(3):
+        world.tick = RESUME_TICK + offset
+        recorder.record_tick(TickResult(tick_id=world.tick, move_results=[]))
+    recorder.close()
+    return run_dir
+
+
+class TestResumedRun:
+    """A run whose first tick is not 0 loads, seeks and names its parent."""
+
+    def test_the_loader_starts_at_the_save_tick(self, runs_dir: Path) -> None:
+        loader = RunLoader(build_resumed_run(runs_dir))
+        assert loader.first_tick == RESUME_TICK
+        assert loader.last_tick == RESUME_TICK + 2
+        assert loader.parent_run_id == RUN_ID
+        assert loader.resumed_from_tick == RESUME_TICK
+
+    def test_a_fresh_run_has_no_parent(self, runs_dir: Path) -> None:
+        loader = RunLoader(runs_dir / RUN_ID)
+        assert loader.parent_run_id == ""
+        assert loader.resumed_from_tick == -1
+
+    def test_the_session_opens_and_seeks_inside_the_range(
+        self, runs_dir: Path, tmp_path: Path
+    ) -> None:
+        loader = RunLoader(build_resumed_run(runs_dir))
+        session = ReplaySession(loader, project_root=tmp_path)
+
+        assert session.tick_id == RESUME_TICK
+        assert session.snapshot()["replay"]["first_tick"] == RESUME_TICK
+        assert session.snapshot()["replay"]["parent_run_id"] == RUN_ID
+
+        session.seek(RESUME_TICK + 2)
+        assert session.tick_id == RESUME_TICK + 2
+        # A tick before the run's start clamps to its first tick.
+        session.seek(0)
+        assert session.tick_id == RESUME_TICK
+        assert session.replay_status()["parent_run_id"] == RUN_ID
+
+
 class TestRunLoader:
     def test_loads_meta_ticks_and_objects(self, runs_dir: Path) -> None:
         loader = RunLoader(runs_dir / RUN_ID)
@@ -509,6 +575,8 @@ class TestReplayWebSocketService:
             "tick_id": 0,
             "playing": False,
             "speed": 1.0,
+            "parent_run_id": "",
+            "resumed_from_tick": -1,
         }
         assert snapshot["settlement"] == {"x": 10, "y": 10}
 

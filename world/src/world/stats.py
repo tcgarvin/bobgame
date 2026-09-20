@@ -196,7 +196,16 @@ def respawn_position(world: World, death_position: Position) -> Position | None:
 
 
 def process_respawns(world: World, events: TickEvents) -> None:
-    """Bring back players that died at least RESPAWN_DELAY_TICKS ago."""
+    """Bring back players that died at least RESPAWN_DELAY_TICKS ago.
+
+    Respawns that fall due inside a new-moon still window are held until the
+    window ends (docs/14, section 1), so nothing stirs while everyone sleeps.
+    """
+    from .moon import is_still
+
+    if is_still(world):
+        return
+
     due = [
         entity_id
         for entity_id, death_tick in sorted(world.pending_respawns().items())

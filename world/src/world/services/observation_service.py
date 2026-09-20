@@ -121,6 +121,13 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
             self._subscribers.pop(entity_id, None)
             logger.info("observation_stream_ended", entity_id=entity_id)
 
+    def subscriber_ids(self) -> set[str]:
+        """Entity ids with an open observation stream right now.
+
+        The resume path waits on this before letting the world tick (docs/14).
+        """
+        return set(self._subscribers)
+
     def broadcast_observations(self, context: TickContext) -> None:
         """Broadcast observations to all subscribers at the start of a tick.
 
@@ -167,6 +174,11 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
         visible_objects = self._get_nearby_objects(centre, radius=VIEW_RADIUS)
         events = self._build_events(entity_id, centre)
 
+        # Only the tick a save is being taken on carries a save_tick (docs/14).
+        clock = self.world.clock
+        if context.save_tick:
+            clock = clock.model_copy(update={"save_tick": context.save_tick})
+
         observation = pb.Observation(
             tick_id=context.tick_id,
             deadline_ms=context.deadline_ms,
@@ -174,7 +186,7 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
             visible_tiles=visible_tiles,
             visible_objects=visible_objects,
             events=events,
-            clock=clock_to_proto(self.world.clock),
+            clock=clock_to_proto(clock),
         )
         # 'self' is a Python keyword, so the field is set via CopyFrom.
         observation.self.CopyFrom(self_proto)

@@ -37,16 +37,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIDS=()
 
 # Default config
-CONFIG="${1:-hamlet}"
+CONFIG="hamlet"
+RESUME_SPEC=""
 
-# Parse arguments
-for arg in "$@"; do
-    case $arg in
+# Parse arguments: an optional config name, and --resume <run_id>[@<tick>].
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --resume)
+            shift
+            RESUME_SPEC="${1:-}"
+            if [ -z "$RESUME_SPEC" ]; then
+                echo "--resume needs a run id, optionally with @<tick>"
+                exit 1
+            fi
+            ;;
         --help|-h)
-            echo "Usage: $0 [config]"
+            echo "Usage: $0 [config] [--resume <run_id>[@<tick>]]"
             echo ""
             echo "Arguments:"
             echo "  config  Config name from world/configs/ (default: hamlet)"
+            echo "  --resume <run_id>[@<tick>]"
+            echo "          Continue that run from its newest complete save,"
+            echo "          or from the named tick (docs/14_new_moon_and_saves.md)."
             echo ""
             echo "Starts all components for development:"
             echo "  - World server (gRPC :50051, WebSocket :8765)"
@@ -69,7 +81,15 @@ for arg in "$@"; do
             done
             exit 0
             ;;
+        -*)
+            echo "Unknown option: $1 (try --help)"
+            exit 1
+            ;;
+        *)
+            CONFIG="$1"
+            ;;
     esac
+    shift
 done
 
 # Colors for output
@@ -132,6 +152,35 @@ fi
 
 # Create the run directory and publish it to every child process.
 # The world server and the agents read BOBGAME_RUN_DIR (see docs/07_replay.md).
+# Resolve --resume <run_id>[@<tick>] to a save directory of the parent run.
+# The newest complete save wins unless a tick is named; a save without
+# complete.json is not a save (docs/14_new_moon_and_saves.md).
+SAVE_DIR=""
+PARENT_RUN_ID=""
+if [ -n "$RESUME_SPEC" ]; then
+    PARENT_RUN_ID="${RESUME_SPEC%%@*}"
+    RESUME_TICK=""
+    [ "$RESUME_SPEC" != "$PARENT_RUN_ID" ] && RESUME_TICK="${RESUME_SPEC#*@}"
+    PARENT_RUN_DIR="$SCRIPT_DIR/runs/$PARENT_RUN_ID"
+    if [ ! -d "$PARENT_RUN_DIR" ]; then
+        echo "No such run: $PARENT_RUN_DIR"
+        exit 1
+    fi
+    if [ -n "$RESUME_TICK" ]; then
+        SAVE_DIR="$PARENT_RUN_DIR/saves/tick-$RESUME_TICK"
+    else
+        SAVE_DIR="$(ls -d "$PARENT_RUN_DIR"/saves/tick-* 2>/dev/null \
+            | sed 's/.*tick-//' | sort -n | tail -1 \
+            | xargs -I{} echo "$PARENT_RUN_DIR/saves/tick-{}")"
+    fi
+    if [ -z "$SAVE_DIR" ] || [ ! -f "$SAVE_DIR/complete.json" ]; then
+        echo "No complete save to resume in $PARENT_RUN_DIR/saves"
+        echo "(a save without complete.json is not a save)"
+        exit 1
+    fi
+    echo "Resuming $PARENT_RUN_ID from $SAVE_DIR"
+fi
+
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$CONFIG"
 RUN_DIR="$SCRIPT_DIR/runs/$RUN_ID"
 mkdir -p "$RUN_DIR/agents"
@@ -141,6 +190,21 @@ export BOBGAME_RUN_DIR="$RUN_DIR"
 
 log_info "Run id: $RUN_ID"
 log_info "Run dir: $RUN_DIR"
+
+# A resumed run starts from the parent's journals: memory.md and reflex.json
+# are copied across, everything else the agents restore from the save.
+if [ -n "$SAVE_DIR" ]; then
+    export BOBGAME_RESUME_FROM="$SAVE_DIR"
+    for agent_dir in "$SCRIPT_DIR/runs/$PARENT_RUN_ID/agents"/agent-*/; do
+        [ -d "$agent_dir" ] || continue
+        name="$(basename "$agent_dir")"
+        mkdir -p "$RUN_DIR/agents/$name"
+        for file in memory.md reflex.json; do
+            [ -f "$agent_dir$file" ] && cp "$agent_dir$file" "$RUN_DIR/agents/$name/"
+        done
+    done
+    log_info "Copied journals and reflexes from $PARENT_RUN_ID"
+fi
 
 # Function to tail logs with color prefix
 tail_log() {
@@ -192,8 +256,12 @@ if [ ! -f "$SCRIPT_DIR/saves/island.npz" ]; then
 fi
 
 cd "$SCRIPT_DIR/world"
+WORLD_ARGS=(--config "$CONFIG")
+if [ -n "$SAVE_DIR" ]; then
+    WORLD_ARGS=(--resume "$SAVE_DIR" --parent-run-id "$PARENT_RUN_ID")
+fi
 uv run python -m world.server \
-    --config "$CONFIG" \
+    "${WORLD_ARGS[@]}" \
     > "$RUN_DIR/world.log" 2>&1 &
 WORLD_PID=$!
 PIDS+=($WORLD_PID)

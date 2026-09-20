@@ -316,6 +316,17 @@ class RunLoader:
     def map_path(self) -> str:
         return self.meta.get("map_path") or ""
 
+    @property
+    def parent_run_id(self) -> str:
+        """The run this one was resumed from, "" for a run that started fresh."""
+        return self.meta.get("parent_run_id") or ""
+
+    @property
+    def resumed_from_tick(self) -> int:
+        """The save tick this run continues from; -1 when it started fresh."""
+        value = self.meta.get("resumed_from_tick")
+        return int(value) if value is not None else -1
+
     def tick_record(self, tick_id: int) -> dict[str, Any]:
         """The tick record for `tick_id`.
 

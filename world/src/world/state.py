@@ -52,12 +52,20 @@ def night_start_tick(day_length: int) -> int:
 
 
 class WorldClock(BaseModel, frozen=True):
-    """Where the world sits in its day/night cycle."""
+    """Where the world sits in its day/night cycle.
+
+    The last three fields are the new moon (docs/14_new_moon_and_saves.md):
+    whether tonight is one, the 0-based day of the next one (-1 when the world
+    has no new moon at all) and, only on the tick a save is taken, that tick.
+    """
 
     day: int
     tick_of_day: int
     day_length: int
     night: bool
+    new_moon_tonight: bool = False
+    next_new_moon_day: int = -1
+    save_tick: int = 0
 
 
 class Inventory(BaseModel, frozen=True):
@@ -286,6 +294,8 @@ class World(BaseModel):
     tick: int = 0
     # Ticks in one day/night cycle (docs/10_metal_and_sleep.md, "The day").
     day_length_ticks: int = DEFAULT_DAY_LENGTH_TICKS
+    # How often a new-moon night falls, in days; 0 means never (docs/14).
+    new_moon_every_days: int = 0
     # Settlement centre (set by settlement.py when spawn_mode = "settlement").
     settlement: Position | None = None
 
@@ -560,6 +570,20 @@ class World(BaseModel):
             )
         del self._entities[entity_id]
 
+    def add_entity_unplaced(self, entity: Entity) -> None:
+        """Add an entity record without putting it in the position index.
+
+        Dead entities live in the registry but occupy no tile (see
+        `detach_entity`); restoring a snapshot puts them back this way, since
+        two of them may share the coordinates they died on.
+
+        Raises:
+            EntityAlreadyExistsError: If an entity with that id exists.
+        """
+        if entity.entity_id in self._entities:
+            raise EntityAlreadyExistsError(f"Entity {entity.entity_id} already exists")
+        self._entities[entity.entity_id] = entity
+
     def living_entities(self) -> list[Entity]:
         """All entities currently alive."""
         return [e for e in self._entities.values() if e.alive]
@@ -672,6 +696,21 @@ class World(BaseModel):
             if candidate not in self._objects:
                 return candidate
 
+    @property
+    def object_id_seq(self) -> int:
+        """The counter behind `generate_object_id`, saved with a snapshot."""
+        return self._object_id_seq
+
+    def set_object_id_seq(self, value: int) -> None:
+        """Restore the object id counter from a snapshot (docs/14).
+
+        Raises:
+            ValueError: If `value` is negative.
+        """
+        if value < 0:
+            raise ValueError(f"object_id_seq must not be negative, got {value}")
+        self._object_id_seq = value
+
     def all_objects(self) -> Mapping[str, WorldObject]:
         """Return read-only view of all objects."""
         return self._objects
@@ -743,14 +782,25 @@ class World(BaseModel):
 
     @property
     def clock(self) -> WorldClock:
-        """Where the current tick sits in the day (docs/10)."""
+        """Where the current tick sits in the day (docs/10) and the moon (docs/14).
+
+        `moon` is imported here rather than at module level because it reaches
+        back into this module for `World`; the import is a `sys.modules` lookup
+        and the clock is built a handful of times per tick.
+        """
+        from .moon import is_new_moon_day, next_new_moon_day
+
         length = self.day_length_ticks
         tick_of_day = self.tick % length
+        day = self.tick // length
+        every = self.new_moon_every_days
         return WorldClock(
-            day=self.tick // length,
+            day=day,
             tick_of_day=tick_of_day,
             day_length=length,
             night=tick_of_day >= night_start_tick(length),
+            new_moon_tonight=is_new_moon_day(day, every),
+            next_new_moon_day=next_new_moon_day(day, every),
         )
 
     def advance_tick(self) -> None:

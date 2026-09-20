@@ -202,6 +202,8 @@ class RunRecorder:
         wolves: bool = False,
         map_path: str = "",
         project_root: Path | None = None,
+        parent_run_id: str = "",
+        resumed_from_tick: int = -1,
     ):
         """
         Args:
@@ -214,6 +216,8 @@ class RunRecorder:
             wolves: Whether the run simulates wolves.
             map_path: Map file path relative to the project root, "" if none.
             project_root: Root the relative paths resolve against.
+            parent_run_id: The run this one was resumed from, "" for a fresh run.
+            resumed_from_tick: The save tick this run continues from, -1 for none.
         """
         self.run_dir = run_dir
         self.run_id = run_id
@@ -224,6 +228,8 @@ class RunRecorder:
         self.wolves = wolves
         self.map_path = map_path
         self.project_root = project_root or Path.cwd()
+        self.parent_run_id = parent_run_id
+        self.resumed_from_tick = resumed_from_tick
 
         self._started_at = ""
         self._last_tick = -1
@@ -358,6 +364,10 @@ class RunRecorder:
                 else None
             ),
             "wolves": self.wolves,
+            "parent_run_id": self.parent_run_id or None,
+            "resumed_from_tick": (
+                self.resumed_from_tick if self.resumed_from_tick >= 0 else None
+            ),
             "map_path": self.map_path or None,
             "map_sha256": self._map_sha256() or None,
             "entities": [

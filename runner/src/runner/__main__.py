@@ -1,6 +1,7 @@
 """CLI entry point for the runner."""
 
 import argparse
+import os
 import signal
 from pathlib import Path
 
@@ -11,6 +12,9 @@ from .manager import ProcessManager
 
 # The project ships one scenario; its runner config is the default.
 DEFAULT_CONFIG = "hamlet"
+
+# Env fallback for --resume-from, exported by dev.sh --resume.
+RESUME_FROM_ENV = "BOBGAME_RESUME_FROM"
 
 
 def setup_signal_handlers(manager: ProcessManager) -> None:
@@ -54,6 +58,13 @@ def main() -> None:
         help="Log directory (overrides config)",
     )
     parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Save directory this run resumes from; every agent command gets "
+        "`--resume-from <dir>` appended (default: $BOBGAME_RESUME_FROM)",
+    )
+    parser.add_argument(
         "--agents-dir",
         type=str,
         default=None,
@@ -92,6 +103,9 @@ def main() -> None:
         config.runner.server = args.server
     if args.log_dir:
         config.runner.log_dir = args.log_dir
+    resume_from = args.resume_from or os.environ.get(RESUME_FROM_ENV, "")
+    if resume_from:
+        config.runner.resume_from = resume_from
 
     # Determine working directory for agent processes
     if args.agents_dir:
@@ -111,6 +125,7 @@ def main() -> None:
         log_dir=config.runner.log_dir,
         working_dir=str(working_dir),
         auto_discover=config.runner.auto_discover,
+        resume_from=config.runner.resume_from or None,
     )
 
     # Create manager

@@ -133,12 +133,23 @@ def _apply_wake_intents(
     """Wake voluntary sleepers that asked to get up.
 
     Missing and dead entities are filtered here rather than by the tick's
-    `_living_subset`, which drops every intent from a sleeper.
+    `_living_subset`, which drops every intent from a sleeper. Inside a
+    new-moon still window every wake is refused (docs/14).
+
+    `moon` is imported here rather than at module level: it imports this module
+    for `GROUND`, and a top-level import both ways would be circular.
     """
+    from .moon import NEW_MOON_WAKE_REFUSAL, is_still
+
+    still = is_still(world)
+
     for entity_id in sorted(intents):
         entity = world.all_entities().get(entity_id)
         if entity is None:
             events.acted(entity_id, "wake", False, "entity not found")
+            continue
+        if still:
+            events.acted(entity_id, "wake", False, NEW_MOON_WAKE_REFUSAL)
             continue
         if not entity.alive:
             events.acted(entity_id, "wake", False, "dead")
@@ -302,7 +313,16 @@ def _heal_bed_sleepers(world: World) -> None:
 
 
 def _wake_sleepers(world: World, damaged: set[str], events: TickEvents) -> None:
-    """Wake every sleeper whose reason to stay asleep has gone."""
+    """Wake every sleeper whose reason to stay asleep has gone.
+
+    Nothing wakes anyone inside a new-moon still window: not rest, damage,
+    hunger or a dismantled bed (docs/14, section 1).
+    """
+    from .moon import is_still
+
+    if is_still(world):
+        return
+
     for entity in sorted(world.living_entities(), key=lambda e: e.entity_id):
         if not entity.asleep:
             continue

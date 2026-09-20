@@ -98,6 +98,8 @@ class ReplaySession:
             "speed": self.speed,
             "first_tick": self.first_tick,
             "last_tick": self.last_tick,
+            "parent_run_id": self.loader.parent_run_id,
+            "resumed_from_tick": self.loader.resumed_from_tick,
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -123,6 +125,8 @@ class ReplaySession:
                 "tick_id": self.tick_id,
                 "playing": self.playing,
                 "speed": self.speed,
+                "parent_run_id": self.loader.parent_run_id,
+                "resumed_from_tick": self.loader.resumed_from_tick,
             },
         }
 

@@ -59,3 +59,9 @@ class InvalidIntentError(WorldError):
     """Raised when an intent model is not one the tick context understands."""
 
     pass
+
+
+class ResumeStartupError(WorldError):
+    """Raised when a resumed run cannot start: a settler never connected."""
+
+    pass

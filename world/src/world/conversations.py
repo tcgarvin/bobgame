@@ -680,6 +680,16 @@ def process_conversation_phase(
         _advance_lifecycle(world, obj, events)
 
 
+def close_all_conversations(world: World, reason: str, events: TickEvents) -> None:
+    """Close every open conversation with one end reason.
+
+    Used by the new moon (docs/14), which ends every conversation the tick
+    everyone falls asleep.
+    """
+    for obj in all_conversations(world):
+        _close(world, obj, reason, events)
+
+
 __all__ = [
     "CONVERSATION_ID_PREFIX",
     "HAILED_DETAIL",
@@ -692,6 +702,7 @@ __all__ = [
     "TURN_STARTED_KEY",
     "UTTERANCES_KEY",
     "all_conversations",
+    "close_all_conversations",
     "conversation_at",
     "conversation_of",
     "process_conversation_phase",

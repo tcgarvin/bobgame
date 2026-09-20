@@ -24,6 +24,9 @@ class RunnerConfig(BaseModel):
     # (world-simulated NPCs such as wolves are excluded by default).
     entity_types: list[str] = Field(default_factory=lambda: ["player"])
     log_dir: str = "logs"
+    # A save directory this run resumes from (docs/14_new_moon_and_saves.md).
+    # When set, every agent command gets `--resume-from <dir>` appended.
+    resume_from: str = ""
     max_restart_attempts: int = 5
     initial_backoff_ms: int = 1000
     max_backoff_ms: int = 30000

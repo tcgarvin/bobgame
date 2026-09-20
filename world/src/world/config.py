@@ -16,7 +16,6 @@ from .wolves import (
     WolfSettings,
 )
 
-
 VALID_SPAWN_MODES = frozenset({"positions", "settlement"})
 
 
@@ -73,6 +72,27 @@ class WorldConfig(BaseModel):
     wolf_spawn_interval_ticks: int = SPAWN_INTERVAL_TICKS
     # Ticks in one day/night cycle (docs/10_metal_and_sleep.md).
     day_length_ticks: int = DEFAULT_DAY_LENGTH_TICKS
+    # The new moon (docs/14_new_moon_and_saves.md). 0 means the world never
+    # has one: nobody is forced to sleep and no save is ever taken.
+    new_moon_every_days: int = 0
+    # Whether a new-moon night also writes a save.
+    save_on_new_moon: bool = True
+    # How long the world waits for the settlers' snapshot files, in seconds.
+    save_wait_seconds: int = 180
+
+    @field_validator("new_moon_every_days")
+    @classmethod
+    def _check_new_moon_every_days(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(f"new_moon_every_days must be zero or more, got {value}")
+        return value
+
+    @field_validator("save_wait_seconds")
+    @classmethod
+    def _check_save_wait_seconds(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"save_wait_seconds must be at least 1, got {value}")
+        return value
 
     @field_validator("max_wolves")
     @classmethod

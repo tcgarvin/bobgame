@@ -3,7 +3,7 @@
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Mapping, TypeVar
+from typing import TYPE_CHECKING, Awaitable, Callable, Mapping, TypeVar
 
 import structlog
 
@@ -41,6 +41,7 @@ from .foraging import (
     process_extract_phase,
     process_regeneration,
 )
+from .moon import apply_new_moon
 from .movement import MoveResult, process_movement_phase
 from .sleep import process_fatigue_phase, process_sleep_phase
 from .stats import (
@@ -75,6 +76,11 @@ from .types import (
     WriteNoteIntent,
 )
 from .wolves import WolfSettings, WolfSimulator
+
+if TYPE_CHECKING:
+    # `save_coordinator` imports `snapshot`, which imports `recording`, which
+    # imports this module; the tick loop only needs the type.
+    from .save_coordinator import SaveCoordinator
 
 logger = structlog.get_logger()
 
@@ -388,6 +394,11 @@ def process_tick(
         events,
     )
 
+    # Phase 13b: the new moon, once a run of days (docs/14). On the first tick
+    # of a new-moon night everyone left awake lies down and every conversation
+    # ends.
+    apply_new_moon(world, events)
+
     # Phase 14: Bookkeeping
     process_food_phase(world, events)
     process_fatigue_phase(world, events)
@@ -440,6 +451,7 @@ class TickLoop:
         wolves_enabled: bool = False,
         wolf_seed: int = 1337,
         wolf_settings: WolfSettings = WolfSettings(),
+        save_coordinator: "SaveCoordinator | None" = None,
     ):
         self.world = world
         self.config = config or TickConfig()
@@ -447,6 +459,8 @@ class TickLoop:
         self.on_tick_start = on_tick_start
         self.wolves_enabled = wolves_enabled
         self.wolf_simulator = WolfSimulator(seed=wolf_seed, settings=wolf_settings)
+        # None means this world never saves (tests, and a run with no run dir).
+        self.save_coordinator: "SaveCoordinator | None" = save_coordinator
 
         self._running = False
         self._current_context: TickContext | None = None
@@ -501,19 +515,36 @@ class TickLoop:
             while self._running:
                 tick_start = time.time() * 1000
 
+                # A new-moon save pauses this tick between the observations
+                # and the intent window (docs/14); the directory has to exist
+                # before the observations go out.
+                save_tick = (
+                    self.save_coordinator.pending_save_tick()
+                    if self.save_coordinator is not None
+                    else 0
+                )
+
                 # Create context for this tick
                 self._current_context = TickContext(
                     tick_id=self.world.tick,
                     start_time_ms=int(tick_start),
                     deadline_ms=int(tick_start + self.config.intent_deadline_ms),
                     world=self.world,
+                    save_tick=save_tick,
                 )
 
                 logger.debug("tick_started", tick_id=self._current_context.tick_id)
 
+                if save_tick and self.save_coordinator is not None:
+                    self.save_coordinator.prepare(save_tick)
+
                 # Notify tick start (for sending observations)
                 if self.on_tick_start:
                     await self.on_tick_start(self._current_context)
+
+                if save_tick and self.save_coordinator is not None:
+                    await self.save_coordinator.wait_and_write(save_tick)
+                    self._restart_deadline()
 
                 # Wait for intent deadline
                 await self._wait_until_deadline()
@@ -548,6 +579,19 @@ class TickLoop:
             self._running = False
             self._current_context = None
             logger.info("tick_loop_stopped")
+
+    def _restart_deadline(self) -> None:
+        """Give this tick a fresh intent window after a save's pause.
+
+        The deadline was set when the tick began; a save takes as long as the
+        settlers need, so without this every intent for the save tick would be
+        rejected as late and the tick would not run normally (docs/14).
+        """
+        if self._current_context is None:
+            return
+        self._current_context.deadline_ms = int(
+            time.time() * 1000 + self.config.intent_deadline_ms
+        )
 
     async def _wait_until_deadline(self) -> None:
         """Wait until the intent deadline."""

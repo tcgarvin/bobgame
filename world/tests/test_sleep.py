@@ -615,6 +615,9 @@ class TestPayloads:
             "tick_of_day": 250,
             "day_length": 300,
             "night": True,
+            "new_moon_tonight": False,
+            "next_new_moon_day": -1,
+            "save_tick": 0,
         }
 
     def test_tick_record_carries_the_clock(self) -> None:
@@ -629,6 +632,9 @@ class TestPayloads:
             "tick_of_day": 249,
             "day_length": 300,
             "night": True,
+            "new_moon_tonight": False,
+            "next_new_moon_day": -1,
+            "save_tick": 0,
         }
         assert record["entity_updates"][0]["fatigue"] == 13
 

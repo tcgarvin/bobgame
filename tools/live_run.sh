@@ -1,7 +1,9 @@
 #!/bin/bash
 # Detached live runs of the bobgame scenario (hamlet, the only one).
 #
-#   tools/live_run.sh start <seconds>            start ./dev.sh detached, auto-stop after <seconds>
+#   tools/live_run.sh start <seconds> [--resume <run_id>[@<tick>]]
+#                                                start ./dev.sh detached, auto-stop after <seconds>;
+#                                                --resume continues a saved run (docs/14)
 #   tools/live_run.sh status                     one-screen health + progress report
 #   tools/live_run.sh wait-ticks                 block until the world records ticks (max 3 minutes)
 #   tools/live_run.sh wait                       block until the run ends (or 9 minutes pass)
@@ -36,7 +38,16 @@ port_busy() {
 }
 
 cmd_start() {
-    local seconds="${1:?usage: start <seconds>}"
+    local seconds="${1:?usage: start <seconds> [--resume <run_id>[@<tick>]]}"
+    shift || true
+    local resume=""
+    if [ "${1:-}" = "--resume" ]; then
+        resume="${2:-}"
+        if [ -z "$resume" ]; then
+            echo "REFUSED: --resume needs a run id, optionally with @<tick>."
+            return 2
+        fi
+    fi
     if ! [[ "$seconds" =~ ^[0-9]+$ ]] || [ "$seconds" -lt 1 ]; then
         echo "REFUSED: '$seconds' is not a number of seconds. Usage: start <seconds> (the only scenario is $CONFIG)."
         return 2
@@ -63,9 +74,13 @@ cmd_start() {
     fi
     mkdir -p "$ROOT/runs"
     cd "$ROOT" || return 1
-    setsid nohup timeout -s INT "$seconds" ./dev.sh "$CONFIG" >"$OUT_FILE" 2>&1 < /dev/null &
+    local dev_args=("$CONFIG")
+    if [ -n "$resume" ]; then
+        dev_args+=(--resume "$resume")
+    fi
+    setsid nohup timeout -s INT "$seconds" ./dev.sh "${dev_args[@]}" >"$OUT_FILE" 2>&1 < /dev/null &
     echo $! >"$PID_FILE"
-    echo "STARTED pid=$(cat "$PID_FILE") config=$CONFIG auto_stop_after=${seconds}s"
+    echo "STARTED pid=$(cat "$PID_FILE") config=$CONFIG resume=${resume:-none} auto_stop_after=${seconds}s"
     echo "The world needs about 40 s to load the island. Run 'wait-ticks' next."
 }
 

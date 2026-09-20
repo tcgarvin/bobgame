@@ -7,11 +7,12 @@ intent per wolf through the same `TickContext` the gRPC agents use.
 
 import random
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 import structlog
 
 from .events import EntityDespawnedEvent, EntitySpawnedEvent, TickEvents
+from .moon import wolves_lie_low
 from .settlement import is_free_walkable
 from .state import WOLF_ENTITY_TYPE, Entity, World
 from .tick_context import TickContext
@@ -86,11 +87,48 @@ class WolfSimulator:
     # --- public API -------------------------------------------------------
 
     def step(self, world: World, ctx: TickContext, events: TickEvents) -> None:
-        """Run one wolf tick: despawn, spawn, then submit wolf intents."""
+        """Run one wolf tick: despawn, spawn, then submit wolf intents.
+
+        On a new-moon night the wolves lie low from the forced sleep to dawn
+        (docs/14): no spawn and no intent, and the RNG is not touched, so a
+        run's wolf sequence does not depend on the moon. Strays still wander
+        out of range and despawn, which consumes no randomness.
+        """
         players = self._living_players(world)
         self._despawn_strays(world, players, events)
+        if wolves_lie_low(world):
+            return
         self._maybe_spawn(world, players, events)
         self._submit_intents(world, ctx)
+
+    # --- snapshot support (docs/14) --------------------------------------
+
+    def rng_state(self) -> tuple[Any, ...]:
+        """The RNG's internal state, as `random.Random.getstate()` returns it."""
+        return self.rng.getstate()
+
+    def restore_rng_state(self, state: tuple[Any, ...]) -> None:
+        """Put the RNG back into a state taken from `rng_state()`.
+
+        Raises:
+            ValueError: If the state is not one this RNG can take.
+        """
+        self.rng.setstate(state)
+
+    @property
+    def id_counter(self) -> int:
+        """The counter behind the `wolf_<n>` ids."""
+        return self._id_counter
+
+    def set_id_counter(self, value: int) -> None:
+        """Restore the wolf id counter from a snapshot.
+
+        Raises:
+            ValueError: If `value` is negative.
+        """
+        if value < 0:
+            raise ValueError(f"wolf id counter must not be negative, got {value}")
+        self._id_counter = value
 
     # --- internals --------------------------------------------------------
 

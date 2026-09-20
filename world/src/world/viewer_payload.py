@@ -51,12 +51,15 @@ def entity_state(entity: Entity) -> dict[str, Any]:
 
 
 def clock_payload(clock: WorldClock) -> dict[str, Any]:
-    """JSON shape for the world clock (docs/10_metal_and_sleep.md)."""
+    """JSON shape for the world clock (docs/10_metal_and_sleep.md, docs/14)."""
     return {
         "day": clock.day,
         "tick_of_day": clock.tick_of_day,
         "day_length": clock.day_length,
         "night": clock.night,
+        "new_moon_tonight": clock.new_moon_tonight,
+        "next_new_moon_day": clock.next_new_moon_day,
+        "save_tick": clock.save_tick,
     }
 
 
