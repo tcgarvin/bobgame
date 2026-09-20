@@ -161,7 +161,7 @@ both. Example: `http://localhost:5173/?run=fake&tick=50&entity=ada`.
 - `src/ui/OverlayUI.ts` — the agent panel, written for someone watching a
   settler rather than reading a trace. Top to bottom: **header** (name, the
   wielded tool's icon with its tier word, the mode badge and a status chip that
-  appears only when notable - dead, asleep, collapsed, open to talk),
+  appears only when notable - dead, asleep, collapsed),
   **bars** (health, food, tiredness with the `fatigueState` word),
   **Doing now** (the brief's instruction as the headline, then Jev's chosen
   action in plain words with its confidence and the criterion it was chosen on,

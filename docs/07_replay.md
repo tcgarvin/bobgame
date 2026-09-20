@@ -373,7 +373,11 @@ fresh, and the heavy files would cost more than they are worth.
   to `runs/latest`), keeps today's summary, and adds a "notable moments"
   section listing deaths, wolf kills, crafts, placed objects, notes written,
   planner failures and history resets, each with a deep link such as
-  `http://localhost:5173/?run=<run_id>&tick=412&entity=bram`.
+  `http://localhost:5173/?run=<run_id>&tick=412&entity=bram`. It and
+  `tools/settlement_progress.py` are thin CLIs over `tools/runlib/` (`runio`
+  for truncation-tolerant reading, `worldscan` for the one pass over the world
+  ticks, `agenttrace` for the agent traces, plus `cost`, `social`, `rooms` and
+  `report`).
 
 ## Deviations
 
@@ -393,14 +397,17 @@ fresh, and the heavy files would cost more than they are worth.
 - `entities_despawned` carries no killer, so `analyze_run.py` attributes a
   `wolf_killed` moment to the `attacker_id` of a `damage` record for that wolf
   in the same tick, and falls back to the wolf's own id.
-- `analyze_run.py` identifies wolves by `entity_type == "wolf"` in
-  `entities_spawned`, falling back to an `entity_id` starting with `wolf`.
+- `analyze_run.py` identifies wolves by `entity_type == "wolf"` on an
+  `entity_updates` entry or in `entities_spawned`, falling back to an
+  `entity_id` starting with `wolf`. Settler deaths and wolf kills are counted
+  separately, and an empty killer counts as `starvation` only when the tick's
+  `entity_updates` show food 0 (a recording that still uses the old `hunger`
+  key is read the same way), else `unknown`.
   Crafts, placements and notes come from `actions` with `action_type` in
   `craft` / `place` / `write_note` and `success` true; the moment text uses the
   action's `details` string.
-- `analyze_run.py` still reads the legacy flat `logs/` layout (detected by the
-  absence of `meta.json`), where the traces are uncompressed and planner
-  numbers are scraped from the structlog `.log` file.
+- The legacy flat `logs/` layout is no longer read: a run directory must carry
+  `meta.json`.
 - Agents: `jev_states.jsonl.gz` also gets a line when the Jev call times out or
   errors. The state and criteria on that line really were sent, and the stint
   trace's `note` (`jev_timeout` / `jev_error: …`) says what came back. Repeats
@@ -413,7 +420,7 @@ fresh, and the heavy files would cost more than they are worth.
   runs made by `dev.sh` or by the world server's own run id; a run written to a
   hand-picked `--run-dir` is served under that directory's name.
 - World (recording): the live `snapshot` always carries the `run_id` key; it is
-  `null` when the server runs with `--no-record`.
+  `null` when the server is constructed without a `RunRecorder`.
 - World (replay): the session builds terrain from the map file's floor array
   and takes every object from `world/objects.jsonl.gz` (the recorded baseline)
   rather than from the map file's object list.
@@ -442,9 +449,9 @@ fresh, and the heavy files would cost more than they are worth.
 A second reader over the same recording, aimed at one question: how far has
 the settlement got, and has it plateaued?
 `python tools/settlement_progress.py [run_dir] [--json] [--bucket-ticks N]
-[--viewer-url URL]` defaults to `runs/latest`, reuses `analyze_run.py`'s
-truncation-tolerant `iter_jsonl` and `load_layout` (so it works on a run that
-is still going), and prints four things: a per-bucket timeline (bucket =
+[--viewer-url URL]` defaults to `runs/latest`, reuses `tools/runlib`'s
+truncation-tolerant readers (`runio`, so it works on a run that is still
+going), and prints four things: a per-bucket timeline (bucket =
 `meta.day_length_ticks`) of cumulative placements by kind alongside per-bucket
 dismantles, crafts, deaths, wolf kills, ticks asleep on a bed vs the ground,
 conversations and mean food/health; what stands at the last recorded tick with

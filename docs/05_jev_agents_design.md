@@ -423,11 +423,15 @@ observations. Planner tests mock the model with pydantic-ai's `TestModel`.
 
 ## Runner and scripts
 
-- `runner/configs/settlement.toml`: default agent module `agents.jev_agent`.
-- `world/configs/settlement.toml`: loads `saves/island.npz`, `spawn_mode =
-  "settlement"`, 12 entities, tick 2000 / deadline 1200.
-- `dev.sh <config>` uses `runner/configs/<config>.toml` when it exists,
-  otherwise `foraging.toml`.
+*(Updated 2026-09-20: `hamlet` is the only scenario.)*
+
+- `runner/configs/hamlet.toml`: default agent module `agents.jev_agent`, with
+  `args = ["--settlers", "6"]`.
+- `world/configs/hamlet.toml`: generates or loads `saves/island.npz`,
+  `spawn_mode = "settlement"`, 6 entities, tick 2000 / deadline 1200, one wolf.
+- `dev.sh [config]` defaults to `hamlet` and uses
+  `world/configs/<config>.toml` and `runner/configs/<config>.toml`; a config
+  that does not exist is an error.
 
 ## File ownership (parallel tracks)
 

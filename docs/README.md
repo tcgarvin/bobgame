@@ -1,52 +1,46 @@
 # Bob's World - Documentation
 
-A tick-based world simulation with gRPC-controlled LLM agents and a Phaser 3 viewer.
+A tick-based world simulation with gRPC-controlled LLM agents and a Phaser 3
+viewer. Start with [../CLAUDE.md](../CLAUDE.md) for how to run it and where the
+code lives, and [../CHANGELOG.md](../CHANGELOG.md) for how it got here.
 
 ## Documents
 
 | Document | Description |
 |----------|-------------|
-| [Design Specification](boardgame_world_design.md) | Original design document with full system specification |
-| [Architecture Overview](01_architecture.md) | High-level system architecture and component diagram |
-| [Tech Stack & Standards](02_tech_stack_and_standards.md) | Libraries, tools, and coding standards |
-| [Implementation Plan](03_implementation_plan.md) | Incremental milestones with tasks |
-| [Tileset Preparation](04_tileset_preparation.md) | DawnLike tileset processing for Phaser |
-
-## Quick Start
-
-### Prerequisites
-- Python 3.12+
-- uv (Python package manager)
-- Node.js 20+
-- npm
-
-### Project Setup
-```bash
-# Initialize Python projects
-uv init world && cd world && uv add grpcio grpcio-tools pyarrow pydantic structlog && cd ..
-uv init runner && cd runner && uv add grpcio pyyaml structlog && cd ..
-uv init agents && cd agents && uv add grpcio anthropic structlog && cd ..
-
-# Initialize viewer
-mkdir viewer && cd viewer
-npm create vite@latest . -- --template vanilla-ts
-npm install phaser
-cd ..
-```
+| [boardgame_world_design.md](boardgame_world_design.md) | The original design document: the full system specification the project started from |
+| [01_architecture.md](01_architecture.md) | High-level architecture and component diagram |
+| [02_tech_stack_and_standards.md](02_tech_stack_and_standards.md) | Libraries, tools, and coding standards |
+| [03_implementation_plan.md](03_implementation_plan.md) | The original milestone plan (historical; see the status note at its top) |
+| [04_tileset_preparation.md](04_tileset_preparation.md) | DawnLike tileset processing for Phaser, and the sprite index |
+| [05_jev_agents_design.md](05_jev_agents_design.md) | The two-layer settler agent: planner tools, the Jev stint contract, prompts |
+| [06_settlement_run_notes.md](06_settlement_run_notes.md) | Findings from the first settlement runs (historical) |
+| [07_replay.md](07_replay.md) | Run directories, recording formats, the replay protocol, deep links, `analyze_run.py` |
+| [08_building.md](08_building.md) | Materials, recipes, the two object layers, blocking, dismantling, resting, signs, build shapes |
+| [09_conversation_and_reflex.md](09_conversation_and_reflex.md) | Conversations, hailing, giving, the reflex brief, the converser, the four channels |
+| [10_metal_and_sleep.md](10_metal_and_sleep.md) | Stations and multi-tick work, tool tiers and ore, the day clock, fatigue and sleep |
+| [11_cost_accounting.md](11_cost_accounting.md) | What a run costs: Jev pricing, OpenRouter per-request cost, the cost report |
+| [12_sleep_journal.md](12_sleep_journal.md) | The five-section journal, its triggers, the day log and the history reset |
+| [13_jev_vs_chat_evals.md](13_jev_vs_chat_evals.md) | The intelligence/cost comparison harness between Jev and a chat model |
+| [14_new_moon_and_saves.md](14_new_moon_and_saves.md) | The new moon, saving a world and resuming it (in progress) |
+| [terrain_generation_proposal.md](terrain_generation_proposal.md) | The procedural island: noise, hydrology, classification, object placement |
 
 ## Architecture Summary
 
 ```
-Runner ──spawns──► Agents ──gRPC──► World Runtime ──gRPC──► Viewer
+Runner ──spawns──► Agents ──gRPC──► World Runtime ──WebSocket──► Viewer
                      │                    │
                      └── lease + intents ─┘
 ```
 
-- **World Runtime**: Authoritative tick-based simulation (1 Hz)
-- **Agents**: External processes controlling entities via gRPC
-- **Runner**: Discovers entities, launches/supervises agents
-- **Viewer**: Phaser 3 visualization (live + replay)
+- **World Runtime**: authoritative tick-based simulation
+- **Agents**: external processes controlling entities via gRPC
+- **Runner**: discovers entities, launches and supervises agents
+- **Viewer**: Phaser 3 visualization (live on `:8765`, replay on `:8766`)
 
-## Next Steps
+## Prerequisites
 
-See [Implementation Plan](03_implementation_plan.md) - start with Milestone 0 (Project Scaffolding).
+Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 20+ and npm. Each
+Python component (`world/`, `agents/`, `runner/`, `tools/`) is its own uv
+project; `cd <component> && uv sync` installs it. The viewer is `cd viewer &&
+npm install`. Then `./dev.sh`.

@@ -1,5 +1,18 @@
 # Implementation Plan
 
+**Status note (2026-09-20).** This is the original milestone plan and is kept
+as the record of how the system was built; it is not a description of the
+system as it is. Milestones 0-6 are done. Milestone 7 (run recording and
+replay) is largely done — every run is recorded to `runs/<run_id>/` as gzip
+JSONL and a replay server serves it to the viewer with seeking, playback and
+deep links; the contract is [07_replay.md](07_replay.md). Milestone 8 (LLM
+agent integration) was superseded by `agents.jev_agent`, whose contract is
+[05_jev_agents_design.md](05_jev_agents_design.md). The commands and agent
+names below refer to scenarios and a `random_agent` that no longer exist; there
+is one scenario, `hamlet`. See [../CLAUDE.md](../CLAUDE.md) for the current
+system and [../CHANGELOG.md](../CHANGELOG.md) for everything built after
+milestone 6.
+
 This plan is organized into incremental milestones. Each milestone produces a working, demonstrable artifact.
 
 ## Current Status

@@ -17,7 +17,7 @@ runner/
 │   ├── process.py      # AgentProcess wrapper
 │   └── manager.py      # ProcessManager coordination
 └── configs/
-    └── foraging.toml   # Example config for foraging scenario
+    └── hamlet.toml     # The only scenario (six jev_agent settlers)
 ```
 
 ## Config Format
@@ -26,22 +26,29 @@ Uses TOML for consistency with `world/configs/*.toml`:
 
 ```toml
 [runner]
+entity_types = ["player"]        # world-simulated NPCs (wolves) are excluded
 server = "localhost:50051"
+connection_timeout_ms = 60000
 auto_discover = true
 log_dir = "logs"
 max_restart_attempts = 5
-initial_backoff_ms = 1000
+initial_backoff_ms = 2000
 max_backoff_ms = 30000
 backoff_multiplier = 2.0
 
 [agents.default]
-module = "agents.random_agent"
-args = ["--eat-probability", "0.1"]
+module = "agents.jev_agent"
+args = ["--settlers", "6"]
 
-[agents.alice]
-module = "agents.random_agent"
-args = ["--eat-probability", "0.2"]
+[agents.alice]                   # optional per-entity override
+module = "agents.jev_agent"
 ```
+
+`AgentConfig.for_entity` falls back to the `default` section and raises
+`KeyError` when there is neither an entry for the entity nor a default: there
+is no built-in agent module. The agent derives its own log root from
+`BOBGAME_RUN_DIR` (see docs/07_replay.md), so `log_dir` only matters for the
+runner's own output.
 
 ## Process Lifecycle
 
@@ -79,7 +86,7 @@ The runner catches SIGINT and SIGTERM to ensure clean shutdown:
 
 ```bash
 # With config file
-cd runner && uv run python -m runner --config configs/foraging.toml
+cd runner && uv run python -m runner --config configs/hamlet.toml
 
 # With CLI overrides
 cd runner && uv run python -m runner --server localhost:50051 --log-dir logs

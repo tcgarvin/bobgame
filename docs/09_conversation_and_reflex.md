@@ -53,8 +53,10 @@ extracted, and is recorded and replayed like any other object.
 
 ### 2.3 `ConverseIntent` (proto field `converse`, action type `"converse"`)
 
-One intent per tick as always. `EntityActed.details` for a success starts with
-the action name (`open conv_12`, `join conv_12`, `speak`, `pass`, `leave`); a
+One intent per tick as always. The actions are `open`, `hail` (section 9),
+`join`, `speak`, `pass` and `leave`, applied in that order each tick.
+`EntityActed.details` for a success starts with the action name (`open
+conv_12`, `hail conv_12 dov`, `join conv_12`, `speak`, `pass`, `leave`); a
 failure carries the reason.
 
 - **open** (`direction`, `text`): the anchor is the neighbouring tile in
@@ -223,8 +225,9 @@ example.
 
 ## 6. Analysis
 
-`tools/analyze_run.py` reports conversations (opened, joined, utterances, how
-they ended, notes written), gives (count, kinds, pairs), and reflexes (settlers
+`tools/analyze_run.py` (over `tools/runlib/social.py`) reports conversations
+(opened, hailed, joined, utterances, how they ended, notes written), gives
+(count, kinds, pairs), and reflexes (settlers
 with one registered, firings by trigger and by what they interrupted, outcomes,
 ticks from trigger to first action), and adds conversation and reflex moments
 to the notable-moments list with deep links.
@@ -251,207 +254,14 @@ Two 15-minute runs, about 440 ticks each.
   cap: nobody chose `leave` or `pass` once the plan was agreed. One run each is
   not enough to say wolves are why the first run had no conversation.
 
-## 8. Invitations: "open to talk" (added 2026-09-18)
+## 8. Invitations: "open to talk" — REMOVED
 
-**Status: world mechanic retained, no agent uses it since 2026-09-19.** The
-world still carries `SayIntent.open_to_talk`, `Entity.open_to_talk`, the
-`accept` action and everything section 8 describes, and the viewer still draws
-the marker. The agent side no longer touches any of it: the planner has no
-`say` tool, Jev has no `invite:` or `talk_to:` option, `Brief.invitations` is
-gone and so are `WorldModel.open_invitations()` / `my_invitation_live()` and the
-state's `invitations` block. Settlers start conversations by hailing
-(section 9) instead, because an invitation lives 40 ticks and planner turns are
-100 or more apart. The rest of this section is the record of what the world
-does, not of what the agents do.
-
-### 8.1 Why
-
-In the 2026-09-17 settlement runs settlers coordinated over `shout` and almost
-never opened a conversation (1 in 800 ticks), while their reflections talked
-about wanting to coordinate. `open_conversation` is a blocking commitment of
-unknown length that needs a free anchor tile and a listener within ten tiles,
-and briefs that said "ask so-and-so for stone" gave Jev nothing it could do.
-An invitation is a flag on ordinary speech: it costs the speaker nothing, it
-does not block the planner, and it gives Jev (the speaker's own and the
-hearer's) a concrete option: walking up to the speaker starts a conversation.
-
-### 8.2 World
-
-**Saying it.** `SayIntent` gains `open_to_talk` (bool, proto field 3). It is
-honoured on the `local` and `shout` channels and ignored on `thought`. A
-successful say with the flag sets the speaker's invitation:
-`Entity.open_until_tick = tick + INVITATION_TICKS`. The `Utterance` event
-carries `open_to_talk` (proto field 6) so hearers learn it with the text and
-the position. `Entity` carries `open_to_talk` (bool, proto field 16) computed
-at observation time (`open_until_tick > tick`), so anyone who can see the
-speaker sees the invitation too, and the viewer payload and the recorded tick
-carry the same boolean under `open_to_talk`.
-
-The invitation lives on the entity in three fields that are not in the proto:
-`open_until_tick` (the first tick on which the invitation is gone, so it is
-live while `tick < open_until_tick`; -1 means none), `invitation_text` and
-`invitation_tick` (the line that opened it and the tick it was said, which an
-`accept` needs for the first transcript entry). `Entity.is_open_to_talk(tick)`
-is the predicate everything else reads.
-
-An invitation ends when it expires, when the inviter takes any seat in a
-conversation (open, join, accept, or being accepted), or when the inviter
-dies. Saying again with the flag renews it; saying without the flag leaves it.
-
-**Accepting it.** `ConverseIntent` gains the action `accept` and the field
-`target_entity_id` (proto field 5). Conditions, each a failure reason in
-`EntityActed.details` when it fails:
-
-- the target is alive, is a player, and has a live invitation
-  (`no invitation from <id>`);
-- the accepter is adjacent to the target (Chebyshev 1) (`not next to <id>`);
-- neither is in a conversation (`already in a conversation`, `<id> is already
-  in a conversation`);
-- there is an **anchor** tile adjacent (Chebyshev 1) to both, walkable, with
-  no blocking object, no entity and no conversation (`no free tile next to
-  both of you`). Candidates are tried in ascending (x, y) order so the choice
-  is deterministic.
-
-On success, in the conversation phase of that tick, the world creates the
-conversation on the anchor exactly as `open` would, with `participants =
-[target, accepter]`, `opened_by = target`, transcript entry 0 = the target's
-invitation line (`{"tick": <tick it was said>, "speaker": target, "text":
-<the invitation text>}`), and the turn going to the target (the opener gets
-the first turn, section 2.4). Both entities get an `EntityActed` for action
-type `converse`: the accepter's details are `accept conv_N <target>` and the
-target's are `join conv_N`, so the agent-side join detection sees both. No
-utterance is emitted (the invitation was already heard). The target's
-invitation is cleared.
-
-Two accepters of the same target in one tick: the lexicographically smaller
-entity id wins; the other fails with `conv_N already started` and may `join`
-on a later tick like anyone else.
-
-Constants (`world/src/world/items.py`, mirrored in `agents/.../items.py`):
-
-| name | value | meaning |
-|---|---|---|
-| `INVITATION_TICKS` | 40 | how long an invitation stays open |
-| `CONVERSE_ACCEPT` / `ACTION_ACCEPT` | `"accept"` | the converse action; the world keeps it in `types.py` beside the other `CONVERSE_*` actions, the agents in `conversation.py` beside `ACTION_OPEN` |
-
-### 8.3 Agent side
-
-**World model.** `HeardUtterance.open_to_talk` and `EntityInfo.open_to_talk`.
-`WorldModel.open_invitations()` returns, for every other living player either
-visible with the flag or heard with the flag within `INVITATION_TICKS`, its id,
-its best-known position (visible position if in view, else where it was heard)
-and the invitation text (the most recent flagged line heard, or `""`).
-`WorldModel.my_invitation_live()` is true while this actor's own flagged say is
-younger than `INVITATION_TICKS`.
-
-**Jev options** (`options.py`), offered only while the actor is in no
-conversation:
-
-- `talk_to:<entity_id>`, one per open invitation. Adjacent to the inviter it is
-  the `accept` intent, described as `accept <name>'s invitation to talk: a
-  conversation with the two of you starts on a free tile next to you both`.
-  Otherwise it is a code-owned walk to the inviter's best-known position,
-  `stop_adjacent`, described as `walk to <name> at dx X dy Y, who said
-  "<text>" and is open to talk; next to them you can accept and a conversation
-  starts` (a settler with no heard line reads `..., who is open to talk; ...`).
-  It is grouped with the conversation options (after survival, before travel
-  control).
-- `invite:<n>`, one per phrase in `Brief.invitations`, offered when at least
-  one other living player is within `SAY_RADIUS` and the actor's own
-  invitation is not live. The intent is a `local` say with `open_to_talk`.
-  Described as `say "<phrase>" and stay open to talk for
-  {INVITATION_TICKS} ticks: anyone who hears it can walk up and start a
-  conversation with you`.
-
-**Jev state** (`jevstate.py`): an `invitations` list of lines beside the
-`entities` block (the state is JSON, so there is no settlers block to hang them
-under), one per open invitation, `<name> at dx X dy Y is open to talk:
-"<text>"`, plus `you are open to talk (N ticks left)` while the actor's own
-invitation is live. The key is left out entirely when there is neither.
-
-**Brief.** `Brief.invitations: tuple[str, ...]`, in `as_payload()` as
-`invitations` and in the stint trace. The limits (at most `MAX_BRIEF_SHOUTS`
-phrases, each at most `CONVERSATION_TEXT_LIMIT` characters, blanks dropped) are
-enforced where the planner writes them, in `_validated_invitations`, exactly as
-`_validated_shouts` does for shouts; a breach is a `ModelRetry`. A successful `accept`, or being accepted,
-ends a running stint with `joined_conversation` exactly as a `join` does.
-
-**Planner tools.**
-
-- `say(text, open_to_talk: bool = False)`. The docstring states what the flag
-  does (the physics above) and nothing about when to use it.
-- `start_stint(..., invitations: Sequence[str] = ())`: the lines Jev may say
-  with the flag, like `shouts` for shouting.
-- `talk_to(entity_id, max_ticks=40)`: code walks next to the inviter (like
-  `join_conversation`), submits `accept`, and blocks until the conversation is
-  over; returns the conversation report. Refuses at once when no invitation
-  from that settler is known.
-- `look` marks settlers who are open to talk: `open to talk: "<text>"` on the
-  entity line and in the met list.
-
-**Non-blocking conversations.** A conversation can now begin while the planner
-is thinking (someone accepted the planner's own `say(open_to_talk=True)`), or
-while a single-tick tool or `wait` is in flight. Then:
-
-- conversation mode begins as for a join (section 4.3); the planner turn is
-  not interrupted;
-- the in-flight and every queued single-tick action resolve with
-  `<description> -> interrupted: conversation conv_N started` (same mechanism
-  as the reflex interruption, new constant `INTERRUPTED_BY_CONVERSATION`).
-  This happens only for a seat the actor did not ask for: when its own
-  `open`, `join` or `accept` made the seat, the tool result stays the world's
-  own outcome, which is what `_sit_through` reads;
-  single-tick actions requested while the conversation runs get the same
-  answer at once; a queued `start_stint`, `travel_to` or `build` waits until
-  the conversation has ended and then runs;
-- the conversation report is delivered to the planner the way reflex reports
-  are: appended to the next tool result and to the next turn prompt
-  (`drain_reflex_notes` becomes `drain_notes`, carrying both kinds).
-
-During a stint, an accept by Jev or an acceptance of Jev's invitation ends the
-stint with `joined_conversation` and `start_stint` returns after the
-conversation with the report appended (unchanged).
-
-**Implementation notes** (where the code settled differently from the lines
-above):
-
-- `ACTION_ACCEPT` lives in `agents/.../items.py` with the other mirrored world
-  constants, because `options.py` needs it and cannot import `conversation.py`
-  (that import runs the other way). `conversation.py` still names it beside
-  `ACTION_OPEN` and `ACTION_JOIN`, as `ACTION_ACCEPT = items.ACTION_ACCEPT`.
-- `open_invitations()` drops a settler that is in view on this very tick
-  *without* the flag even when a flagged line from it was heard inside the
-  window: the world computes `Entity.open_to_talk` at observation time, so it
-  is the newer fact, and an accept offered against it could only fail.
-- `joined_conversation_id` keeps its name and is joined by
-  `joined_conversation(digest) -> (conversation_id, action)`, which carries the
-  detail's first word. `JevAgent` turns that into the trace's `via`: the word
-  itself for `open`, `join` and `accept`, and `accepted` for a `join` the actor
-  did not submit a `ConverseIntent` for on the previous tick (it records the
-  action and tick of every converse intent it sends).
-- `_detect_join` runs before the in-flight single-tick action is resolved, for
-  the same reason the reflex check does: otherwise the conversation's own
-  `EntityActed` would be handed to an unrelated tool call as its outcome.
-- `talk_to` and `join_conversation` share one code-owned walk,
-  `_walk_next_to(target)`, which is the old `_walk_to_anchor` generalised: it
-  walks onto a free tile next to a position, the anchor for one and the
-  inviter for the other.
-
-**Prompt.** The narrative's "Conversations" section gains the invitation
-physics (what the flag does, how long it lasts, what accepting does, that a
-conversation may start while the planner is mid-turn and what that does to
-in-flight tools). The brief examples gain `invitations` in the same way they
-show `shouts`. No sentence says when to invite or whom to talk to.
-
-### 8.4 Viewer, analysis, traces
-
-- Viewer: an entity with `open_to_talk` shows a small speech-bubble marker
-  above its sprite, live and in replay.
-- `tools/analyze_run.py` conversations section adds `opened by invitation: n`
-  and `invitations said: n`, and a notable moment `invitation_accepted`.
-- Trace: `stint_start` briefs carry `invitations`; the conversation trace's
-  `conversation_start` carries `"via": "open" | "join" | "accept" |
-  "accepted"`.
+**Removed on 2026-09-20 from the world, the proto (field numbers reserved), the
+agents, the viewer and the analysis tools.** What this section described —
+`SayIntent.open_to_talk`, `Entity.open_to_talk`, the `accept` converse action
+and the invitation marker — no longer exists; conversations are started by
+hailing (section 9). The record of the mechanic and of its removal is in
+[../CHANGELOG.md](../CHANGELOG.md).
 
 ## 9. Hailing: starting a conversation unilaterally (added 2026-09-19)
 
@@ -482,8 +292,8 @@ a failure reason in `EntityActed.details`:
 - they are adjacent, Chebyshev 1 (`not next to <id>`);
 - the target is out of its hail cooldown (`<id> was in a conversation N ticks
   ago and cannot be hailed for another M ticks`);
-- a free anchor tile exists next to both, chosen exactly as `accept` chooses it
-  (`_shared_anchor`, ascending `(x, y)`) (`no free tile next to you both`).
+- a free anchor tile exists next to both (`_shared_anchor`, ascending
+   `(x, y)`) (`no free tile next to you both`).
 
 **Hail cooldown.** `HAIL_COOLDOWN_TICKS` (60). `Entity.last_conversation_end_tick`
 is stamped for every participant when a conversation drops them or closes
@@ -491,13 +301,12 @@ is stamped for every participant when a conversation drops them or closes
 settler cannot be walked straight back into another conversation. It is world-
 only state: not in the proto, the viewer payload or the recorded tick, because
 only the world enforces it and the planner learns of it from the failure
-reason. Invitations, `accept`, `open` and `join` are unaffected by it.
+reason. `open` and `join` are unaffected by it.
 
-**Effect.** An accepted invitation with the roles flipped: the conversation is
-created on the anchor with `participants = [hailer, target]`,
-`opened_by = hailer`, transcript entry 0 = the hailer's line at this tick, and
-`speaker = target`, because the hailer has already spoken. Both invitations are
-cleared. The opening line also goes out as an ordinary `local` utterance with
+**Effect.** The conversation is created on the anchor with
+`participants = [hailer, target]`, `opened_by = hailer`, transcript entry 0 =
+the hailer's line at this tick, and `speaker = target`, because the hailer has
+already spoken. The opening line also goes out as an ordinary `local` utterance with
 `conversation_id` set, exactly as `open`'s does, so bystanders hear it. Two
 `EntityActed`s are emitted: `hail conv_N <target>` for the hailer and
 `hailed conv_N <hailer>` for the target — a distinct word, so the target's
@@ -508,17 +317,16 @@ turn order, leaving or closing changes.
 
 - `items.py` mirrors `ACTION_HAIL`, `ACTION_HAILED` and `HAIL_COOLDOWN_TICKS`.
 - `joined_conversation` accepts `hail` and `hailed` as seat-taking actions, and
-  `UNASKED_VIA = (VIA_ACCEPTED, VIA_HAILED)` is the pair `JevAgent._detect_join`
+  `UNASKED_VIA = (VIA_HAILED,)` is what `JevAgent._detect_join`
   treats as a seat the actor did not ask for: the in-flight and queued
   single-tick actions are answered with `INTERRUPTED_BY_CONVERSATION`, a
   running stint (ordinary or driver) ends with `joined_conversation`, and a
   queued stint waits. `conversation_start` records `via`: `hail` for the
   hailer, `hailed` for the target. The reflex fires inside such a conversation
   like any other (section 4.2).
-- Planner tool `talk_to(entity_id, opening_line, max_ticks=40)`. With a live
-  invitation from that settler it behaves as before (walk, `accept`) and says
-  in the result that the opening line was not used. Otherwise it walks next to
-  the settler with the same `ApproachDriver`, re-aiming at its latest known
+- Planner tool `talk_to(entity_id, opening_line, purpose, max_ticks=40)`
+  (section 11.4 added `purpose`). It walks next to
+  the settler with the `ApproachDriver`, re-aiming at its latest known
   position for at most `WALK_LEGS` (3) legs out of one shared tick budget,
   then submits the hail and blocks until the conversation ends. Failures return
   the world's reason verbatim plus where the settler was last seen.
@@ -556,17 +364,16 @@ turn order, leaving or closing changes.
 
 ### 9.4 Analysis
 
-`tools/analyze_run.py` counts hails beside the invitation stats (which stay,
-and read zero for a run after 2026-09-19):
+`tools/analyze_run.py` counts hails:
 `hails: <attempted> attempted, <succeeded> succeeded`, `opened by hail: n` and
 a `hails refused` bucket count. A second line reports the brief hails:
 `brief hails granted: n` (summed over every `stint_start` brief),
 `hail: chosen by Jev: n` (stint tick rows whose action starts `hail:`) and
 `planner talk_to hails: n` (attempted minus Jev's). A failed converse action reports only the
 world's reason and not which action asked for it, so the failures are matched
-by wording (`HAIL_FAILURE_PATTERNS`); the two reasons `hail` shares with
-`accept` (`not next to <id>`, `already in a conversation`) are left out, which
-makes the attempted count a lower bound. A successful hail is also a notable
+by wording (`HAIL_FAILURE_PATTERNS`); the two reasons `hail` shares with other
+converse actions (`not next to <id>`, `already in a conversation`) are left
+out, which makes the attempted count a lower bound. A successful hail is also a notable
 moment.
 
 ## 10. "Good for" wording, hearer feedback and board unread tracking (2026-09-19)
@@ -592,7 +399,8 @@ purpose in every communication tool's docstring (`shout`, `talk_to`,
 `place_sign`, `write_sign`, and the `shouts`/`hails` arguments of
 `start_stint`/`set_reflex`). **Since 2026-09-19 there are four channels**:
 `shout`, conversations, the message board and the sign. `say` was removed from
-the agents' surface with the invitations (section 8); the conversations bullet
+the agents' surface, as was the invitation mechanic (section 8); the
+conversations bullet
 states that the opening line is heard within `SAY_RADIUS` tiles and that
 anyone who sees a conversation can join it, up to
 `CONVERSATION_MAX_PARTICIPANTS`. `CONVERSER_NARRATIVE` gains one sentence that a

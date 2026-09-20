@@ -3,7 +3,12 @@
 Overnight build and first runs of the planner + Jev settlement scenario
 (2026-09-17). Companion to [05_jev_agents_design.md](05_jev_agents_design.md).
 
-Reproduce: `./dev.sh settlement`, wait, Ctrl+C, then
+**Historical.** The commands and run ids in this document refer to the
+12-settler `settlement` scenario and the flat `logs/` layout, both removed on
+2026-09-20; the only scenario now is `hamlet` (`./dev.sh`, then
+`python tools/analyze_run.py`). Nothing here is a current instruction.
+
+Reproduce (as it was then): `./dev.sh settlement`, wait, Ctrl+C, then
 `python tools/analyze_run.py logs`.
 
 Note: the stat now called `food` (100 = well fed, 0 = starving) was called

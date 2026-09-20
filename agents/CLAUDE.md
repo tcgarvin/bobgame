@@ -36,151 +36,17 @@ Available intents (defined in `proto/world.proto`):
 - `SleepIntent`, `WakeIntent` - Sleep on a bed (`object_id`) or on the ground
   (empty), and wake again (see docs/10_metal_and_sleep.md)
 
-### Foraging Pattern
+### Common Issues
 
-To collect berries from bushes (binary state: bush either has a berry or doesn't):
-
-```python
-def _decide_action(self, observation: pb.Observation) -> pb.Intent:
-    self_pos = observation.self.position
-
-    # Check for bushes at current position
-    for obj in observation.visible_objects:
-        if obj.object_type == "bush":
-            if obj.position.x == self_pos.x and obj.position.y == self_pos.y:
-                has_berry = obj.state.get("berry_count", "0") == "1"
-                if has_berry:
-                    return pb.Intent(
-                        collect=pb.CollectIntent(
-                            object_id=obj.object_id,
-                            item_type="berry",
-                        )
-                    )
-
-    # No bush with berry at position, do something else
-    return pb.Intent(move=pb.MoveIntent(direction=...))
-```
-
-## SimpleAgent
-
-The `SimpleAgent` class (formerly `RandomAgent`, alias preserved for backward compatibility) implements a state machine for foraging behavior:
-
-### State Machine
-
-```
-    ┌─────────┐
-    │ WANDER  │ ← No visible berries
-    └────┬────┘
-         │ sees bush with berries
-         ▼
-    ┌─────────┐
-    │  SEEK   │ → Move toward nearest bush
-    └────┬────┘
-         │ arrives at bush
-         ▼
-    ┌─────────┐
-    │ COLLECT │ → Collect berry from bush
-    └────┬────┘
-         │ bush empty or no bush here
-         ▼
-    ┌─────────┐
-    │   EAT   │ → Randomly eat berry (10% chance when idle)
-    └─────────┘
-```
-
-### States
-
-- **WANDER**: Move randomly when no berries visible
-- **SEEK**: Move toward the nearest visible bush with a berry (greedy bee-line)
-- **COLLECT**: Collect the berry when standing on a bush that has one
-- **EAT**: Occasionally consume a berry from inventory (configurable probability)
-
-### Configuration
-
-```python
-agent = SimpleAgent(
-    server_address="localhost:50051",
-    entity_id="alice",
-    eat_probability=0.1,  # 10% chance to eat when idle with berries
-)
-```
-
-### Key Methods
-
-- `_update_state()` - Transitions between states based on observation
-- `_decide_action()` - Returns intent based on current state
-- `direction_toward()` - Computes best direction to move toward a target (greedy)
-
-## Running Agents
-
-```bash
-# Single agent
-cd agents
-uv run python -m agents.random_agent --entity alice --server localhost:50051
-
-# With custom eat probability
-uv run python -m agents.random_agent --entity bob --eat-probability 0.2
-```
-
-Or use `./dev.sh` which starts world, two agents (alice and bob), and viewer together.
-
-### Multi-Agent Setup
-
-The default foraging config spawns two entities (alice and bob) with three berry bushes:
-
-```
-alice (2,2)     bush1 (3,3)
-                          bush3 (5,5)
-                                    bush2 (7,7)     bob (8,8)
-```
-
-Run multiple agents in separate terminals:
-```bash
-# Terminal 1: Start world
-cd world && uv run python -m world.server --config foraging
-
-# Terminal 2: Agent alice
-cd agents && uv run python -m agents.random_agent --entity alice
-
-# Terminal 3: Agent bob
-cd agents && uv run python -m agents.random_agent --entity bob
-
-# Terminal 4: Viewer
-cd viewer && npm run dev
-```
-
-## Testing Agents
-
-For integration tests, use short tick durations and the world's test fixtures:
-
-```python
-# Start a world server with test config
-server = WorldServer(world, port=50099, ws_port=18099, tick_config=config)
-await server.start()
-
-# Run agent against it
-agent = RandomAgent("localhost:50099", "test_entity")
-agent.connect()
-agent.run(duration_seconds=5.0)
-```
-
-## Common Issues
-
-### Agent doesn't collect berries
-Check that:
-1. The world has bushes spawned (use `--config foraging` or `--spawn-bush`)
-2. Agent checks `observation.visible_objects` for bushes at its position
-3. Agent submits `CollectIntent` when conditions are met
-
-### Intent rejected with "wrong_tick"
-The agent is submitting intents for an old tick. Ensure you use `observation.tick_id` from the current observation.
-
-### Intent rejected with "invalid_lease"
-Lease expired. Call `lease_stub.RenewLease()` periodically (default expiry is 30s).
+- **Intent rejected with "wrong_tick"**: the agent is submitting intents for an
+  old tick. Use `observation.tick_id` from the current observation.
+- **Intent rejected with "invalid_lease"**: the lease expired. Call
+  `lease_stub.RenewLease()` periodically (default expiry is 30 s); `client.py`
+  renews every 10 s.
 
 ## JevAgent (planner + Jev)
 
-`agents.jev_agent` is the two-layer settler agent described in
+`agents.jev_agent` is the only agent in the repo: the two-layer settler agent described in
 [docs/05_jev_agents_design.md](../docs/05_jev_agents_design.md). Run it with:
 
 ```bash
@@ -353,46 +219,38 @@ code-owned walk like the heard-shout option. A join during a stint ends it with
 reason `joined_conversation` and `start_stint` returns after the conversation
 with the report appended.
 
-### Invitations to talk (docs/09 section 8) - historical
+### A seat nobody asked for
 
-**The agent side no longer uses invitations (2026-09-19).** There is no planner
-`say` tool, no Jev `say:`, `invite:` or `talk_to:` option, no
-`Brief.invitations`, no `invitations` block in the Jev state, no open-to-talk
-marks in `look`, and `WorldModel` has no `open_invitations()` /
-`my_invitation_live()`. The world still implements `SayIntent.open_to_talk`,
-`Entity.open_to_talk` and the `accept` action, and the viewer still draws the
-marker; nothing on this side reaches for them. Conversations are started by
-hailing instead (next section). This paragraph stays because old runs and the
-world code still speak the language.
-
-Accepting seats both settlers at once, so a conversation can start while the
-planner is mid-turn: `_detect_join` runs before the in-flight single-tick action
-resolves, and a seat the actor did not ask for answers that action and every
-queued one with `interrupted: conversation conv_N started`
-(`INTERRUPTED_BY_CONVERSATION`); a queued `start_stint`, `travel_to` or `build`
-simply waits, because `_choose_intent` prefers the session. That conversation's
-report has no tool waiting for it, so it goes to the planner as a note:
-`drain_reflex_notes` is now `drain_notes` and carries reflex lines and
+Hailing seats both settlers at once, so a conversation can start while the
+planner is mid-turn: `_detect_join` runs before the in-flight single-tick
+action resolves, and a seat the actor did not ask for (`UNASKED_VIA`, i.e. a
+`hailed` seat) answers that action and every queued one with `interrupted:
+conversation conv_N started` (`INTERRUPTED_BY_CONVERSATION`); a queued
+`start_stint`, `travel_to` or `build` simply waits, because `_choose_intent`
+prefers the session. That conversation's report has no tool waiting for it, so
+it goes to the planner as a note: `drain_notes` carries reflex lines and
 conversation reports alike. `conversation_start` records `via`: `open`, `join`,
-`accept`, or `accepted` for the inviter.
+`hail` or `hailed`.
+
+*(The invitation mechanic — `open_to_talk`, `accept`, docs/09 section 8 — was
+removed everywhere on 2026-09-20; see [CHANGELOG.md](../CHANGELOG.md).)*
 
 ### Hailing (docs/09 section 9)
 
-`talk_to(entity_id, opening_line, max_ticks)` takes up an invitation when the
-settler has one open and otherwise **hails** it: the code-owned
+`talk_to(entity_id, opening_line, purpose, max_ticks)` **hails** a settler: the code-owned
 `ApproachDriver` walk re-aims at the settler's latest known position for up to
 `WALK_LEGS` (3) legs of one tick budget, then submits
 `ConverseIntent(action="hail", target_entity_id=..., text=opening_line)` and
 blocks until the conversation ends. The world seats the target without asking,
 so `joined_conversation` also reads `hail conv_N <target>` (the hailer) and
-`hailed conv_N <hailer>` (the target), and `UNASKED_VIA` — `accepted` and
-`hailed` — is what `_detect_join` treats as a seat nobody asked for.
+`hailed conv_N <hailer>` (the target), and `UNASKED_VIA` (`hailed`) is what
+`_detect_join` treats as a seat nobody asked for.
 `conversation_start` `via` is `hail` or `hailed`. `items.py` mirrors
 `ACTION_HAIL`, `ACTION_HAILED`, `CONVERSE_ACTION_TYPE` and
 `HAIL_COOLDOWN_TICKS` (60): a settler cannot be hailed until that long after
 its last conversation ended.
 
-**Brief hails (2026-09-19).** The planner may also hand Jev up to
+**Brief hails.** The planner may also hand Jev up to
 `MAX_BRIEF_HAILS` (3) hails per stint:
 `start_stint(..., hails=[{"settler": "dov", "line": "..."}])`.
 `_validated_hails` refuses a settler this actor has not met (naming who it
@@ -412,259 +270,133 @@ actor holds a seat or for a settler that is dead, asleep, seated or unseen.
 `notable` list. A landed hail ends the stint with `joined_conversation` like
 any other seat.
 
-**Live-run fixes (2026-09-19, docs/09 section 11).** `talk_to` and
+**Purpose and the closing note (docs/09 section 11).** `talk_to` and
 `open_conversation` take a required `purpose` argument (only the settler that
 opened or hailed sees it, rendered in the converser's prompt as "You started
-this conversation because: …"); `BriefHail` gains an optional `purpose` that
-flows the same way through `JevAgent._detect_join`/`hailed_target`. The
-closing converser call now returns two fields (`ClosingNote`:
-`agreed_or_learned`, `you_said_you_would`) instead of one line, both appended
-to the journal and both leading `ConversationReport.to_text()`. `describe_world`
-marks an asleep settler in view and in the roster, and `talk_to` refuses one
-up front instead of walking into a world refusal. `write_sign`/`write_note`
-refuse the other's kind of object before submitting anything, and
-`place_sign` crafts its own sign from 2 wood when needed.
-`BudgetedToolset.get_tools` wraps every tool's argument validator
-(`_FriendlyArgsValidator`) so a bad kwarg's retry names the tool's actual
-parameters; `sleep`'s parameter is `bed` (was `bed_object_id`), and the
-planner agent's tool retries rose from 2 to 3 (`PLANNER_TOOL_RETRIES`).
+this conversation because: …"); `BriefHail` carries an optional `purpose` that
+flows the same way through `JevAgent._detect_join`/`hailed_target`. The closing
+converser call returns two fields (`ClosingNote`: `agreed_or_learned`,
+`you_said_you_would`), both appended to the journal and both leading
+`ConversationReport.to_text()`. `describe_world` marks an asleep settler in view
+and in the roster, and `talk_to` refuses one up front instead of walking into a
+world refusal.
 
-### Hamlet-run fixes (2026-09-20)
+### Behaviour contracts of the planner tools
 
-Four things the first six-settler run showed, all in `planner.py`:
+Facts that live only here; the runs that produced them are in
+[CHANGELOG.md](../CHANGELOG.md).
 
-- **The body on every tool result.** `turn_clock_line` now ends
-  `food F/M, health H/M, fatigue F/M`, and `body_alerts(model)` returns the
-  `!!` lines - physics only, no advice - for food at or below `FOOD_ALERT_AT`
-  (25), food 0 (the starvation rate and what a berry restores, from
-  `items.py`) and fatigue within `FATIGUE_ALERT_MARGIN` (10) of
-  `items.MAX_FATIGUE`. `BudgetedToolset.call_tool` appends them under the
-  threat alert, and `Planner.build_prompt` puts the same lines above the
-  `look`. A dead or sleeping body gets none.
-- **`travel_to` arrives.** `travel_arrival(model, target)` returns `arrived`
-  when standing on the target, `arrived_next_to` when standing beside a target
-  that `is_walkable` refuses, else `""`. The tool checks it before doing
-  anything (returning "no walk needed: ... No tick spent.") and hands it to
-  the stint as an `end_check`, so the walk ends the tick it arrives instead of
-  waiting for two Jev `done` ticks. `Stint` already had `end_check` (the
-  reflex uses it); `never_ends` is now public and `AgentBridge.run_stint` /
-  `JevAgent.run_stint` / `_StintRequest` carry it through.
-- **`eat` with an empty pack.** With no `kind` in the pack it submits nothing
-  (no tick): if a bush on the actor's own tile has a berry it collects and
-  then eats it, reporting both actions; otherwise it lists the nearest known
-  bushes with a berry (`_berry_bush_lines`, in the style of `_pile_lines`).
-- **`build` crafts what it is short of.** `_craft_chain` crafts a kind,
+- **The body is on every tool result.** `turn_clock_line` ends `food F/M,
+  health H/M, fatigue F/M`, and `body_alerts(model)` returns the `!!` lines —
+  physics only, no advice — for food at or below `items.FOOD_ALERT_AT` (25),
+  food 0 (the starvation rate and what a berry restores) and fatigue within
+  `FATIGUE_ALERT_MARGIN` (10) of `items.MAX_FATIGUE`, plus
+  `enclosure.enclosed_fact` (below). `BudgetedToolset.call_tool` appends them
+  under the threat alert and `Planner.build_prompt` puts the same lines above
+  the `look`. A dead or sleeping body gets none.
+- **`travel_to(x, y)` runs to arrival and takes no `max_ticks`.**
+  `travel_arrival(model, target)` returns `arrived` when standing on the
+  target, `arrived_next_to` when standing beside a target `is_walkable`
+  refuses, else `""`. The tool checks it first (returning "no walk needed: ...
+  No tick spent.", costing nothing) and hands it to the stint as an
+  `end_check`, so the walk ends the tick it arrives rather than waiting for two
+  Jev `done` ticks. It otherwise ends on `no_path`, a danger stop or a food
+  stop; `travel_budget(model, target)` is only a backstop (`path_length *
+  TRAVEL_TICKS_PER_STEP (2) + TRAVEL_TICK_ALLOWANCE (20)`, clamped to
+  `TRAVEL_MIN_TICKS` (30) .. `TRAVEL_MAX_TICKS` (600)). When the destination is
+  known and unwalkable, `options._step_option_for_place` and
+  `_travel_control_options` retry `find_path(..., stop_adjacent=True)`, so a
+  walk routes to a free neighbour instead of failing.
+- **Tools craft what they are short of.** `_craft_chain` crafts a kind,
   crafting missing inputs first to `CRAFT_CHAIN_DEPTH` (2: wood -> plank ->
   wall), refusing a station recipe unless `WorldModel.station_near` finds the
-  station on or next to the tile, and recording everything in a `CraftTally`.
-  `_run_build` stocks up before the first stint and again on every
-  `BUILD_OUT_OF_ITEMS`, at most `BUILD_CRAFT_LIMIT` (20) pieces and
-  `BUILD_RESUPPLY_ROUNDS` (3) rounds, taking the crafting ticks out of the
-  tool's own `max_ticks`. The result opens with "for this build, crafted ...";
-  a build that still cannot start keeps `missing_pieces_text` plus why the
-  crafting stopped.
-
-`tools/analyze_run.py` was fixed in the same pass: `WorldFacts.deaths` and
-`killers` are settlers only (wolf ids collapsed to `wolf`, an empty killer
-`starvation` only when the tick's `entity_updates` show food 0, else
-`unknown`), and a wolf's death is a kill in `WorldFacts.wolf_kills`, keyed by
-the settler who landed it.
-
-### Hamlet-run fixes, round 2 (2026-09-20)
-
-The second pass over `runs/20260920-030501-hamlet` (goal: six enclosed personal
-rooms). New module `enclosure.py` holds the arithmetic three callers now share.
-
-- **Geometry in build results.** `BuildExecutor.geometry_lines(model)` (kept
-  apart from `summary()`, which the `StintDriver` protocol says takes nothing)
-  appends what the standing pieces around the shape now form, from a
-  4-connected room fill: `the walls here now enclose N interior tile(s)
-  spanning WxH; doors: D; gaps: G; you are inside/outside`, or `these walls
-  enclose nothing yet: K gap(s) remain at (x, y), ...`. A closed ring with no
-  door and no gap adds `the interior has no entrance: no door and no gap`, and
-  when the seal guard made the builder close it from outside, `; the last piece
-  was placed from outside, because placing it from inside would have shut you
-  in`. `build_would_seal_you_in` now names the tiles it refused. Nothing is
-  said about a road, a floor or a bed: only walls and doors bound a room.
-- **Seal guard for Jev's `place`.** `options._place_options` skips a structure
-  placement where `enclosure.would_seal` says the actor would be left with
-  fewer than `SEAL_MIN_FREE_TILES` (64) reachable tiles. A door is passable to
-  settlers, so placing one is never a seal. esme walled the six free
-  neighbours of her own tile one at a time and starved in the cell.
-- **The enclosed fact.** `enclosure.enclosed_fact` returns
-  `!! ENCLOSED: you can reach only N tile(s); the pieces around you:
-  wood_wall_31 (N), .... dismantle removes a placed piece (3 extract actions,
-  one item back).` whenever the body reaches fewer than `ENCLOSED_REACH_LIMIT`
-  (12) tiles. It is one of `planner.body_alerts`, so it reaches every tool
-  result and the turn prompt, and `jevstate._facts` appends it to Jev's always-
-  present `facts`. `dismantle` already worked from inside (it is an
-  `ExtractIntent` on an adjacent object); `world/tests/test_building.py` now
-  pins that.
-- **Food ends a stint.** `Stint` ends with `food_low` the tick food *crosses*
-  down to `items.FOOD_ALERT_AT` (25) and `food_zero` when it crosses to 0.
-  Crossing only, so a stint started hungry is not ended on its first tick, and
-  a reflex stint is exempt. `StintReport.end_note` carries the numbers.
-  `FOOD_ALERT_AT` moved to `items.py`, because `stint.py` cannot import
-  `planner.py`.
-- **`no_path`.** ada spent 108 ticks stepping north and south inside a 2-tile
-  pocket of her own walls, toward a bush four tiles away. Root cause:
-  `_step_option_for_place` fell back to `_greedy_step` when A* failed, and that
-  memoryless hill-climb offered a step on the tile where stepping south
-  shortened the chebyshev distance and nothing on the tile where it lengthened
-  it — a 2-cycle re-armed every tick, with the option worded "it is beyond what
-  you can see, so keep stepping", which is what kept `lost` at 0.3. The
-  fallback is now only for a destination `model.is_known` has never seen; a
-  known tile with no route gets no option at all. On top of that `Stint` ends
-  with `END_NO_PATH` after `NO_PATH_PATIENCE` (3) ticks on which no brief
-  target (a `places` name or an object id the brief text names) has a step
-  option and the body is not already beside one, naming the targets in the
-  report.
+  station on or next to the tile. `build` stocks up before its first stint and
+  again on every `BUILD_OUT_OF_ITEMS` (at most `BUILD_CRAFT_LIMIT` (20) pieces
+  over `BUILD_RESUPPLY_ROUNDS` (3) rounds, never walking to a station), `place`
+  crafts one piece (`_stock_one_to_place`) and `place_sign` crafts its own sign
+  from 2 wood. The crafting ticks come out of the tool's own `max_ticks`.
+- **`eat` with an empty pack** submits nothing and spends no tick: if a bush on
+  the actor's own tile has a berry it collects and eats it, reporting both
+  actions; otherwise it names the nearest known bushes that had one.
+- **A failed `craft` names where the raw input comes from.**
+  `items.source_text(kind)` is generic over `EXTRACT_YIELD` / `EXTRACT_TOOLS` /
+  `EXTRACT_REQUIRED_TOOLS` and appends each source's habitat sentence from
+  `items.HABITAT_TEXT` (written from `world/terrain/objects.py`'s placement
+  rules, with the numbers mirrored: `REED_BANK_WIDTH`, `REED_COAST_EXCLUSION`,
+  `CLAY_MIN_DISTANCE`/`CLAY_MAX_DISTANCE`, `BUSH_WATER_MIN_DISTANCE`/
+  `BUSH_WATER_MAX_DISTANCE`, `TREE_COAST_DISTANCE`, `ORE_EXCLUSION_RADIUS`).
+  `planner.missing_input_lines` adds it plus the nearest `SOURCES_SHOWN` (3)
+  such objects to a failed `craft` and to `build`'s shortfall, and
+  `_water_hint_lines` adds `nearest water you have seen: (x, y) (dN)` for a
+  water-bound material. `Tile.floor_type` does not distinguish fresh water from
+  the sea, so that line says "water"; the habitat sentence is what says the
+  stuff wants fresh water. `items.habitat_table_text()` is the narrative's
+  "Where things are found" list — the one statement of each rule.
+- **Enclosure geometry.** `enclosure.py` holds one set of flood fills shared by
+  `build.py`, `options.py`, `planner.py` and `jevstate.py`:
+  - `BuildExecutor.geometry_lines(model)` (kept apart from `summary()`, which
+    the `StintDriver` protocol says takes nothing) appends `the walls here now
+    enclose N interior tile(s) spanning WxH; doors: D; gaps: G; you are
+    inside/outside`, or `these walls enclose nothing yet: K gap(s) remain at
+    (x, y), ...`, from a 4-connected room fill, and lists what stands inside.
+    A closed ring with no door and no gap adds `the interior has no entrance`.
+    Only walls and doors bound a room; roads, floors and beds say nothing.
+  - `options._place_options` skips a structure placement where
+    `enclosure.would_seal` leaves the actor fewer than `SEAL_MIN_FREE_TILES`
+    (64) reachable tiles; a door is passable to settlers, so placing one is
+    never a seal. `build_would_seal_you_in` names the tiles it refused, and a
+    ring gets closed from outside.
+  - `enclosure.enclosed_fact` returns `!! ENCLOSED: you can reach only N
+    tile(s); the pieces around you: ... dismantle removes a placed piece (3
+    extract actions, one item back).` below `ENCLOSED_REACH_LIMIT` (12) tiles.
+  - `enclosure.own_pieces_line` groups this settler's standing pieces (from
+    `ObjectInfo.owner`, the world's `owner` state key) into 8-connected
+    clusters, capped at `OWN_PIECE_CLUSTERS_SHOWN` (6). It is part of
+    `describe_world`, so the build site survives the nightly history reset.
+- **A refused `place` names the occupant** of the tile and the free
+  neighbouring directions; `build(..., door="x,y")` places doors in the shape
+  it builds (docs/08, "Agents").
+- **Stints stop for the body.** `Stint` ends with `food_low` the tick food
+  *crosses* down to `items.FOOD_ALERT_AT` (25) and `food_zero` when it crosses
+  to 0 — crossing only, so a stint started hungry is not ended on its first
+  tick, and a reflex stint is exempt. It ends with `END_NO_PATH` after
+  `NO_PATH_PATIENCE` (3) ticks on which no brief target has a step option and
+  the body is not beside one. `options` offers a greedy fallback step *only*
+  for a destination `model.is_known` has never seen; a known tile with no route
+  gets no option at all.
 - **Interrupted calls are free.** `stint.was_interrupted` spots a result of the
-  form `<what> -> interrupted: ...`, and `BudgetedToolset.call_tool` refunds
-  the call: nothing happened, so nothing is charged. bram spent 8 of 20 calls
-  bouncing off one conversation. `INTERRUPTED_BY_REFLEX`,
-  `INTERRUPTED_BY_CONVERSATION` and `conversation_interruption` moved from
-  `agent.py` to `stint.py` (and are re-imported there) so `planner.py` can see
-  them. The first interrupted result still does *not* carry the conversation
-  report — that would mean blocking a single-tick tool on the whole
-  conversation; the report arrives as a note in the next tool result as before.
-- **Craft failures name sources.** `items.source_text(kind)` is generic over
-  `EXTRACT_YIELD` / `EXTRACT_TOOLS` / `EXTRACT_REQUIRED_TOOLS`: `fiber comes
-  from reeds (bare hands)`, `clay comes from clay_deposit (bare hands, faster
-  with a pickaxe)`, `copper_ore comes from copper_vein (needs a pickaxe in
-  hand)`. `planner.missing_input_lines` appends it, plus the nearest
-  `SOURCES_SHOWN` (3) such objects, to a failed `craft` and to `_craft_inputs`'
-  shortfall inside `build`. In the whole run one settler gathered reeds and
-  `craft bed -> bed needs 4 plank + 3 fiber` never said where fiber comes from.
-- **Your own placed pieces.** `enclosure.own_pieces_line` reads
-  `ObjectInfo.owner` (the world's `owner` state key, mirrored as
-  `items.OWNER_KEY`) and groups this settler's standing building pieces into
-  8-connected clusters: `your placed pieces: 8 wood_wall within (1545, 973)-
-  (1547, 975); 1 bed at (1544, 973)`, capped at `OWN_PIECE_CLUSTERS_SHOWN` (6)
-  with `and N more group(s)`. It is part of `describe_world`, so the journal's
-  day log keeps it (it keeps the last `look`) and the site survives the nightly
-  history reset. Journals carried goals across days but never the build site,
-  and the run ended with five disjoint wall clusters.
-- **The hungry wake** is a world change (`world/CLAUDE.md`, docs/10):
-  `items.HUNGRY_WAKE_FOOD` (20) mirrors it into the prompt's sleep physics and
-  Jev's `sleep:` option text, and `SleepRecord.to_text` spells the numbers out
-  on a `hungry` wake.
-
-### Hamlet-run fixes, round 3 (2026-09-20)
-
-The third pass over `runs/20260920-030501-hamlet`, where days 4-6 were 41%
-asleep, 20% idle while the planner thought, 10% travelling and 3% actually
-gathering or building.
-
-- **Ground sleep retune** is a world change (`world/CLAUDE.md`, docs/10).
-  `items.SLEEP_RECOVERY` maps `(on_bed, night)` to `(points, ticks)` -
-  `(1, 1)`, `(1, 2)` on a bed, `(2, 3)` at night and `(1, 3)` by day on the
-  ground - and `items.sleep_recovery_text` renders `"2 fatigue per 3 ticks"`.
-  Every agent-facing sleep number (`settlement_narrative`, `jevstate.py`'s
-  fatigue physics, `options.py`'s `sleep:<bed>` and `sleep:ground`) is
-  generated from it, so nothing else had to change.
-- **`travel_to(x, y)` has no `max_ticks`.** One settler made 16 `travel_to`
-  calls inside a 10-tile radius, each re-called the moment its model-chosen
-  budget ran out, spending a whole 20-call turn and ~220 ticks. The walk now
-  runs to `arrived`/`arrived_next_to`, `no_path`, a danger stop or a food
-  stop. `planner.travel_budget(model, target)` computes a backstop of
-  `path_length * TRAVEL_TICKS_PER_STEP (2) + TRAVEL_TICK_ALLOWANCE (20)`,
-  clamped to `TRAVEL_MIN_TICKS` (30) .. `TRAVEL_MAX_TICKS` (600), falling back
-  to the straight-line distance when A* finds no route. A model that passes
-  `max_ticks` anyway gets `_FriendlyArgsValidator`'s retry
-  (`"travel_to takes: x, y"`), not a failed turn - there is a test for that.
-- **One tick for a one-tick tool.** `direct_action`'s future was already
-  resolved at the top of tick N+1 (`_resolve_awaiting_direct`), but nothing on
-  the planning path suspends between there and `submit_intent`, so the planner
-  task was only *scheduled*: tick N+1 went out as a `Wait` and the next action
-  could not leave before N+2. `JevAgent._await_planner_work` now polls
-  (`PLANNER_POLL_SECONDS`, 0.02) until a direct or stint request appears or
-  the world's own `Observation.deadline_ms` runs out, minus `SUBMIT_MARGIN_MS`
-  (200) and capped at `MAX_PLANNER_WAIT_MS` (2000) against clock skew. It only
-  runs in `MODE_PLANNING` with an active body and nothing already in flight,
-  and with no deadline (fakes, tests) it returns at once. Measured floor
-  before: 2 ticks per action, 3 for 63% of calls; the floor is now 1 whenever
-  the model round-trip fits inside the tick's `intent_deadline_ms` (1.2 s).
-- **`place` crafts what it is short of**, like `build` and `place_sign`.
-  `_stock_one_to_place` runs `_craft_chain(kind, 1)` when the pack is empty
-  and the kind has a recipe; on failure the existing shortfall plus
-  `items.source_text` lines are returned and nothing is placed. A bed is one
-  call when the planks and the fiber are in the pack.
+  form `<what> -> interrupted: ...` and `BudgetedToolset.call_tool` refunds the
+  call. `INTERRUPTED_BY_REFLEX`, `INTERRUPTED_BY_CONVERSATION` and
+  `conversation_interruption` live in `stint.py` so `planner.py` can see them.
+  The first interrupted result does *not* carry the conversation report — that
+  would block a single-tick tool on the whole conversation; it arrives as a
+  note in the next tool result.
+- **A bad kwarg never fails a turn.** `BudgetedToolset.get_tools` wraps every
+  tool's argument validator (`_FriendlyArgsValidator`) so a bad call's retry
+  names the tool's actual parameters, and `PLANNER_TOOL_RETRIES` is 3.
+  `sleep`'s parameter is `bed`.
 - **Known-dead entities.** `WorldModel.deaths_seen` is a deque of `DeathSeen`
-  (`entity_id`, `entity_type`, `tick`, `killer_id`, and `fact()` ->
-  `"wolf_6 died at tick 953 (killed by esme)"`), filled from the `entity_died`
-  observation event. Types come from `_entity_types`, an id -> type map that is
-  never pruned, because an entity leaves `entities` the moment it leaves view.
-  `death_of(id)` forgets a death once the body has been seen alive since
-  (settlers respawn; wolf ids are never reused - `wolves._next_wolf_id` counts
-  up and skips anything still in the world). `look` gains
-  `wolves you know of but cannot see:` with `last seen N ticks ago at (x, y)`
-  and `wolves you saw die: wolf_6 (tick 953)` (last `DEATHS_SHOWN`, 4);
-  `_refuse_dead_targets` raises a `ModelRetry` carrying the fact when
-  `start_stint` or `set_reflex` text names a dead id (`OBJECT_ID_PATTERN`
-  matches `wolf_6`); and `agent._note_life_transitions` writes each witnessed
-  death into the journal's `DayLog` as a `KIND_EVENT`. esme, finn and ada
-  hunted a wolf esme had killed at t953 until t2008.
+  (`entity_id`, `entity_type`, `tick`, `killer_id`, `fact()`) filled from the
+  `entity_died` event; types come from `_entity_types`, an id -> type map that
+  is never pruned because an entity leaves `entities` the moment it leaves
+  view. `death_of(id)` forgets a death once the body has been seen alive since
+  (settlers respawn; wolf ids are never reused). `look` shows `wolves you know
+  of but cannot see:` and `wolves you saw die:` (last `DEATHS_SHOWN`, 4);
+  `_refuse_dead_targets` raises a `ModelRetry` when `start_stint` or
+  `set_reflex` names a dead id; `agent._note_life_transitions` writes each
+  witnessed death into the journal's `DayLog`. Both `recent_deaths` and
+  `death_of` iterate `reversed(tuple(...))`, because `death_of` mutates the
+  deque.
+- **A one-tick tool costs one tick.** `JevAgent._await_planner_work` polls
+  (`PLANNER_POLL_SECONDS`, 0.02) until a direct or stint request appears or the
+  world's own `Observation.deadline_ms` runs out, minus `SUBMIT_MARGIN_MS`
+  (200) and capped at `MAX_PLANNER_WAIT_MS` (2000) against clock skew. It only
+  runs in `MODE_PLANNING` with an active body and nothing in flight; with no
+  deadline (fakes, tests) it returns at once. Without it the planner task was
+  merely *scheduled* and the tick went out as a `Wait`.
 - **The journal writer knows the goal.** `items.island_opening(settler_count)`
-  holds the setting and goal paragraph; `settlement_narrative()` and
-  `journal_narrative()` both open with it, so a `Tomorrow` section is written
-  against the same goal the planner plans against. Nothing was added about
-  what to write.
-
-### Hamlet-run fixes, round 4 (2026-09-20)
-
-The fourth pass, over `runs/20260920-043742-hamlet` (goal: six enclosed
-personal rooms with a door and a bed each; at tick 1350: 0 beds, 0 doors, 0
-rooms).
-
-- **Habitat as physics.** `items.HABITAT_TEXT` maps a natural object type to
-  one sentence saying where it grows, written from `world/terrain/objects.py`
-  and its `ObjectPlacementConfig`, with the numbers mirrored as
-  `REED_BANK_WIDTH` (2), `REED_COAST_EXCLUSION` (12), `CLAY_MIN_DISTANCE` /
-  `CLAY_MAX_DISTANCE` (2, 7), `BUSH_WATER_MIN_DISTANCE` /
-  `BUSH_WATER_MAX_DISTANCE` (4, 60), `TREE_COAST_DISTANCE` (40) and
-  `ORE_EXCLUSION_RADIUS` (60). `items.source_text` now appends the habitats of
-  every source (deduplicated, so four rock types say it once), so every craft
-  failure reaching `missing_input_lines` reads `fiber comes from reeds (bare
-  hands); reeds grow on the banks and in the shallows of fresh water (lakes,
-  rivers and their fords), within 2 tiles of the water, and never within 12
-  tiles of the sea`. `items.habitat_table_text()` is the narrative's "Where
-  things are found" list, and the hand-written habitat scraps in the
-  `Materials` section were removed so there is one statement of each rule.
-  `planner._water_hint_lines` adds `nearest water you have seen: (x, y) (dN)`
-  under `you know of none yet` for a water-bound material
-  (`items.is_water_bound`), from `WorldModel.nearest_water()`. The
-  observation's `Tile.floor_type` does **not** distinguish fresh water from
-  the sea, so that line says "water", never "fresh water"; the habitat
-  sentence is what says the stuff wants fresh water.
-- **Sleep retune, take 2** is a world change (`world/CLAUDE.md`, docs/10): the
-  day recovery rates went up and `MIN_SLEEP_FATIGUE` (20) is the floor for
-  falling asleep. Mirrored as `items.SLEEP_RECOVERY` and
-  `items.MIN_SLEEP_FATIGUE`; `options._sleep_options` withholds `sleep:` below
-  the floor and `jevstate.FATIGUE_FACTS` and the planner's sleep physics state
-  it, both generated.
-- **Doors in `build`** and **a refused `place` names the occupant**: docs/08,
-  "Agents".
-- **`recent_deaths` snapshots its deque.** `WorldModel.recent_deaths` iterated
-  `reversed(self.deaths_seen)` while calling `death_of`, which calls
-  `_forget_death`, which clears and re-extends the same deque: three planner
-  turns died with `deque mutated during iteration` (ada t960 and t1624, esme
-  t1626), two of them while building the turn prompt. Both `recent_deaths` and
-  `death_of` now iterate `reversed(tuple(...))`.
-- **`travel_to` routes to adjacency.** 41 of 194 walks ended `no_path`, and 32
-  of those aimed at a tile that cannot be stood on with free reachable ground
-  all around it (22 with another settler standing on it, 5 a tree, 3 a wall, 2
-  a rock; median 4-5 tiles out). `travel_arrival` has always ended a walk with
-  `arrived_next_to`, but nothing planned a route to adjacency, so A* failed,
-  the step option vanished and `NO_PATH_PATIENCE` fired after 3 ticks.
-  `options._step_option_for_place` now retries `find_path(...,
-  stop_adjacent=True)` when the direct path fails and the target is known and
-  unwalkable, and puts `stop_adjacent` on the `TravelState` it installs;
-  `_travel_control_options` does the same for `keep_going`, so the option does
-  not vanish when somebody steps onto the destination mid-walk. The remaining
-  9: 1 unknown target 580 tiles off (a planner call, not a routing defect), 1
-  builder pocketed in his own hut, 7 aimed inside a one-gap hut whose gap idle
-  settlers were standing in.
+  holds the setting and goal paragraph, and `settlement_narrative()` and
+  `journal_narrative()` both open with it.
 
 ### The eject question, split in three (docs/05)
 
@@ -677,9 +409,7 @@ step option is not missing however far away")
 as three Nouls every tick. `done` or `stuck` at 0.6 on two consecutive ticks
 ends the stint with reason `eject`; `lost` at 0.6 on two consecutive ticks ends
 it with reason `lost`, and the report adds a line telling the planner to name
-the target by id or as a place, or to move closer. `lost` was added on
-2026-09-18 after a settler starved stepping north and south for thirty ticks
-toward a bush it had no option to reach while `stuck` sat at 0.4.
+the target by id or as a place, or to move closer.
 `JevDecision.eject` is a derived property, `max(done, stuck, lost)`, so the
 traces, the report line (`(done X, stuck Y, lost L, danger Z)`), the viewer
 panel and `tools/analyze_run.py`'s eject column keep working unchanged.
@@ -766,11 +496,9 @@ What Jev may choose (`options.py`):
   to operate Jev. It gives no strategy or etiquette; those are meant to
   emerge. Keep advice out of option descriptions and alerts too. The wolf
   numbers in `items.py` mirror `world/wolves.py` and `world/items.py`.
-  **Owner's decision 2026-09-19**: this relaxed for the communication tools
-  only, because settlers were under-using conversations, boards and signs.
-  Each one (`shout`, `talk_to`, `open_conversation`,
-  `join_conversation`, a message board, a sign - the four channels left after
-  `say` was removed on 2026-09-19) now states plainly, in the
+  **One relaxation, by the owner's decision**: the communication tools. Each of
+  `shout`, `talk_to`, `open_conversation`, `join_conversation`, a message board
+  and a sign states plainly, in the
   narrative's "Reaching the others, and what each way is good for:" section
   and in its own tool docstring, what it is good for and not good for (a
   fact about the channel - one-way vs. back-and-forth, permanent vs.
@@ -832,7 +560,7 @@ useless. The planner has `place_sign(direction, text)` (place, then write; the
 sign id is read back out of the world's `placed <id> at ...` detail) and
 `write_sign(sign_id, text)`; the generic `place` refuses `sign`.
 
-### Walking, and what Jev is told (2026-09-18)
+### Walking, and what Jev is told
 
 - **`step_towards:<target>`** is the one walking option: one A* step, and it
   sets the travel state so `keep_going` (was `follow_travel`) carries on and
@@ -840,9 +568,8 @@ sign id is read back out of the world's `placed <id> at ...` detail) and
   (`Brief.places` and every object id the instruction or notes name, matched by
   `OBJECT_ID_PATTERN`), then a per-group quota: `STEP_TARGETS_PER_GROUP` (2) per
   `STEP_GROUPS` entry, every living wolf in view, and the nearest
-  `STEP_SETTLER_LIMIT` (3) settlers. Before this the six nearest objects of any
-  type shared one budget, so in a grove all six were trees and nothing else was
-  reachable. `OPTION_SECTIONS` is the order the sections are offered in;
+  `STEP_SETTLER_LIMIT` (3) settlers — a shared budget over the nearest objects
+  of any type fills up with trees in a grove. `OPTION_SECTIONS` is the order the sections are offered in;
   `MAX_OPTIONS` (40) cuts the tail, which is always the quota list.
 - **Named places**: `start_stint(places={"the_lake": [x, y]})`, validated in
   `_validated_places` (1-24 chars of `[a-z0-9_]`, at most
@@ -858,8 +585,8 @@ sign id is read back out of the world's `placed <id> at ...` detail) and
   berry (the message board moved to `M`); and `travel.next_step` says `arrived`
   rather than `blocked` when the actor is already there.
 - **Trace**: a tick row is written at the *start of the next* `decide`, after
-  `_detect_blocked_move` has had its say, and `finish` flushes the last one. It
-  used to be written immediately, so a silently blocked move was never in
+  `_detect_blocked_move` has had its say, and `finish` flushes the last one —
+  written any earlier, a silently blocked move never reaches
   `stints.jsonl.gz`.
 
 ### Testing

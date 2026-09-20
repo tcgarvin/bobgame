@@ -2,7 +2,7 @@
 
 Development notes and patterns for the world simulation core.
 
-## Architecture Decisions (Milestone 2)
+## Core Data Model and Movement
 
 ### Data Models: Pydantic Frozen Models
 
@@ -100,7 +100,7 @@ uv run pytest tests/ -v -k swap  # filter by name
 uv run mypy src/world/           # type check
 ```
 
-## Architecture Decisions (Milestone 3)
+## gRPC Layer
 
 ### gRPC Service Architecture
 
@@ -149,25 +149,26 @@ observation.self.CopyFrom(entity_proto)
 # build the message, then getattr(msg, "from").CopyFrom(from_pos)
 ```
 
-### Observation Generation (Basic)
+### Observation Generation
 
-Current implementation (no LOS):
-- All entities visible to all observers
-- Nearby tiles within radius=5 returned
-- Movement events generated from `TickResult`
-
-Future work: Line-of-sight filtering, enter/leave events.
+`services/observation_service.py` builds each observer's `Observation` by
+distance, not line of sight: `VIEW_RADIUS` (8) filters visible entities, tiles
+and objects, and every event class (movement, damage, death, respawn, object
+added/changed/removed, utterances, actions) is filtered by the same radius
+against the observer's position. There is no ray casting and no enter/leave
+event; an entity simply stops appearing when it leaves the radius, which is why
+`WorldModel` on the agent side has to remember what it has seen.
 
 ## Running the Server
 
 ```bash
 cd world
-# Start server with one entity
+uv run python -m world.server --config hamlet
 uv run python -m world.server --spawn-entity bob:5,5 --tick-duration 1000
 
-# In another terminal, run random agent
+# In another terminal, a settler agent
 cd ../agents
-uv run python -m agents.random_agent --entity bob
+uv run python -m agents.jev_agent --entity bob
 ```
 
 ### Wolf tunables in the world config
@@ -183,15 +184,13 @@ uv run python -m agents.random_agent --entity bob
 - `wolf_spawn_interval_ticks` (default 40, must be >= 1) - ticks between spawn
   attempts, so a killed wolf stays gone for at least that long.
 
-The defaults are the `wolves.py` module constants, so a config that says
-nothing behaves exactly as before. `WorldConfig.wolf_settings()` bundles the
-four into a frozen `WolfSettings`, which travels
-`run_server` -> `WorldServer` -> `TickLoop` -> `WolfSimulator`. Nothing reads
-`MAX_WOLVES` / `SPAWN_MIN_DISTANCE` / `SPAWN_MAX_DISTANCE` /
-`SPAWN_INTERVAL_TICKS` at spawn time any more; the simulator reads
-`self.settings`. `hamlet.toml` is the only config that overrides them (one
-wolf, 30-45 tiles, 120 ticks between spawn attempts - the 2026-09-20 run had a
-wolf alive essentially always). No agent-facing text states the interval.
+The defaults are the `wolves.py` module constants.
+`WorldConfig.wolf_settings()` bundles them into a frozen `WolfSettings`, which
+travels `run_server` -> `WorldServer` -> `TickLoop` -> `WolfSimulator`. Nothing
+reads `MAX_WOLVES` / `SPAWN_MIN_DISTANCE` / `SPAWN_MAX_DISTANCE` /
+`SPAWN_INTERVAL_TICKS` at spawn time; the simulator reads `self.settings`.
+`hamlet.toml` overrides them: one wolf, 30-45 tiles, 120 ticks between spawn
+attempts. No agent-facing text states the interval.
 
 ## Gotchas & Learnings
 
@@ -207,17 +206,10 @@ If observations are sent after processing, agents will always be one tick behind
 
 ### Proto Import Paths
 
-Generated `world_pb2_grpc.py` files have incorrect imports. After running `compile_proto.sh`, fix:
-
-```python
-# Change this:
-import world_pb2 as world__pb2
-
-# To this:
-from . import world_pb2 as world__pb2
-```
-
-This must be done in both `world/src/world/` and `agents/src/agents/`.
+`grpc_tools` writes an absolute `import world_pb2` into `world_pb2_grpc.py`,
+which is wrong for a module inside a package. `tools/compile_proto.sh` rewrites
+it to `from . import world_pb2 as world__pb2` in all three packages itself —
+there is no manual fix-up step.
 
 ### Proto Python Keywords
 
@@ -233,23 +225,11 @@ moved = pb.EntityMoved(entity_id=id, to=to_pos)
 getattr(moved, "from").CopyFrom(from_pos)
 ```
 
-### Agent Module Imports
-
-To avoid RuntimeWarning when running `python -m agents.random_agent`, use lazy imports in `__init__.py`:
-
-```python
-def __getattr__(name: str):
-    if name == "RandomAgent":
-        from .random_agent import RandomAgent
-        return RandomAgent
-    raise AttributeError(...)
-```
-
 ### gRPC thread pool
 
 Every `StreamObservations` call holds a worker thread for its whole lifetime.
-The pool is sized at 64 in `server.py`; with the old default of 10, twelve
-agents starved every unary RPC (renewals failed, leases expired, agents exited).
+The pool is sized at 64 in `server.py`; the gRPC default of 10 is far too small
+(it starves every unary RPC, so lease renewals fail and agents exit).
 
 ### Test Port Allocation
 
@@ -267,7 +247,7 @@ Port ranges in use:
 - gRPC: 50051 (default), 50098-50099 (tests)
 - WebSocket: 8765 (default), 18765-18766 (tests)
 
-## Architecture Decisions (Milestone 4)
+## Viewer WebSocket Bridge
 
 ### ViewerWebSocketService
 
@@ -302,16 +282,7 @@ Server now accepts `--ws-port` (default 8765):
 uv run python -m world.server --spawn-entity bob:5,5 --ws-port 8765
 ```
 
-## Future Considerations (Milestone 5+)
-
-### Line-of-Sight (Milestone 8)
-
-Will need to add:
-- Bresenham ray casting
-- Visibility filtering per observer
-- Enter/leave visibility events
-
-## Run Recording and Replay (Milestone 7)
+## Run Recording and Replay
 
 Contract: [docs/07_replay.md](../docs/07_replay.md). Every run is recorded to a
 run directory; the replay server serves it to the viewer over the live
@@ -332,9 +303,8 @@ WebSocket protocol.
   once at ERROR and disables recording; it never takes the run down.
 
 ```bash
-uv run python -m world.server --config foraging               # records to ../runs/<run id>
-uv run python -m world.server --config foraging --run-dir /tmp/run
-uv run python -m world.server --config foraging --no-record
+uv run python -m world.server --config hamlet                    # records to ../runs/<run id>
+uv run python -m world.server --config hamlet --run-dir /tmp/run
 ```
 
 `$BOBGAME_RUN_DIR` (exported by `dev.sh`) is the default when set.
@@ -416,10 +386,9 @@ get `contents`.
 
 Movement resolution treats a tile as free only when its occupant's own move
 succeeds. A follower whose leader lost a conflict fails with
-`destination_occupied`, and that failure propagates back along a chain. (Before
-this fix two settlers could end up on one tile, and the position index raised
-`KeyError` a few ticks later, killing the tick loop; the loop now also logs
-`tick_loop_crashed` with the traceback.)
+`destination_occupied`, and that failure propagates back along a chain. Two
+entities on one tile corrupt the position index and kill the tick loop a few
+ticks later; the loop logs `tick_loop_crashed` with the traceback if it happens.
 
 `World` keeps `_blocked_positions` / `_wolf_blocked_positions` (per-tile
 counts), maintained in `add_object`, `remove_object` and `update_object`. Use
@@ -488,40 +457,32 @@ the guard for intents the world injects itself. Waking on damage reads
 `combat.apply_damage`, which keeps combat unaware of sleep and makes
 starvation damage (applied in the food phase, just before) behave the same.
 
-**The hungry wake (2026-09-20, hamlet round 2).** `sleep.HUNGRY_WAKE_FOOD`
-(20) is one number read both ways: `_apply_sleep_intents` refuses a settler at
-or below it (`"too hungry to sleep: food F, and a sleeper wakes at food 20"`)
-and `_wake_reason` returns `hungry` when a non-collapsed sleeper falls to it.
-Waking ends the sleep, so it fires at most once per sleep, and a collapsed
-sleeper still ignores hunger entirely. The old line was food 0 both ways, and
-a settler slept from food 39 through 156 ticks and died four ticks after
-waking. The agent mirror is `agents/.../items.py: HUNGRY_WAKE_FOOD`, which
-feeds the planner prompt's sleep physics and Jev's `sleep:` option text.
+**Behaviour contracts.**
 
-**Ground sleep retune (2026-09-20, hamlet round 3).** Recovery is a rate, not
-an interval: `sleep.recovery_rate(on_bed, night)` returns `(points, ticks)`
-and `_recover_fatigue` sheds `points` on every tick divisible by `ticks`. The
-ground was 1 per 2 at night and 1 per 4 by day, which made a bedless settler
-sleep ~233 of a 300-tick day.
-
-**Sleep retune, take 2 (2026-09-20, hamlet round 4).** Round 3 was not enough:
-31-45% of all settler-ticks were still asleep and 70% of those were in
-daylight, clearing at the slow day rate a debt the 100-tick night cannot.
-The day rates went up, and the bed stays strictly ahead of the ground in both
-periods:
+- **The hungry wake.** `sleep.HUNGRY_WAKE_FOOD` (20) is one number read both
+  ways: `_apply_sleep_intents` refuses a settler at or below it (`"too hungry
+  to sleep: food F, and a sleeper wakes at food 20"`) and `_wake_reason`
+  returns `hungry` when a non-collapsed sleeper falls to it. Waking ends the
+  sleep, so it fires at most once per sleep; a collapsed sleeper ignores hunger
+  entirely.
+- **A minimum to lie down.** `sleep.MIN_SLEEP_FATIGUE` (20):
+  `_apply_sleep_intents` refuses a settler below it with `"not tired enough to
+  sleep: fatigue F, and sleep needs fatigue 20"`. Collapse at `max_fatigue` is
+  unaffected.
+- **Recovery is a rate, not an interval.** `sleep.recovery_rate(on_bed, night)`
+  returns `(points, ticks)` and `_recover_fatigue` sheds `points` on every tick
+  divisible by `ticks`. The bed stays strictly ahead of the ground in both
+  periods:
 
 | | night | day |
 |---|---|---|
 | `BED_*_RECOVERY` | (1, 1) = 1.00/tick | (2, 3) = 0.67/tick |
 | `GROUND_*_RECOVERY` | (2, 3) = 0.67/tick | (1, 2) = 0.50/tick |
 
-Also `sleep.MIN_SLEEP_FATIGUE` (20): `_apply_sleep_intents` refuses a settler
-below it with `"not tired enough to sleep: fatigue F, and sleep needs fatigue
-20"` (the old floor was 1, and one settler took ten sleeps of one or two ticks
-at fatigue 1). Collapse at `max_fatigue` is unaffected. The agent mirrors are
-`items.SLEEP_RECOVERY` / `items.sleep_recovery_text` and
-`items.MIN_SLEEP_FATIGUE`, which every prompt and option string is generated
-from; Jev is offered no `sleep:` option below the floor.
+The agent mirrors — `items.HUNGRY_WAKE_FOOD`, `items.MIN_SLEEP_FATIGUE`,
+`items.SLEEP_RECOVERY` / `items.sleep_recovery_text` — are what every prompt
+and option string is generated from, so a change here must be copied there;
+Jev is offered no `sleep:` option below the floor.
 
 `is_tired(entity)` (fatigue >= 60) is the one predicate other modules use:
 `stats.process_health_regen` skips the tired, and extraction and combat apply
@@ -546,7 +507,7 @@ order, opener first), `speaker`, `turn_started`, `opened_tick`, `opened_by`,
 `items.py` (`CONVERSATION*`).
 
 `process_conversation_phase` runs **once per tick after movement and combat**:
-it applies `open`, `accept`, `join`, `speak`, `pass` and `leave` in that order (each group
+it applies `open`, `hail`, `join`, `speak`, `pass` and `leave` in that order (each group
 sorted by entity id, so conflicts resolve lexicographically like every other
 conflict), then runs the lifecycle for every conversation — drop participants
 who died or walked out of adjacency, move the turn on when the speaker goes,
@@ -563,21 +524,6 @@ Utterances now carry a `conversation_id`: the opening line goes out on `local`,
 `speak` lines on the `conversation` channel (earshot = the `local` radius, so
 bystanders overhear). `conversation` is in `AUDIBLE_CHANNELS` but deliberately
 **not** in `SAY_CHANNELS`, so only a `ConverseIntent` can put a line on it.
-
-### Invitations ("open to talk", docs/09 section 8)
-
-A `SayIntent` with `open_to_talk` on `local` or `shout` (`INVITATION_CHANNELS`;
-the flag is ignored on `thought`) opens the speaker's invitation for
-`INVITATION_TICKS` ticks. The state is three `Entity` fields —
-`open_until_tick`, `invitation_text`, `invitation_tick` — read through
-`Entity.is_open_to_talk(tick)`; the proto, the viewer payload and the recorded
-tick carry only the derived boolean `open_to_talk`, so `entity_state`,
-`entity_to_proto` and their inverses all take the tick they describe.
-`converse` action `accept` (with `target_entity_id`) opens a conversation on a
-free tile adjacent to both, in ascending `(x, y)` order, with the inviter as
-opener and its invitation line as transcript entry 0, and emits two
-`EntityActed`s (`accept conv_N <target>` for the accepter, `join conv_N` for the
-inviter) and no utterance. Taking any seat, and dying, clears the invitation.
 
 ### Hailing (docs/09 section 9)
 
@@ -629,7 +575,7 @@ about `1 - t` of the map above it; tune thresholds as area fractions.
 Fresh water = rivers + fords + lakes; `split_ocean_and_lakes` labels open water
 and calls anything not touching the map border a lake.
 
-### Terrain fixes made alongside
+### Terrain invariants
 
 - `priority_flood_fill` adds `FILL_EPSILON` per step, so filled flats still
   drain. Without it rivers died a few hundred tiles from their source.
