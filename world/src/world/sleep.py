@@ -40,13 +40,14 @@ COLLAPSE_WAKE_FATIGUE = 70
 # --- Recovery --------------------------------------------------------------
 
 # Fatigue recovered per sleeping tick, as (points, ticks): "`points` fatigue
-# every `ticks` ticks". A bed is still the best place to sleep, but since
-# 2026-09-20 the ground is no longer so slow that a bedless settler has to
-# spend three quarters of the day lying down.
+# every `ticks` ticks". A bed is strictly faster than the ground in both
+# periods, and every period is fast enough that a settler need not lie down
+# for most of the daylight: before the 2026-09-20 retunes the ground was 1 per
+# 2 at night and 1 per 4 by day, and 31-45% of all settler-ticks were asleep.
 BED_NIGHT_RECOVERY = (1, 1)
-BED_DAY_RECOVERY = (1, 2)
+BED_DAY_RECOVERY = (2, 3)
 GROUND_NIGHT_RECOVERY = (2, 3)
-GROUND_DAY_RECOVERY = (1, 3)
+GROUND_DAY_RECOVERY = (1, 2)
 
 # `Entity.sleeping_on` when the sleeper lies on the bare ground.
 GROUND = ""
@@ -58,6 +59,13 @@ GROUND = ""
 # happens at most once per sleep. Before 2026-09-20 the line was food 0, and a
 # settler slept from food 39 through the night and died four ticks after waking.
 HUNGRY_WAKE_FOOD = 20
+
+# --- How tired you have to be to lie down --------------------------------
+
+# A settler will not fall asleep below this much fatigue. Before 2026-09-20 the
+# floor was 1, and one settler took ten sleeps of one or two ticks at fatigue
+# 1. Collapse is unaffected: it happens at max fatigue, whatever this says.
+MIN_SLEEP_FATIGUE = 20
 
 # --- Wake reasons ----------------------------------------------------------
 
@@ -170,8 +178,14 @@ def _apply_sleep_intents(
                 f"at food {HUNGRY_WAKE_FOOD}",
             )
             continue
-        if entity.fatigue <= 0:
-            events.acted(entity_id, "sleep", False, "not tired")
+        if entity.fatigue < MIN_SLEEP_FATIGUE:
+            events.acted(
+                entity_id,
+                "sleep",
+                False,
+                f"not tired enough to sleep: fatigue {entity.fatigue}, "
+                f"and sleep needs fatigue {MIN_SLEEP_FATIGUE}",
+            )
             continue
 
         if place != GROUND:

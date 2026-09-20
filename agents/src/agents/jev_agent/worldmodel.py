@@ -766,6 +766,24 @@ class WorldModel:
             self.settlement[1] - self.position[1],
         )
 
+    def nearest_water(self) -> Coord | None:
+        """The nearest water tile this actor has ever observed, or None.
+
+        The observation carries a floor type, not whether the water is fresh:
+        rivers, lakes and the sea are all `shallow_water` / `deep_water`. The
+        caller must word the fact as "water", not "fresh water".
+        """
+        centre = self.position
+        nearest: Coord | None = None
+        best = 0
+        for position, tile in self.tiles.items():
+            if tile.floor_type not in items.WATER_FLOOR_TYPES:
+                continue
+            distance = chebyshev(position, centre)
+            if nearest is None or distance < best:
+                nearest, best = position, distance
+        return nearest
+
     def objects_by_type(
         self, types: Iterable[str], *, origin: Coord | None = None
     ) -> list[ObjectInfo]:
@@ -867,7 +885,9 @@ class WorldModel:
         A settler that has been observed alive since it died has respawned, so
         its death is forgotten; a wolf id is never reused and stays dead.
         """
-        for death in reversed(self.deaths_seen):
+        # Snapshot: the loop body can call `_forget_death`, which rewrites the
+        # deque, and a live deque iterator refuses to be mutated under it.
+        for death in reversed(tuple(self.deaths_seen)):
             if death.entity_id != entity_id:
                 continue
             seen = self.entities.get(entity_id)
@@ -879,9 +899,11 @@ class WorldModel:
 
     def recent_deaths(self, limit: int = DEATHS_SHOWN) -> list[DeathSeen]:
         """The last `limit` deaths this actor saw that are still deaths."""
+        # `death_of` forgets the death of a body seen alive again, which
+        # rewrites `deaths_seen`; iterate a snapshot so that is allowed.
         found = [
             death
-            for death in reversed(self.deaths_seen)
+            for death in reversed(tuple(self.deaths_seen))
             if self.death_of(death.entity_id) is not None
         ]
         return list(reversed(found[:limit]))

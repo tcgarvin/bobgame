@@ -2444,14 +2444,25 @@ async def test_a_failed_craft_names_no_source_for_a_crafted_input(
 
 
 def test_the_source_text_is_generic_over_the_extraction_map() -> None:
-    assert items.source_text("clay") == (
-        "clay comes from clay_deposit (bare hands, faster with a pickaxe)"
+    assert items.source_text("clay").startswith(
+        "clay comes from clay_deposit (bare hands, faster with a pickaxe); "
     )
-    assert items.source_text("copper_ore") == (
-        "copper_ore comes from copper_vein (needs a pickaxe in hand)"
+    assert items.source_text("copper_ore").startswith(
+        "copper_ore comes from copper_vein (needs a pickaxe in hand); "
     )
     assert items.source_text("stone").startswith("stone comes from boulder or ")
     assert items.source_text("plank") == ""
+
+
+def test_the_source_text_says_where_the_source_grows() -> None:
+    """finn random-walked for 190 ticks looking for reeds he had never seen."""
+    assert items.source_text("fiber") == (
+        "fiber comes from reeds (bare hands); reeds grow on the banks and in "
+        "the shallows of fresh water (lakes, rivers and their fords), within "
+        "2 tiles of the water, and never within 12 tiles of the sea"
+    )
+    # Four rock types, one habitat: said once.
+    assert items.source_text("stone").count("rocks and boulders gather") == 1
 
 
 def test_look_lists_your_own_placed_pieces(world_model: WorldModel) -> None:
@@ -2633,6 +2644,36 @@ def test_a_settler_seen_alive_after_dying_is_no_longer_dead(
     assert world_model.death_of("bram") is None
 
 
+def test_recent_deaths_survives_forgetting_one_while_it_iterates(
+    world_model: WorldModel,
+) -> None:
+    """`recent_deaths` raised `deque mutated during iteration` on three turns.
+
+    `death_of` rewrites `deaths_seen` when a body has been seen alive again,
+    and `recent_deaths` calls it from inside its own loop over the deque.
+    """
+    _watch_a_wolf_die(world_model, tick=7)
+    world_model.update(
+        make_observation(
+            8,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("bram", (12, 10))],
+        )
+    )
+    world_model.update(
+        make_observation(9, make_entity("ada", (10, 10)), events=[died_event("bram")])
+    )
+    # bram respawns: the next `death_of("bram")` forgets his death.
+    world_model.update(
+        make_observation(
+            20,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("bram", (12, 10))],
+        )
+    )
+    assert [d.entity_id for d in world_model.recent_deaths()] == ["wolf_6"]
+
+
 def test_look_lists_the_wolves_you_saw_die(world_model: WorldModel) -> None:
     _watch_a_wolf_die(world_model)
     assert "wolves you saw die: wolf_6 (tick 7)" in describe_world(world_model)
@@ -2685,3 +2726,170 @@ def test_the_journal_writer_opens_with_the_planner_goal() -> None:
     opening = items.island_opening(6)
     assert settlement_narrative(6).startswith(opening)
     assert journal_narrative(6).startswith(opening)
+
+
+# --- Hamlet round 4 ---------------------------------------------------------
+
+
+def test_the_narrative_says_where_each_raw_source_grows() -> None:
+    """Nothing told a settler where a resource it had never seen grows."""
+    text = settlement_narrative(6)
+    assert "Where things are found" in text
+    assert "reeds grow on the banks and in the shallows of fresh water" in text
+    assert "clay deposits lie in tight patches 2 to 7 tiles back" in text
+    assert "berry bushes grow in thickets along the edges of woodland" in text
+    assert "Copper and iron veins sit in rock outcrops on high ground" in text
+
+
+def test_a_failed_craft_says_where_the_missing_material_grows(
+    world_model: WorldModel,
+) -> None:
+    lines = planner_module.missing_input_lines(world_model, RECIPES[items.BED])
+    text = "\n".join(lines)
+    assert "fiber comes from reeds (bare hands); reeds grow on the banks" in text
+    assert "you know of none yet" in text
+
+
+def _water_tiles(centre: tuple[int, int], water: tuple[int, int]) -> list[pb.Tile]:
+    tiles = make_tiles(centre)
+    tiles.append(
+        pb.Tile(
+            position=pb.Position(x=water[0], y=water[1]),
+            walkable=True,
+            opaque=False,
+            floor_type="shallow_water",
+        )
+    )
+    return tiles
+
+
+def test_an_unseen_water_bound_source_names_the_nearest_water_you_have_seen(
+    world_model: WorldModel,
+) -> None:
+    world_model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            tiles=_water_tiles((10, 10), (14, 12)),
+        )
+    )
+    assert world_model.nearest_water() == (14, 12)
+    text = "\n".join(
+        planner_module.missing_input_lines(world_model, RECIPES[items.BED])
+    )
+    assert "nearest water you have seen: (14, 12) (d4)" in text
+    # A material that does not grow by water gets no such line.
+    plank_text = "\n".join(
+        planner_module.missing_input_lines(world_model, RECIPES[items.WOOD_WALL])
+    )
+    assert "nearest water" not in plank_text
+
+
+async def test_a_refused_place_names_what_is_on_the_tile_and_the_free_sides(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    """Three blind `place door` calls all failed "target already holds an object"."""
+    bridge.model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10), inventory={"door": 1}),
+            objects=[make_object("wood_wall_16", "wood_wall", (11, 10))],
+        )
+    )
+    bridge.direct_result = (
+        "place door E -> place failed: target already holds an object"
+    )
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("place", {"kind": "door", "direction": "E"})):
+        result = await agent.run("go", deps=deps)
+    text = _returned_text(result)[0]
+    assert "(11, 10) holds wood_wall_16" in text
+    assert "neighbouring tiles that would take a door:" in text
+
+
+def _build_call_with_doors(kind: str, door: str) -> FunctionModel:
+    return one_tool_call(
+        "build",
+        {
+            "kind": kind,
+            "shape": "rect",
+            "x1": 10,
+            "y1": 12,
+            "x2": 13,
+            "y2": 15,
+            "max_ticks": 120,
+            "door": door,
+        },
+    )
+
+
+async def test_build_places_a_door_on_the_tiles_it_is_given(
+    world_model: WorldModel, tmp_path: Path
+) -> None:
+    """esme closed a doorless ring around the settlement's only workshop_table."""
+    bridge = CraftingBridge(world_model, {"wood": 60, "fiber": 4})
+    bridge.objects = [make_object("table_1", "workshop_table", (11, 10))]
+    bridge._observe()
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(model=_build_call_with_doors("wood_wall", "10,13")):
+        result = await agent.run("go", deps=deps)
+    # 12 perimeter tiles, one of them a door, so 11 walls and 1 door.
+    assert bridge.inventory["wood_wall"] == 11
+    assert bridge.inventory["door"] == 1
+    text = _returned_text(result)[0]
+    assert "doors (1 tile(s)):" in text
+    assert len(bridge.briefs) == 2
+
+
+async def test_a_door_tile_off_the_shape_is_refused(
+    world_model: WorldModel, tmp_path: Path
+) -> None:
+    bridge = CraftingBridge(world_model, {"wood": 60})
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    seen: list[str] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        last_part = messages[-1].parts[-1]
+        if isinstance(last_part, RetryPromptPart):
+            seen.append(str(last_part.content))
+            return ModelResponse(parts=[TextPart("done")])
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    "build",
+                    json.dumps(
+                        {
+                            "kind": "wood_wall",
+                            "shape": "rect",
+                            "x1": 10,
+                            "y1": 12,
+                            "x2": 13,
+                            "y2": 15,
+                            "door": "99,99",
+                        }
+                    ),
+                )
+            ]
+        )
+
+    agent = build_planner_agent("test")
+    with agent.override(model=FunctionModel(respond)):
+        await agent.run("go", deps=deps)
+    assert seen and "door tiles must be tiles of the shape itself" in seen[0]
+    assert not bridge.briefs
+
+
+async def test_a_door_that_cannot_be_made_leaves_the_tile_a_gap(
+    world_model: WorldModel, tmp_path: Path
+) -> None:
+    bridge = CraftingBridge(world_model, {"wood": 60})  # no fiber -> no rope -> no door
+    bridge.objects = [make_object("table_1", "workshop_table", (11, 10))]
+    bridge._observe()
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(model=_build_call_with_doors("wood_wall", "10,13")):
+        result = await agent.run("go", deps=deps)
+    text = _returned_text(result)[0]
+    assert "you carry no door" in text
+    assert "fiber comes from reeds" in text

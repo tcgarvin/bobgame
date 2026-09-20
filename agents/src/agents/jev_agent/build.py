@@ -341,18 +341,22 @@ class BuildExecutor:
             )
         return "\n".join(lines)
 
-    def geometry_lines(self, model: WorldModel) -> list[str]:
+    def geometry_lines(
+        self, model: WorldModel, extra_tiles: Sequence[Coord] = ()
+    ) -> list[str]:
         """What the standing pieces around this shape now form.
 
         Kept apart from `summary()` because it needs the world model, and the
         `StintDriver` protocol's summary deliberately takes nothing. Only
         walls and doors bound a room, so nothing is said about a road or a bed.
+        `extra_tiles` are tiles of the same structure built by another pass -
+        the door gaps in this shape - so the room fill sees the whole ring.
         """
         if not self.plan.blocks and self.plan.kind != items.DOOR:
             return []
         return build_geometry_lines(
             model,
-            self.plan.tiles,
+            (*self.plan.tiles, *extra_tiles),
             refused=sorted(self._sealing),
             stood_outside=self._avoided_seal,
         )

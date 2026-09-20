@@ -42,6 +42,8 @@ MAX_ROOM_TILES = 400
 MAX_CLUSTER_TILES = 400
 # How many gap or refused tiles a line names before it stops.
 TILES_NAMED = 4
+# How many objects standing inside an enclosed interior are named.
+INSIDE_OBJECTS_NAMED = 8
 # How many of the actor's own clusters `look` lists.
 OWN_PIECE_CLUSTERS_SHOWN = 6
 
@@ -306,6 +308,26 @@ def _tile_list(tiles: Sequence[Coord]) -> str:
     return named
 
 
+def inside_objects(model: WorldModel, room: Room) -> list[ObjectInfo]:
+    """Every known object standing on an interior tile of `room`, sorted by id."""
+    found = [obj for obj in model.objects.values() if obj.position in room.tiles]
+    found.sort(key=lambda obj: obj.object_id)
+    return found
+
+
+def _inside_line(model: WorldModel, room: Room) -> str:
+    """`"  inside: workshop_table_5, bed_11"`, capped, or `""` when bare."""
+    found = inside_objects(model, room)
+    if not found:
+        return ""
+    named = [obj.object_id for obj in found[:INSIDE_OBJECTS_NAMED]]
+    rest = len(found) - len(named)
+    text = ", ".join(named)
+    if rest > 0:
+        text += f", and {rest} more"
+    return f"  inside: {text}"
+
+
 def build_geometry_lines(
     model: WorldModel,
     plan_tiles: Sequence[Coord],
@@ -338,6 +360,9 @@ def build_geometry_lines(
             f"spanning {room.span}; doors: {room.doors}; gaps: {len(gaps)}; "
             f"you are {'inside' if inside else 'outside'}"
         )
+        inside_line = _inside_line(model, room)
+        if inside_line:
+            lines.append(inside_line)
         if room.doors == 0 and not gaps:
             entrance = "the interior has no entrance: no door and no gap"
             if stood_outside and not inside:

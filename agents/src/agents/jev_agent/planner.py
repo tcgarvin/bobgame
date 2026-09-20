@@ -68,13 +68,23 @@ from .build import (
     BuildExecutor,
     BuildPlan,
     BuildPlanError,
+    SHAPE_TILES,
     SHAPES,
     build_brief_text,
     make_plan,
     missing_pieces_text,
+    plan_tiles,
 )
 from .enclosure import enclosed_fact, own_pieces_line
-from .geometry import NAME_TO_DIRECTION, NO_DIRECTION, Coord, chebyshev
+from .geometry import (
+    NAME_TO_DIRECTION,
+    NO_DIRECTION,
+    ORDERED_DIRECTIONS,
+    Coord,
+    chebyshev,
+    direction_name,
+    offset,
+)
 from .pathfinding import NO_PATH, path_length
 from .options import (
     MAX_BRIEF_HAILS,
@@ -86,6 +96,8 @@ from .options import (
     WOLF_ALERT_RADIUS,
     BriefHail,
     TravelState,
+    can_place_ground,
+    can_place_structure,
 )
 from .pricing import CostLedger, usage_from_messages
 from .stint import Brief, StintDriver, StintReport, never_ends, was_interrupted
@@ -205,7 +217,8 @@ The day and sleep:
   night and {items.sleep_recovery_text(True, False)} by day; the ground recovers {items.sleep_recovery_text(False, True)} at night
   and {items.sleep_recovery_text(False, False)} by day. On a bed you also heal 1 health every
   {items.REGEN_INTERVAL_TICKS} ticks while you sleep.
-- One sleeper per bed. Falling asleep needs food above {items.HUNGRY_WAKE_FOOD} and fatigue above 0.
+- One sleeper per bed. Falling asleep needs food above {items.HUNGRY_WAKE_FOOD} and fatigue
+  at least {items.MIN_SLEEP_FATIGUE}; below that the world refuses the `sleep` and no tick is spent.
   While you are asleep nothing you or Jev does reaches the world, food keeps
   dropping, and you wake at fatigue 0, when something damages you, when your
   food falls to {items.HUNGRY_WAKE_FOOD}, when the bed under you is removed, or on `wake`. It is
@@ -309,18 +322,19 @@ Reflex:
 Materials:
 - wood comes from a tree (4 units), faster with an axe.
 - stone comes from rocks and boulders (1 to 6 units), faster with a pickaxe.
-- fiber comes from reeds (3 units) at the water's edge; no tool helps.
-- clay comes from a clay deposit (6 units) on river banks and lake shores,
-  faster with a pickaxe.
+- fiber comes from reeds (3 units); no tool helps.
+- clay comes from a clay deposit (6 units), faster with a pickaxe.
 - copper_ore comes from a copper_vein (4 units) and iron_ore from an iron_vein
-  (4 units). Veins sit in the rock on high ground, never within 60 tiles of the
-  settlement site. A copper_vein needs a wielded pickaxe, copper_pickaxe or
+  (4 units). A copper_vein needs a wielded pickaxe, copper_pickaxe or
   iron_pickaxe; an iron_vein needs a copper_pickaxe or an iron_pickaxe. Without
   one in your hand the extraction fails.
 - Extracting is work: {items.EXTRACT_THRESHOLD} work makes one unit, and dismantling a placed piece
   takes {items.DISMANTLE_WORK} extract actions. One action adds 1 work bare-handed, 3 with an
   axe or pickaxe, 4 with a copper one, 5 with an iron one. An axe only counts
   on trees; a pickaxe on rocks, clay and veins.
+
+Where things are found (where each kind of thing grows on this island):
+{items.habitat_table_text()}
 
 Stations and work:
 - A recipe with a station only works while you stand on or next to a placed one
@@ -1175,7 +1189,24 @@ def _source_lines(
         )
     if len(lines) == 1:
         lines.append("  you know of none yet")
+        lines.extend(_water_hint_lines(model, kind))
     return lines
+
+
+def _water_hint_lines(model: WorldModel, kind: str) -> list[str]:
+    """For a water-bound material nothing known yields, where the water is.
+
+    The habitat sentence says the stuff grows by fresh water; this says which
+    water this settler has actually seen. The observation does not label water
+    fresh or salt, so the line says "water" and nothing more.
+    """
+    if not items.is_water_bound(kind):
+        return []
+    water = model.nearest_water()
+    if water is None:
+        return []
+    distance = chebyshev(water, model.self_info.position)
+    return [f"  nearest water you have seen: {water} (d{distance})"]
 
 
 def missing_input_lines(model: WorldModel, recipe: items.Recipe) -> list[str]:
@@ -1339,9 +1370,18 @@ async def _stock_one_to_place(ctx: RunContext[PlannerDeps], kind: str) -> list[s
     return lines
 
 
-async def _run_build(
+@dataclass
+class _PhaseResult:
+    """What one shape's worth of crafting and building produced."""
+
+    lines: list[str]
+    executor: BuildExecutor | None
+    ticks_used: int
+
+
+async def _build_phase(
     ctx: RunContext[PlannerDeps], plan: BuildPlan, max_ticks: int
-) -> str:
+) -> _PhaseResult:
     """Craft what the shape needs, build it, and craft again when it runs dry.
 
     Crafting and building share one tick budget: every craft action and every
@@ -1365,7 +1405,7 @@ async def _run_build(
         refusal = [missing_pieces_text(plan, bridge.model.self_info.inventory)]
         if made.stopped:
             refusal.append(f"nothing crafted: {made.stopped}")
-        return "\n".join(refusal)
+        return _PhaseResult(refusal, None, max_ticks - ticks_left)
 
     executor = BuildExecutor(plan)
     instruction, success = build_brief_text(plan)
@@ -1398,12 +1438,74 @@ async def _run_build(
             f"no ticks left to build: crafting used the whole "
             f"{max_ticks}-tick budget"
         )
-        return "\n".join(lines)
+        return _PhaseResult(lines, executor, max_ticks - ticks_left)
     lines.append(report.to_text())
     lines.append(executor.summary())
-    lines.extend(executor.geometry_lines(bridge.model))
     if report.end_reason == BUILD_OUT_OF_ITEMS and made.stopped:
         lines.append(f"  could not craft more {plan.kind}: {made.stopped}")
+    return _PhaseResult(lines, executor, max_ticks - ticks_left)
+
+
+def _door_plan(
+    kind: str,
+    shape: str,
+    start: Coord,
+    end: Coord,
+    tiles: str,
+    doors: Sequence[Coord],
+) -> BuildPlan | None:
+    """The door pass for a shape, or None when no door tile was asked for.
+
+    Raises:
+        BuildPlanError: when `kind` is already a door, or a door tile is not
+            one of the shape's own tiles.
+    """
+    if not doors:
+        return None
+    if kind == items.DOOR:
+        raise BuildPlanError("the whole shape is already doors; drop the door argument")
+    on_shape = set(plan_tiles(shape, start, end, parse_tile_list(tiles)))
+    stray = [tile for tile in doors if tile not in on_shape]
+    if stray:
+        named = "; ".join(f"{x},{y}" for x, y in stray)
+        raise BuildPlanError(
+            f"door tiles must be tiles of the shape itself; these are not: {named}"
+        )
+    return make_plan(items.DOOR, SHAPE_TILES, start, end, explicit=list(doors))
+
+
+async def _run_build(
+    ctx: RunContext[PlannerDeps],
+    plan: BuildPlan,
+    max_ticks: int,
+    door_plan: BuildPlan | None = None,
+) -> str:
+    """Build the shape, then the doors in it, then say what the pieces form.
+
+    The door tiles are kept out of the main shape, so the wall run leaves them
+    open and the door pass fills them. A door pass that cannot craft a door
+    leaves the tile as a gap and says what it was short of.
+    """
+    model = ctx.deps.bridge.model
+    main = await _build_phase(ctx, plan, max_ticks)
+    lines = list(main.lines)
+    door_tiles: list[Coord] = []
+
+    if door_plan is not None:
+        door_ticks = max_ticks - main.ticks_used
+        if door_ticks <= 0:
+            lines.append(
+                f"doors: no ticks left for the {len(door_plan.tiles)} door "
+                f"tile(s); they are still gaps"
+            )
+        else:
+            doors = await _build_phase(ctx, door_plan, door_ticks)
+            lines.append(f"doors ({len(door_plan.tiles)} tile(s)):")
+            lines.extend(f"  {line}" for line in doors.lines)
+            door_tiles.extend(door_plan.tiles)
+
+    if main.executor is not None:
+        lines.extend(main.executor.geometry_lines(model, extra_tiles=door_tiles))
     return "\n".join(lines)
 
 
@@ -1544,6 +1646,7 @@ def build_planner_agent(
         max_ticks: int = 60,
         skip: str = "",
         tiles: str = "",
+        door: str = "",
     ) -> str:
         """Build a shape out of one kind of piece, placing it tile by tile.
 
@@ -1571,17 +1674,25 @@ def build_planner_agent(
             x2: second corner or line end, map x.
             y2: second corner or line end, map y.
             max_ticks: tick budget; roughly two ticks per tile plus the walk.
-            skip: tiles to leave out, as "x,y; x,y" - this is how you leave the
-                door gap in a wall ring.
+            skip: tiles to leave out entirely, as "x,y; x,y". Nothing is placed
+                there and nothing is crafted for them.
             tiles: the explicit tile list for shape "tiles", as "x,y; x,y".
+            door: tiles of this shape, as "x,y; x,y", that get a door instead
+                of `kind`. Each must be one of the shape's own tiles. The
+                doors are placed after the rest of the shape, out of the same
+                tick budget, and are crafted the same way `kind` is. A door
+                that cannot be made leaves its tile empty.
 
         Returns:
             What was crafted, the stint report, and what was placed, what was
             skipped and why the build stopped: build_done, build_out_of_items,
             build_blocked, build_danger, build_would_seal_you_in or
             ticks_exhausted. A build that runs out of pieces it cannot make
-            says how many more it needs and the recipe for them.
+            says how many more it needs and the recipe for them. Then, for a
+            shape of walls or doors, what the standing pieces now enclose: the
+            interior, its doors and gaps, and the objects inside it.
         """
+        doors = parse_tile_list(door)
         try:
             plan = make_plan(
                 kind=kind,
@@ -1589,17 +1700,65 @@ def build_planner_agent(
                 start=(x1, y1),
                 end=(x2, y2),
                 explicit=parse_tile_list(tiles),
-                skip=parse_tile_list(skip),
+                skip=[*parse_tile_list(skip), *doors],
             )
+            door_plan = _door_plan(kind, shape, (x1, y1), (x2, y2), tiles, doors)
         except BuildPlanError as error:
             raise ModelRetry(str(error)) from error
-        return await _run_build(ctx, plan, max(1, max_ticks))
+        return await _run_build(ctx, plan, max(1, max_ticks), door_plan)
 
     _register_single_tick_tools(tools)
     _register_conversation_tools(tools)
     _register_reflex_tools(tools)
     _register_memory_tools(tools)
     return agent
+
+
+def _tile_occupants_text(model: WorldModel, target: Coord) -> str:
+    """What is standing on `target`, as the planner's own model sees it."""
+    parts = [obj.object_id for obj in model.object_at(target)]
+    parts.extend(
+        entity.entity_id
+        for entity in model.entities_near(VIEW_RADIUS)
+        if entity.position == target
+    )
+    tile = model.tiles.get(target)
+    if tile is not None and not tile.walkable:
+        parts.append(f"{tile.floor_type} you cannot stand on")
+    if not parts:
+        if tile is None:
+            return f"{target} is not in your model of the world"
+        return f"{target} looks empty to you"
+    return f"{target} holds {', '.join(parts)}"
+
+
+def _free_direction_text(model: WorldModel, kind: str) -> str:
+    """Which neighbouring directions would take `kind`, for the layer it is on."""
+    position = model.position
+    check = can_place_ground if items.is_ground_kind(kind) else can_place_structure
+    free = [
+        direction_name(direction)
+        for direction in ORDERED_DIRECTIONS
+        if check(model, offset(position, direction))
+    ]
+    if not free:
+        return f"no neighbouring tile would take a {kind} either"
+    return f"neighbouring tiles that would take a {kind}: {', '.join(free)}"
+
+
+def place_failure_lines(model: WorldModel, kind: str, direction: pb.Direction) -> str:
+    """Why a refused placement was refused, from the model, plus the free sides.
+
+    The world's own refusal says "target already holds an object" and nothing
+    more, so a planner that cannot see the tile places blind; three blind
+    `place door` calls in the 2026-09-20 run all failed that way.
+    """
+    target = (
+        model.position
+        if direction == NO_DIRECTION
+        else offset(model.position, direction)
+    )
+    return f"{_tile_occupants_text(model, target)}; {_free_direction_text(model, kind)}"
 
 
 def action_succeeded(outcome: str) -> bool:
@@ -2305,12 +2464,13 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
             lines.extend(await _stock_one_to_place(ctx, kind))
             if _carried(ctx, kind) <= 0:
                 return "\n".join(lines)
-        lines.append(
-            await ctx.deps.bridge.direct_action(
-                pb.Intent(place=pb.PlaceIntent(kind=kind, direction=value)),
-                f"place {kind} {direction or 'here'}",
-            )
+        outcome = await ctx.deps.bridge.direct_action(
+            pb.Intent(place=pb.PlaceIntent(kind=kind, direction=value)),
+            f"place {kind} {direction or 'here'}",
         )
+        lines.append(outcome)
+        if not action_succeeded(outcome):
+            lines.append(place_failure_lines(ctx.deps.bridge.model, kind, value))
         return "\n".join(lines)
 
     @tools.tool
@@ -2365,6 +2525,7 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         )
         lines.append(placed)
         if not action_succeeded(placed):
+            lines.append(place_failure_lines(bridge.model, items.SIGN, value))
             return "\n".join(lines)
         match = SIGN_ID_RE.search(placed)
         if match is None:

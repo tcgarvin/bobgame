@@ -219,6 +219,27 @@ runs stay replayable because recordings carry their own objects.
   and a build that runs dry ends its report with `carrying now` and
   `short by` lines of the same form (`BuildExecutor._supply_lines`,
   `supply_text`, `missing_pieces_text` in `jev_agent/build.py`).
+- **Doors in a build (2026-09-20, hamlet round 4).** `build(..., door="x,y;
+  x,y")` names tiles of the shape that get a `door` instead of `kind`. Those
+  tiles are added to the main plan's `skip`, so the wall run leaves them open,
+  and a second pass (`planner._door_plan` -> `planner._build_phase` with a
+  `tiles` plan of doors) fills them out of the same `max_ticks`, crafting the
+  doors through `_craft_chain` exactly as the walls are crafted. A door tile
+  that is not on the shape is a `ModelRetry`; `kind="door"` plus `door=` is
+  refused. A door that cannot be made leaves its tile a gap and the result
+  carries the door's shortfall and `items.source_text` lines. The closing
+  geometry lines are computed over the walls **and** the door tiles together
+  (`BuildExecutor.geometry_lines(model, extra_tiles=...)`), so a ring with a
+  door reads `doors: 1`, and an enclosed interior now also lists the objects
+  standing in it (`inside: bed_11, workshop_table_5`, capped at
+  `enclosure.INSIDE_OBJECTS_NAMED` = 8). esme closed a doorless 4x4 ring with
+  the settlement's only workshop_table inside it.
+- **A refused `place` names the occupant (round 4).** The world's own refusal
+  is only `"target already holds an object"`. `planner.place_failure_lines`
+  adds, from the world model, what is on the target tile
+  (`(1549, 971) holds wood_wall_16`, an entity id, or the floor type when the
+  terrain will not take it) and which neighbouring directions would take that
+  kind for its layer. `place` and `place_sign` both append it.
 
 ## Viewer
 

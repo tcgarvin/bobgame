@@ -250,7 +250,122 @@ def source_text(kind: str) -> str:
     parts = ", ".join(
         f"{' or '.join(types)} ({method})" for method, types in by_method.items()
     )
-    return f"{kind} comes from {parts}"
+    sentence = f"{kind} comes from {parts}"
+    habitats = habitat_lines(kind)
+    if habitats:
+        sentence = "; ".join([sentence, *habitats])
+    return sentence
+
+
+# --- Where things grow (mirrors world/terrain/objects.py and its config) -----
+#
+# The numbers are `ObjectPlacementConfig` in `world/src/world/terrain/config.py`
+# and `ORE_EXCLUSION_RADIUS` in `world/src/world/settlement.py`. "Fresh water"
+# is what the generator's `dist_to_fresh` field measures: lakes, rivers and
+# the fords across them, never the sea.
+
+# `reed_bank_width`: how far from fresh water a bank reed grows.
+REED_BANK_WIDTH = 2
+# `reed_coast_exclusion`: no reeds this close to the ocean.
+REED_COAST_EXCLUSION = 12
+# `clay_min_distance` / `clay_max_distance`: the band back from fresh water.
+CLAY_MIN_DISTANCE = 2
+CLAY_MAX_DISTANCE = 7
+# `bush_water_min_distance` / `bush_water_max_distance`.
+BUSH_WATER_MIN_DISTANCE = 4
+BUSH_WATER_MAX_DISTANCE = 60
+# `tree_coast_distance`: trees reach full density this far in from the ocean.
+TREE_COAST_DISTANCE = 40
+# `settlement.ORE_EXCLUSION_RADIUS`: no vein survives this close to the site.
+ORE_EXCLUSION_RADIUS = 60
+
+_VEIN_HABITAT = (
+    "veins sit in rock outcrops on high ground - ridges, hillsides and "
+    f"mountain feet - and never within {ORE_EXCLUSION_RADIUS} tiles of the "
+    "settlement site"
+)
+
+# object_type -> where on the island that object grows or sits. Physics, not
+# advice: every clause restates a rule the terrain generator actually applies.
+HABITAT_TEXT: Mapping[str, str] = {
+    REEDS: (
+        "reeds grow on the banks and in the shallows of fresh water (lakes, "
+        f"rivers and their fords), within {REED_BANK_WIDTH} tiles of the "
+        f"water, and never within {REED_COAST_EXCLUSION} tiles of the sea"
+    ),
+    CLAY_DEPOSIT: (
+        f"clay deposits lie in tight patches {CLAY_MIN_DISTANCE} to "
+        f"{CLAY_MAX_DISTANCE} tiles back from fresh water, on grass or dirt"
+    ),
+    TREE: (
+        "trees grow in stands and copses inland, thinning out within "
+        f"{TREE_COAST_DISTANCE} tiles of the sea and on stony outcrops; they "
+        "come right down to lake and river banks"
+    ),
+    BUSH: (
+        "berry bushes grow in thickets along the edges of woodland, at least "
+        f"{BUSH_WATER_MIN_DISTANCE} tiles from any water and thinning out "
+        f"beyond {BUSH_WATER_MAX_DISTANCE} tiles from it"
+    ),
+    COPPER_VEIN: f"copper {_VEIN_HABITAT}",
+    IRON_VEIN: f"iron {_VEIN_HABITAT}",
+}
+HABITAT_TEXT = {
+    **HABITAT_TEXT,
+    **{
+        rock: (
+            "rocks and boulders gather in outcrops along ridges and at "
+            "mountain feet, with a thin scatter of strays on open ground"
+        )
+        for rock in ROCK_TYPES
+    },
+}
+
+# Object types whose habitat is tied to fresh water, so knowing where the
+# nearest water is narrows the search.
+WATER_BOUND_TYPES: frozenset[str] = frozenset({REEDS, CLAY_DEPOSIT})
+
+# `Tile.floor_type` values that are water (`world/terrain_types.py`). The
+# observation does not say whether a water tile is fresh or salt, so anything
+# built on this set must say "water", not "fresh water".
+WATER_FLOOR_TYPES: frozenset[str] = frozenset({"shallow_water", "deep_water"})
+
+
+def habitat_text(object_type: str) -> str:
+    """Where `object_type` is found on the island, or `""` if no rule is stated."""
+    return HABITAT_TEXT.get(object_type, "")
+
+
+def habitat_lines(kind: str) -> list[str]:
+    """The distinct habitat sentences for every object type yielding `kind`."""
+    seen: list[str] = []
+    for object_type in source_object_types(kind):
+        text = habitat_text(object_type)
+        if text and text not in seen:
+            seen.append(text)
+    return seen
+
+
+def is_water_bound(kind: str) -> bool:
+    """Whether every source of `kind` grows within a few tiles of fresh water."""
+    sources = source_object_types(kind)
+    return bool(sources) and all(
+        object_type in WATER_BOUND_TYPES for object_type in sources
+    )
+
+
+def habitat_table_text() -> str:
+    """ "Where things are found" as prompt lines, one per habitat, deduplicated."""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for object_type in (TREE, BUSH, REEDS, CLAY_DEPOSIT, *sorted(ROCK_TYPES)):
+        text = habitat_text(object_type)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        lines.append(f"  {text}.")
+    lines.append(f"  Copper and iron {_VEIN_HABITAT}.")
+    return "\n".join(lines)
 
 
 # --- Combat and speech (mirrors world/items.py, world/wolves.py) -------------
@@ -316,6 +431,9 @@ REGEN_INTERVAL_TICKS = 5
 # at all (`world/sleep.py`, `HUNGRY_WAKE_FOOD`). One coherent rule: you do not
 # lie down that hungry, and if you get that hungry asleep, you wake.
 HUNGRY_WAKE_FOOD = 20
+# Fatigue below which the world refuses a `sleep` (`world/sleep.py`,
+# `MIN_SLEEP_FATIGUE`). Collapse at MAX_FATIGUE is unaffected.
+MIN_SLEEP_FATIGUE = 20
 
 FRESH = "fresh"
 TIRED = "tired"
@@ -326,9 +444,9 @@ EXHAUSTED = "exhausted"
 # GROUND_NIGHT_RECOVERY, GROUND_DAY_RECOVERY.
 SLEEP_RECOVERY: Mapping[tuple[bool, bool], tuple[int, int]] = {
     (True, True): (1, 1),
-    (True, False): (1, 2),
+    (True, False): (2, 3),
     (False, True): (2, 3),
-    (False, False): (1, 3),
+    (False, False): (1, 2),
 }
 
 

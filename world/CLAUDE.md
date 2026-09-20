@@ -498,16 +498,30 @@ a settler slept from food 39 through 156 ticks and died four ticks after
 waking. The agent mirror is `agents/.../items.py: HUNGRY_WAKE_FOOD`, which
 feeds the planner prompt's sleep physics and Jev's `sleep:` option text.
 
-**Ground sleep retune (2026-09-20, hamlet round 3).** Recovery is now a rate,
-not an interval: `sleep.recovery_rate(on_bed, night)` returns
-`(points, ticks)` from `BED_NIGHT_RECOVERY` (1, 1), `BED_DAY_RECOVERY` (1, 2),
-`GROUND_NIGHT_RECOVERY` (2, 3) and `GROUND_DAY_RECOVERY` (1, 3), and
-`_recover_fatigue` sheds `points` on every tick divisible by `ticks`. The bed
-numbers are unchanged; the ground was 1 per 2 at night and 1 per 4 by day,
-which made a bedless settler sleep ~233 of a 300-tick day (41% of settler-ticks
-in the run were spent asleep, and a long ground sleep cost ~50 food). The
-agent mirror is `items.SLEEP_RECOVERY` / `items.sleep_recovery_text`, which
-every prompt and option string is generated from.
+**Ground sleep retune (2026-09-20, hamlet round 3).** Recovery is a rate, not
+an interval: `sleep.recovery_rate(on_bed, night)` returns `(points, ticks)`
+and `_recover_fatigue` sheds `points` on every tick divisible by `ticks`. The
+ground was 1 per 2 at night and 1 per 4 by day, which made a bedless settler
+sleep ~233 of a 300-tick day.
+
+**Sleep retune, take 2 (2026-09-20, hamlet round 4).** Round 3 was not enough:
+31-45% of all settler-ticks were still asleep and 70% of those were in
+daylight, clearing at the slow day rate a debt the 100-tick night cannot.
+The day rates went up, and the bed stays strictly ahead of the ground in both
+periods:
+
+| | night | day |
+|---|---|---|
+| `BED_*_RECOVERY` | (1, 1) = 1.00/tick | (2, 3) = 0.67/tick |
+| `GROUND_*_RECOVERY` | (2, 3) = 0.67/tick | (1, 2) = 0.50/tick |
+
+Also `sleep.MIN_SLEEP_FATIGUE` (20): `_apply_sleep_intents` refuses a settler
+below it with `"not tired enough to sleep: fatigue F, and sleep needs fatigue
+20"` (the old floor was 1, and one settler took ten sleeps of one or two ticks
+at fatigue 1). Collapse at `max_fatigue` is unaffected. The agent mirrors are
+`items.SLEEP_RECOVERY` / `items.sleep_recovery_text` and
+`items.MIN_SLEEP_FATIGUE`, which every prompt and option string is generated
+from; Jev is offered no `sleep:` option below the floor.
 
 `is_tired(entity)` (fatigue >= 60) is the one predicate other modules use:
 `stats.process_health_regen` skips the tired, and extraction and combat apply

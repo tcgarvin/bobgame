@@ -161,9 +161,17 @@ New intents: `SleepIntent { string object_id = 1; }` (`Intent.sleep = 20`) and
 the sleeper; empty means sleeping on the ground where the entity stands.
 One sleeper per bed (lexicographically smallest entity id wins on the same
 tick; a bed already occupied by a sleeper fails with `"<bed> is taken"`).
-Sleeping needs food above `HUNGRY_WAKE_FOOD` (20) and fatigue above 0
-(`"not tired"`). Below the food line the refusal names both numbers:
-`"too hungry to sleep: food F, and a sleeper wakes at food 20"`.
+Sleeping needs food above `HUNGRY_WAKE_FOOD` (20) and fatigue at least
+`MIN_SLEEP_FATIGUE` (20). Below the food line the refusal names both numbers:
+`"too hungry to sleep: food F, and a sleeper wakes at food 20"`. Below the
+fatigue line it says `"not tired enough to sleep: fatigue F, and sleep needs
+fatigue 20"`.
+
+**Changed 2026-09-20 (hamlet round 4).** The fatigue floor used to be 1; one
+settler took ten sleeps of one or two ticks at fatigue 1. `MIN_SLEEP_FATIGUE`
+gates the `SleepIntent` only: collapse still happens at `max_fatigue` whatever
+it says, and Jev's `sleep:` options are withheld below it
+(`agents/.../options.py`, `items.MIN_SLEEP_FATIGUE`).
 
 **Changed 2026-09-20 (hamlet round 2).** The line used to be food 0 both
 ways. A settler called `sleep` at food 39 and health 2, the world kept him
@@ -180,12 +188,19 @@ Fatigue recovery while asleep (`recovery_rate(on_bed, night)` returns
 
 | Where | Night | Day |
 |-------|-------|-----|
-| bed | 1 per tick | 1 per 2 ticks |
-| ground | 2 per 3 ticks | 1 per 3 ticks |
+| bed | 1 per tick (1.00/tick) | 2 per 3 ticks (0.67/tick) |
+| ground | 2 per 3 ticks (0.67/tick) | 1 per 2 ticks (0.50/tick) |
+
+A bed is strictly faster than the ground in both periods, and night is
+strictly faster than day in both places.
 
 The ground rates were raised on 2026-09-20 (Hamlet-run fixes, round 3): at the
 old 1-per-2/1-per-4 a bedless settler had to sleep about 233 of a day's 300
-ticks to clear the ~83 fatigue a day costs, and lost ~50 food doing it.
+ticks to clear the ~83 fatigue a day costs, and lost ~50 food doing it. Round 4
+raised the day rates again — ground day 1 per 3 -> 1 per 2, and bed day 1 per 2
+-> 2 per 3 to keep the bed ahead of it — because 31-45% of all settler-ticks
+were still spent asleep and 70% of those were in daylight, finishing at the
+slow day rate a debt the 100-tick night could not clear.
 
 A bed sleeper also heals 1 health every `REGEN_INTERVAL_TICKS` (5) regardless
 of food and fatigue. A ground sleeper heals only through the ordinary regen

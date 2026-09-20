@@ -219,6 +219,25 @@ class TestBuildGeometryLines:
         assert "these walls enclose nothing yet: 2 gap(s) remain at" in text
         assert "(9, 10)" in text and "(10, 9)" in text
 
+    def test_objects_standing_in_the_interior_are_listed(self) -> None:
+        """esme walled the settlement's only workshop_table in with no door."""
+        ring = ring_around((10, 10), radius=2)
+        model = model_with(
+            position=(15, 15),
+            walls=ring,
+            extra=[
+                make_object("workshop_table_5", items.WORKSHOP_TABLE, (10, 10)),
+                make_object("bed_11", items.BED, (11, 10)),
+            ],
+        )
+        text = "\n".join(build_geometry_lines(model, ring))
+        assert "inside: bed_11, workshop_table_5" in text
+
+    def test_an_empty_interior_says_nothing_about_its_contents(self) -> None:
+        ring = ring_around((10, 10), radius=2)
+        model = model_with(position=(15, 15), walls=ring)
+        assert "inside:" not in "\n".join(build_geometry_lines(model, ring))
+
     def test_refused_tiles_are_named(self) -> None:
         ring = ring_around((10, 10), radius=1)
         gate = (10, 9)

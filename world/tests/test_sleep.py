@@ -9,6 +9,7 @@ from world.recording import tick_record
 from world.sleep import (
     COLLAPSE_WAKE_FATIGUE,
     HUNGRY_WAKE_FOOD,
+    MIN_SLEEP_FATIGUE,
     RESPAWN_FATIGUE,
     TIRED_FATIGUE,
     is_tired,
@@ -232,7 +233,26 @@ class TestSleepIntent:
         world = _world()
         _with_settler(world, fatigue=0)
         events = _sleep(world, "bob")
-        assert _details(events, "sleep") == ["not tired"]
+        assert _details(events, "sleep") == [
+            "not tired enough to sleep: fatigue 0, and sleep needs fatigue 20"
+        ]
+
+    def test_below_the_minimum_fatigue_is_refused(self) -> None:
+        """A settler took ten sleeps of one or two ticks at fatigue 1."""
+        world = _world()
+        _with_settler(world, fatigue=MIN_SLEEP_FATIGUE - 1)
+        events = _sleep(world, "bob")
+        assert _details(events, "sleep") == [
+            f"not tired enough to sleep: fatigue {MIN_SLEEP_FATIGUE - 1}, "
+            f"and sleep needs fatigue {MIN_SLEEP_FATIGUE}"
+        ]
+        assert not world.get_entity("bob").asleep
+
+    def test_at_the_minimum_fatigue_it_sleeps(self) -> None:
+        world = _world()
+        _with_settler(world, fatigue=MIN_SLEEP_FATIGUE)
+        _sleep(world, "bob")
+        assert world.get_entity("bob").asleep
 
     def test_bed_contention_smallest_id_wins(self) -> None:
         world = _world()
@@ -287,10 +307,10 @@ class TestRecovery:
             ("bed_1", 202, 39),
             ("", 201, 38),  # ground at night: two per three ticks
             ("", 202, 40),
-            ("bed_1", 101, 40),  # bed by day: one per two ticks
-            ("bed_1", 102, 39),
-            ("", 102, 39),  # ground by day: one per three ticks
-            ("", 104, 40),
+            ("bed_1", 101, 40),  # bed by day: two per three ticks
+            ("bed_1", 102, 38),
+            ("", 102, 39),  # ground by day: one per two ticks
+            ("", 103, 40),
         ],
     )
     def test_recovery_rates(self, sleeping_on: str, tick: int, expected: int) -> None:

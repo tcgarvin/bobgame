@@ -686,8 +686,8 @@ def test_the_sleep_descriptions_carry_the_recovery_for_the_time_of_day() -> None
         objects=[make_object("bed_1", "bed", (11, 10))],
     )
     by_day = options_to_criteria(enumerate_options(day))
-    assert "1 fatigue per 2 ticks" in by_day["sleep:bed_1"]
-    assert "1 fatigue per 3 ticks" in by_day["sleep:ground"]
+    assert "2 fatigue per 3 ticks" in by_day["sleep:bed_1"]
+    assert "1 fatigue per 2 ticks" in by_day["sleep:ground"]
 
     night = WorldModel("ada")
     night.update(
@@ -840,3 +840,55 @@ class TestPlaceStepsWhenThereIsNoPath:
         options = enumerate_options(model, places={"far_off": (400, 400)})
         option = next(o for o in options if o.key == "step_towards:far_off")
         assert "beyond what you can see" in option.description
+
+
+# --- Hamlet round 4: walking to a tile you cannot stand on ------------------
+
+
+class TestStepsToATileYouCannotStandOn:
+    """32 of the 41 `no_path` walks in the 2026-09-20 run aimed at a blocked tile.
+
+    `travel_arrival` has always ended a walk with `arrived_next_to`, but
+    nothing ever planned a route to adjacency, so A* failed and the step
+    option vanished four tiles short of a destination ringed with free ground.
+    """
+
+    @staticmethod
+    def _model_with_an_occupied_target() -> WorldModel:
+        return build_model(
+            self_entity=make_entity("ada", (10, 10)),
+            entities=[make_entity("bram", (14, 10))],
+        )
+
+    def test_a_tile_with_a_settler_on_it_still_gets_a_step(self) -> None:
+        model = self._model_with_an_occupied_target()
+        assert not model.is_walkable((14, 10))
+        options = enumerate_options(model, places={"the_chest": (14, 10)})
+        option = next(o for o in options if o.key == f"{STEP_KEY_PREFIX}the_chest")
+        assert "the walk ends beside it" in option.description
+        assert option.travel_target is not None
+        assert option.travel_target.stop_adjacent
+
+    def test_a_tile_holding_a_tree_still_gets_a_step(self) -> None:
+        model = build_model(objects=[make_object("tree_9", "tree", (13, 10))])
+        options = enumerate_options(model, places={"the_tree": (13, 10)})
+        assert f"{STEP_KEY_PREFIX}the_tree" in {o.key for o in options}
+
+    def test_keep_going_survives_somebody_stepping_onto_the_destination(self) -> None:
+        model = self._model_with_an_occupied_target()
+        travel = TravelState(target=(14, 10), label="destination")
+        options = enumerate_options(model, travel=travel)
+        assert "keep_going" in {o.key for o in options}
+
+    def test_a_tile_inside_a_sealed_pocket_still_gets_no_step(self) -> None:
+        """Adjacency is no help when no neighbour is reachable either."""
+        walls = [(11, 9), (11, 10), (11, 11), (10, 9), (10, 11), (9, 9), (9, 11)]
+        model = build_model(
+            tiles=make_tiles((10, 10), radius=8, blocked=[*walls, (9, 10)]),
+            objects=[
+                make_object(f"wood_wall_{i}", "wood_wall", tile)
+                for i, tile in enumerate(walls)
+            ],
+        )
+        options = enumerate_options(model, places={"out_there": (14, 10)})
+        assert f"{STEP_KEY_PREFIX}out_there" not in {o.key for o in options}

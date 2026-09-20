@@ -615,7 +615,8 @@ def _sleep_options(model: WorldModel) -> list[Option]:
                 intent=pb.Intent(wake=pb.WakeIntent()),
             )
         ]
-    if info.fatigue <= 0:
+    # The world refuses a sleep below this fatigue, so it is not an option.
+    if info.fatigue < items.MIN_SLEEP_FATIGUE:
         return []
     options: list[Option] = []
     for obj in model.objects_near(1):
@@ -660,6 +661,10 @@ def _travel_control_options(
     path = find_path(
         model, model.position, travel.target, stop_adjacent=travel.stop_adjacent
     )
+    if not path and not travel.stop_adjacent and not model.is_walkable(travel.target):
+        # Somebody stepped onto the destination mid-walk, or it was never a
+        # tile one can stand on: finish beside it rather than lose the option.
+        path = find_path(model, model.position, travel.target, stop_adjacent=True)
     options: list[Option] = []
     if path:
         direction = direction_between(model.position, path[0])
@@ -1022,11 +1027,21 @@ def _step_option_for_place(
     dx = target[0] - position[0]
     dy = target[1] - position[1]
     where = f"at dx {dx} dy {dy}, {distance} tiles away"
-    state = TravelState(target=target, label=name)
+    stop_adjacent = False
     path = find_path(model, position, target)
+    if not path and model.is_known(target) and not model.is_walkable(target):
+        # The target tile cannot be stood on - a tree, a wall, a rock, another
+        # settler - so the journey is to the tile beside it. Without this, 32
+        # of the 41 `no_path` walks in the 2026-09-20 run gave up 4 tiles short
+        # of a destination with free neighbours all around it.
+        stop_adjacent = True
+        path = find_path(model, position, target, stop_adjacent=True)
+    state = TravelState(target=target, label=name, stop_adjacent=stop_adjacent)
     if path:
         direction = direction_between(position, path[0])
         description = f"one step toward {name} {where}"
+        if stop_adjacent:
+            description += "; you cannot stand on it, so the walk ends beside it"
     else:
         # A* has failed. Walking hopefully is only walking toward a tile the
         # actor has never seen; when it *has* seen the tile and still has no

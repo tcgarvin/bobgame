@@ -153,6 +153,21 @@ prompt now opens with the same goal sentences as the planner's
 (`items.island_opening`). Contracts:
 [docs/10_metal_and_sleep.md](docs/10_metal_and_sleep.md),
 [docs/05_jev_agents_design.md](docs/05_jev_agents_design.md).
+**Hamlet-run fixes, round 4 (2026-09-20)**: after `runs/20260920-043742-hamlet`
+(0 beds, 0 doors, 0 rooms at tick 1350) — every raw source now carries a
+**habitat** sentence generated from the terrain generator's own rules
+(`items.HABITAT_TEXT`), shown in the narrative's "Where things are found" list
+and appended to every `source_text`, so a failed craft says where reeds grow
+instead of leaving a settler to random-walk; **sleep** recovers faster by day
+(bed 2 per 3 ticks, ground 1 per 2) and `MIN_SLEEP_FATIGUE` (20) refuses a
+one-tick nap; `build(..., door="x,y")` places doors in the shape it builds and
+the geometry lines list what stands inside an enclosed interior; a refused
+`place` names the occupant of the tile and the free neighbouring directions;
+`WorldModel.recent_deaths` no longer mutates the deque it iterates (three
+turns died with `deque mutated during iteration`); and `travel_to` routes to a
+free neighbour when the destination cannot be stood on (32 of 41 `no_path`
+walks). Contracts: agents/CLAUDE.md "Hamlet-run fixes, round 4",
+[docs/08_building.md](docs/08_building.md), [docs/10_metal_and_sleep.md](docs/10_metal_and_sleep.md).
 **In progress**: milestone 7, run recording & replay — every run is recorded to `runs/<run_id>/` as gzip JSONL (not Parquet) and a replay server serves it to the viewer with seeking, playback and deep links. Contract: [docs/07_replay.md](docs/07_replay.md).
 **Not done**: milestone 8 (LLM agents) is superseded by `agents.jev_agent`.
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)

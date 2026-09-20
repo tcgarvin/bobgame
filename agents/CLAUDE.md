@@ -611,6 +611,61 @@ gathering or building.
   against the same goal the planner plans against. Nothing was added about
   what to write.
 
+### Hamlet-run fixes, round 4 (2026-09-20)
+
+The fourth pass, over `runs/20260920-043742-hamlet` (goal: six enclosed
+personal rooms with a door and a bed each; at tick 1350: 0 beds, 0 doors, 0
+rooms).
+
+- **Habitat as physics.** `items.HABITAT_TEXT` maps a natural object type to
+  one sentence saying where it grows, written from `world/terrain/objects.py`
+  and its `ObjectPlacementConfig`, with the numbers mirrored as
+  `REED_BANK_WIDTH` (2), `REED_COAST_EXCLUSION` (12), `CLAY_MIN_DISTANCE` /
+  `CLAY_MAX_DISTANCE` (2, 7), `BUSH_WATER_MIN_DISTANCE` /
+  `BUSH_WATER_MAX_DISTANCE` (4, 60), `TREE_COAST_DISTANCE` (40) and
+  `ORE_EXCLUSION_RADIUS` (60). `items.source_text` now appends the habitats of
+  every source (deduplicated, so four rock types say it once), so every craft
+  failure reaching `missing_input_lines` reads `fiber comes from reeds (bare
+  hands); reeds grow on the banks and in the shallows of fresh water (lakes,
+  rivers and their fords), within 2 tiles of the water, and never within 12
+  tiles of the sea`. `items.habitat_table_text()` is the narrative's "Where
+  things are found" list, and the hand-written habitat scraps in the
+  `Materials` section were removed so there is one statement of each rule.
+  `planner._water_hint_lines` adds `nearest water you have seen: (x, y) (dN)`
+  under `you know of none yet` for a water-bound material
+  (`items.is_water_bound`), from `WorldModel.nearest_water()`. The
+  observation's `Tile.floor_type` does **not** distinguish fresh water from
+  the sea, so that line says "water", never "fresh water"; the habitat
+  sentence is what says the stuff wants fresh water.
+- **Sleep retune, take 2** is a world change (`world/CLAUDE.md`, docs/10): the
+  day recovery rates went up and `MIN_SLEEP_FATIGUE` (20) is the floor for
+  falling asleep. Mirrored as `items.SLEEP_RECOVERY` and
+  `items.MIN_SLEEP_FATIGUE`; `options._sleep_options` withholds `sleep:` below
+  the floor and `jevstate.FATIGUE_FACTS` and the planner's sleep physics state
+  it, both generated.
+- **Doors in `build`** and **a refused `place` names the occupant**: docs/08,
+  "Agents".
+- **`recent_deaths` snapshots its deque.** `WorldModel.recent_deaths` iterated
+  `reversed(self.deaths_seen)` while calling `death_of`, which calls
+  `_forget_death`, which clears and re-extends the same deque: three planner
+  turns died with `deque mutated during iteration` (ada t960 and t1624, esme
+  t1626), two of them while building the turn prompt. Both `recent_deaths` and
+  `death_of` now iterate `reversed(tuple(...))`.
+- **`travel_to` routes to adjacency.** 41 of 194 walks ended `no_path`, and 32
+  of those aimed at a tile that cannot be stood on with free reachable ground
+  all around it (22 with another settler standing on it, 5 a tree, 3 a wall, 2
+  a rock; median 4-5 tiles out). `travel_arrival` has always ended a walk with
+  `arrived_next_to`, but nothing planned a route to adjacency, so A* failed,
+  the step option vanished and `NO_PATH_PATIENCE` fired after 3 ticks.
+  `options._step_option_for_place` now retries `find_path(...,
+  stop_adjacent=True)` when the direct path fails and the target is known and
+  unwalkable, and puts `stop_adjacent` on the `TravelState` it installs;
+  `_travel_control_options` does the same for `keep_going`, so the option does
+  not vanish when somebody steps onto the destination mid-walk. The remaining
+  9: 1 unknown target 580 tiles off (a planner call, not a routing defect), 1
+  builder pocketed in his own hut, 7 aimed inside a one-gap hut whose gap idle
+  settlers were standing in.
+
 ### The eject question, split in three (docs/05)
 
 Jev is asked `done` ("is the success condition met right now"), `stuck` ("has

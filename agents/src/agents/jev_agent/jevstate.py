@@ -345,7 +345,8 @@ FATIGUE_FACTS = (
     f"Sleeping on a bed recovers {items.sleep_recovery_text(True, True)} at "
     f"night and {items.sleep_recovery_text(True, False)} by day; on the ground "
     f"{items.sleep_recovery_text(False, True)} at night and "
-    f"{items.sleep_recovery_text(False, False)} by day."
+    f"{items.sleep_recovery_text(False, False)} by day. "
+    f"You cannot fall asleep below fatigue {items.MIN_SLEEP_FATIGUE}."
 )
 
 DAY_FACTS = (
