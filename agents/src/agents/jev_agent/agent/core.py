@@ -23,21 +23,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import os
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Sequence, TypeVar
+from typing import Any, Callable, Coroutine, Sequence
 
 import grpc
 import structlog
 
-from .. import world_pb2 as pb
-from .client import WorldClient
-from . import items
-from .items import DEFAULT_SETTLER_COUNT
-from .conversation import (
+from ... import world_pb2 as pb
+from ..client import WorldClient
+from ..items import DEFAULT_SETTLER_COUNT
+from ..conversation import (
     ACTION_HAIL,
     ACTION_JOIN,
     ACTION_OPEN,
@@ -49,9 +46,9 @@ from .conversation import (
     joined_conversation,
     sleep_end_reason,
 )
-from .jevclient import JevClient, TypeSafeJevClient
-from .outcomes import ActionOutcome, Seat
-from .journal import (
+from ..jevclient import JevClient, TypeSafeJevClient
+from ..outcomes import ActionOutcome, Seat
+from ..journal import (
     JOURNAL_WAIT_SECONDS,
     KIND_EVENT,
     KIND_NOTE,
@@ -64,14 +61,14 @@ from .journal import (
     render_day_log,
     rewrite_duration_ms,
 )
-from .planner import (
+from ..planner import (
     DEATH_NOTE,
     SLEEP_NOTE,
     Planner,
     alert_window_start,
     threat_alert,
 )
-from .reflex import (
+from ..reflex import (
     EMPTY_REFLEX,
     INTERRUPTED_CONVERSATION,
     INTERRUPTED_DRIVER_STINT,
@@ -81,7 +78,7 @@ from .reflex import (
     ReflexWatch,
     reflex_report_line,
 )
-from .snapshot import (
+from ..snapshot import (
     AgentSnapshot,
     SleepSnapshot,
     capture,
@@ -90,14 +87,13 @@ from .snapshot import (
     snapshot_path,
     write_snapshot,
 )
-from .briefs import (
-    INTERRUPTED_BY_CONVERSATION,
+from ..briefs import (
     INTERRUPTED_BY_REFLEX,
     Brief,
     StintDriver,
     conversation_interruption,
 )
-from .stint import (
+from ..stint import (
     END_ASLEEP,
     END_DEATH,
     END_JOINED_CONVERSATION,
@@ -109,237 +105,52 @@ from .stint import (
     never_ends,
     stint_stats,
 )
-from .pricing import CostLedger, LedgerJevClient, pricing_payload
-from .tracelog import RUN_DIR_ENV, AgentTrace, resolve_log_root
-from .worldmodel import TickDigest, WorldModel
+from ..pricing import CostLedger, LedgerJevClient
+from ..tracelog import RUN_DIR_ENV, AgentTrace, resolve_log_root
+from ..worldmodel import TickDigest, WorldModel
+from .modes import (
+    CONVERSATION_START_GRACE_TICKS,
+    LIFE_RESPAWNED,
+    LIFE_WOKE,
+    MAX_PLANNER_WAIT_MS,
+    MODE_CONVERSATION,
+    MODE_IDLE,
+    MODE_PLANNING,
+    MODE_REFLEX,
+    MODE_STINT,
+    PLANNER_POLL_SECONDS,
+    SUBMIT_MARGIN_MS,
+    THOUGHT_CHANNEL,
+    USE_RUN_DIR,
+    ResultSink,
+)
+from .requests import (
+    ASLEEP_REJECTION,
+    _ConversationWaiter,
+    _DirectRequest,
+    _HeldStint,
+    _StintRequest,
+    _drain,
+)
+from .saving import (
+    DRAINED,
+    SAVES_DIR_NAME,
+    SAVE_POLL_SECONDS,
+    DrainState,
+    save_wait_seconds,
+)
+from .sleeping import (
+    GROUND_SLEEP_PLACE,
+    SLEEP_START_GRACE_TICKS,
+    WAKE_ACTION,
+    SleepRecord,
+    WakeWaiters,
+    sleep_place,
+    wake_reason,
+)
+from .status import StatusLine, _write_pricing
 
 logger = structlog.get_logger(__name__)
-
-MODE_PLANNING = "planning"
-MODE_STINT = "stint"
-MODE_REFLEX = "reflex"
-MODE_CONVERSATION = "conversation"
-MODE_IDLE = "idle"
-
-# How the tick loop waits for the planner inside a tick (see
-# `_await_planner_work`). The margin leaves room for the gRPC submit; the cap
-# keeps a clock skew between world and agent from stalling the loop.
-SUBMIT_MARGIN_MS = 200.0
-MAX_PLANNER_WAIT_MS = 2_000.0
-PLANNER_POLL_SECONDS = 0.02
-
-# Called with "accepted" or a rejection string once the world has answered.
-ResultSink = Callable[[str], None]
-
-_T = TypeVar("_T")
-
-THOUGHT_CHANNEL = "thought"
-
-# Defined in `stint.py` and re-exported here, where they have always been
-# imported from: `planner.py` needs them too, and it cannot import `agent.py`.
-
-# How long a planner tool that has just opened or joined a conversation waits
-# for the tick loop to see the object before it gives up on it.
-CONVERSATION_START_GRACE_TICKS = 4
-
-# How long the `sleep` tool waits for the tick loop to see the actor asleep
-# before it decides the sleep never happened.
-SLEEP_START_GRACE_TICKS = 3
-
-# The world's own wording for falling asleep, collapsing and waking.
-SLEEP_ACTION = "sleep"
-COLLAPSE_ACTION = "collapse"
-WAKE_ACTION = "wake"
-GROUND_SLEEP_PLACE = "the ground"
-UNKNOWN_WAKE_REASON = "unknown"
-# The world's word for "your food fell to the wake threshold" (`world/sleep.py`,
-# WAKE_HUNGRY). The sleep report spells the numbers out when it sees it.
-WAKE_HUNGRY_REASON = "hungry"
-
-ASLEEP_REJECTION = "failed: asleep"
-
-# The `log_root` an agent is built with when nobody named one: work it out from
-# `$BOBGAME_RUN_DIR` (`tracelog.resolve_log_root`). An empty path says "not
-# given" without a `None` that also has to mean "the current directory".
-USE_RUN_DIR = Path()
-
-# What the planner is told happened to its body, so it can drop its history.
-LIFE_WOKE = "woke"
-LIFE_RESPAWNED = "respawned"
-
-# --- saving (docs/14_new_moon_and_saves.md section 3) ------------------------
-
-# Where a run's saves live, under the run directory the world made.
-SAVES_DIR_NAME = "saves"
-# How long to wait for the settler to drain before giving up on the save. The
-# world waits `save_wait_seconds` (180 by default) for the file, so this has to
-# be a little under that: an agent that gives up first can say why in its log,
-# where an agent the world gave up on cannot.
-SAVE_WAIT_ENV = "BOBGAME_SAVE_WAIT_SECONDS"
-DEFAULT_SAVE_WAIT_SECONDS = 170.0
-SAVE_POLL_SECONDS = 0.1
-
-
-@dataclass(frozen=True)
-class DrainState:
-    """Whether the settler is drained, and if not, what is still outstanding.
-
-    Drained is the precondition for a snapshot (docs/14 section 2): everything
-    the agent was doing has finished, so there is nothing left that a file
-    could only half describe.
-    """
-
-    drained: bool
-    reason: str = ""
-
-    @classmethod
-    def busy(cls, reason: str) -> "DrainState":
-        """Not drained, because of `reason`."""
-        return cls(drained=False, reason=reason)
-
-
-DRAINED = DrainState(drained=True)
-
-
-@dataclass(frozen=True)
-class SleepRecord:
-    """One completed sleep, as the planner's `sleep` tool reports it."""
-
-    start_tick: int
-    end_tick: int
-    reason: str
-    fatigue_before: int
-    fatigue_after: int
-    where: str
-    food_after: int = 0
-
-    @property
-    def ticks_slept(self) -> int:
-        """World ticks between falling asleep and waking."""
-        return max(0, self.end_tick - self.start_tick)
-
-    def to_text(self) -> str:
-        """The line the `sleep` tool returns."""
-        line = (
-            f"slept on {self.where} from tick {self.start_tick} to "
-            f"{self.end_tick} ({self.ticks_slept} ticks); woke because "
-            f"{self.reason}; fatigue {self.fatigue_before} -> {self.fatigue_after}"
-        )
-        if self.reason == WAKE_HUNGRY_REASON:
-            line += (
-                f"; food is {self.food_after} and a sleeper wakes at food "
-                f"{items.HUNGRY_WAKE_FOOD}, which is also the level below "
-                "which you cannot fall asleep at all"
-            )
-        return line
-
-
-def sleep_place(digest: TickDigest) -> str:
-    """Where the world says the actor fell asleep, from its own action event."""
-    for acted in digest.own_actions:
-        if acted.action_type in (SLEEP_ACTION, COLLAPSE_ACTION) and acted.success:
-            return acted.details or GROUND_SLEEP_PLACE
-    return GROUND_SLEEP_PLACE
-
-
-def wake_reason(digest: TickDigest) -> str:
-    """Why the actor woke, from the world's `wake` action event."""
-    for acted in digest.own_actions:
-        if acted.action_type == WAKE_ACTION and acted.success:
-            return acted.details or UNKNOWN_WAKE_REASON
-    return UNKNOWN_WAKE_REASON
-
-
-@dataclass
-class _StintRequest:
-    """A planner `start_stint` waiting for the tick loop to pick it up."""
-
-    brief: Brief
-    future: asyncio.Future[StintReport]
-    driver: StintDriver | None = None
-    # An extra end rule the caller owns, asked before every tick's action;
-    # `travel_to` uses it to end the stint the tick the body arrives.
-    end_check: Callable[[WorldModel], str] = never_ends
-
-
-@dataclass
-class _DirectRequest:
-    """A planner single-tick action waiting to be submitted and resolved."""
-
-    intent: pb.Intent
-    description: str
-    future: asyncio.Future[ActionOutcome]
-    remaining_ticks: int = 1
-
-
-@dataclass
-class _ConversationWaiter:
-    """A planner tool parked until the conversation it started has ended."""
-
-    future: asyncio.Future[ConversationReport | None]
-    deadline_tick: int
-
-
-@dataclass
-class _WakeWaiter:
-    """A planner `sleep` tool parked until the actor is awake again."""
-
-    # The rendered sleep, or "" when no sleep was seen.
-    future: asyncio.Future[str]
-    deadline_tick: int
-
-
-@dataclass(frozen=True)
-class StatusLine:
-    """The five strings the viewer's status channel carries.
-
-    Frozen and named because it is also compared against the last one sent, and
-    a five-slot tuple said nothing about which slot was which.
-    """
-
-    mode: str = ""
-    brief: str = ""
-    thought: str = ""
-    detail_json: str = ""
-    cost_json: str = ""
-
-    def as_arguments(self) -> tuple[str, str, str, str, str]:
-        """The positional arguments `WorldClient.report_status` takes."""
-        return (
-            self.mode,
-            self.brief,
-            self.thought,
-            self.detail_json,
-            self.cost_json,
-        )
-
-
-@dataclass
-class _HeldStint:
-    """A stint report kept back until the thing that interrupted it is over."""
-
-    request: _StintRequest
-    report: StintReport
-
-
-def _write_pricing(trace: AgentTrace, planner_model: str) -> None:
-    """Record the prices this run is billed at, next to the other traces.
-
-    Written once at startup so a later analysis of the run uses the price in
-    force then rather than today's constant (docs/11_cost_accounting.md). A
-    disabled trace writes no files at all, and a file that cannot be written
-    complains rather than taking the actor down.
-    """
-    if not trace.enabled:
-        return
-    path = trace.pricing_path
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(pricing_payload(planner_model), indent=2), encoding="utf-8"
-        )
-    except OSError as error:
-        logger.warning("pricing_write_failed", path=str(path), error=str(error))
 
 
 class JevAgent:
@@ -421,7 +232,7 @@ class JevAgent:
         self._sleep_fatigue_before = 0
         self._sleep_place = GROUND_SLEEP_PLACE
         self._last_sleep: SleepRecord | None = None
-        self._wake_waiters: list[_WakeWaiter] = []
+        self._wake_waiters = WakeWaiters()
         # Planner turns parked until the body is awake and alive again.
         self._active_waiters: list[asyncio.Future[None]] = []
         self._background: set[asyncio.Task[None]] = set()
@@ -620,15 +431,7 @@ class JevAgent:
         last = self._last_sleep
         if self._asleep_since < 0 and last is not None and last.end_tick >= since_tick:
             return last.to_text()
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        self._wake_waiters.append(
-            _WakeWaiter(
-                future=future,
-                deadline_tick=self._model.tick + SLEEP_START_GRACE_TICKS,
-            )
-        )
-        return await future
+        return await self._wake_waiters.park(self._model.tick + SLEEP_START_GRACE_TICKS)
 
     async def await_active(self) -> None:
         """Block until the body is awake and alive; return at once if it is.
@@ -727,7 +530,7 @@ class JevAgent:
         if self._model.self_info.asleep:
             await self._sleeping_tick(observation, digest)
             return
-        self._expire_wake_waiters()
+        self._wake_waiters.expire(self._model.tick)
         # The reflex is checked before anything else: a single-tick action in
         # flight is answered as interrupted rather than with its own outcome.
         self._maybe_start_reflex(digest)
@@ -1083,7 +886,7 @@ class JevAgent:
         logger.info("woke_up", reason=record.reason, ticks=record.ticks_slept)
         self.planner.day_log.add(self._model.tick, KIND_EVENT, record.to_text())
         self.planner.note_life_event(LIFE_WOKE)
-        self._release_wake_waiters(record.to_text())
+        self._wake_waiters.release(record.to_text())
 
     def _drain_for_sleep(self, digest: TickDigest) -> None:
         """Finish everything holding the body, because it has fallen asleep.
@@ -1115,22 +918,6 @@ class JevAgent:
         if session is not None:
             session.finish(sleep_end_reason(self._model))
             self._finish_conversation()
-
-    def _release_wake_waiters(self, text: str) -> None:
-        """Answer every parked `sleep` tool with this sleep (or with nothing)."""
-        for waiter in list(self._wake_waiters):
-            self._wake_waiters.remove(waiter)
-            if not waiter.future.done():
-                waiter.future.set_result(text)
-
-    def _expire_wake_waiters(self) -> None:
-        """Release a `sleep` tool whose sleep never started."""
-        for waiter in list(self._wake_waiters):
-            if self._model.tick < waiter.deadline_tick:
-                continue
-            self._wake_waiters.remove(waiter)
-            if not waiter.future.done():
-                waiter.future.set_result("")
 
     # -- reflex -------------------------------------------------------------
 
@@ -1424,7 +1211,7 @@ class JevAgent:
             if not waiter.future.done():
                 waiter.future.set_result(None)
         self._conversation_waiters.clear()
-        self._release_wake_waiters("")
+        self._wake_waiters.release("")
         for stint_request in _drain(self._stint_requests):
             if not stint_request.future.done():
                 stint_request.future.set_exception(RuntimeError(reason))
@@ -1626,34 +1413,6 @@ class JevAgent:
             await self.world.report_status(*status.as_arguments())
         except grpc.RpcError as error:
             logger.debug("status_report_failed", details=error.details())
-
-
-def save_wait_seconds() -> float:
-    """How long to wait for the settler to drain, from the environment.
-
-    `BOBGAME_SAVE_WAIT_SECONDS` is what the world was configured with, minus
-    its own margin; a value that is not a positive number is ignored and said
-    so, rather than silently turning the wait off.
-    """
-    raw = os.environ.get(SAVE_WAIT_ENV, "")
-    if not raw:
-        return DEFAULT_SAVE_WAIT_SECONDS
-    try:
-        seconds = float(raw)
-    except ValueError:
-        logger.warning("save_wait_not_a_number", value=raw)
-        return DEFAULT_SAVE_WAIT_SECONDS
-    if seconds <= 0:
-        logger.warning("save_wait_not_positive", value=raw)
-        return DEFAULT_SAVE_WAIT_SECONDS
-    return seconds
-
-
-def _drain(queue: "asyncio.Queue[_T]") -> list[_T]:
-    items: list[_T] = []
-    while not queue.empty():
-        items.append(queue.get_nowait())
-    return items
 
 
 async def run_agent(

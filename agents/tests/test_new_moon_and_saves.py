@@ -53,7 +53,7 @@ from helpers import (
     make_observation,
     utterance_event,
 )
-from test_agent import FakeJournalWriter, FakeWorldClient, build_agent
+from helpers import FakeJournalWriter, FakeWorldClient, build_agent
 
 
 NIGHT_START = items.night_start_tick(items.DEFAULT_DAY_LENGTH_TICKS)

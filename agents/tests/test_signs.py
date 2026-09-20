@@ -26,7 +26,7 @@ from agents.jev_agent.worldmodel import WorldModel
 
 from helpers import FakeJevClient, make_entity, make_object, make_observation
 from agents.jev_agent.outcomes import ActionOutcome
-from test_planner import RecordingBridge  # noqa: F401 - fixtures live there
+from helpers import RecordingBridge  # noqa: F401 - the shared bridge double
 
 
 def sign_object(

@@ -532,7 +532,7 @@ async def test_a_timed_out_call_still_logs_the_state_it_sent(
 ) -> None:
     import asyncio
 
-    from agents.jev_agent import stint as stint_module
+    from agents.jev_agent.stint import runner as stint_runner
 
     class SlowJev(FakeJevClient):
         async def decide(self, state, options):  # type: ignore[no-untyped-def]
@@ -540,7 +540,7 @@ async def test_a_timed_out_call_still_logs_the_state_it_sent(
                 await asyncio.sleep(0.2)
             return await super().decide(state, options)
 
-    monkeypatch.setattr(stint_module, "JEV_TICK_BUDGET_SECONDS", 0.05)
+    monkeypatch.setattr(stint_runner, "JEV_TICK_BUDGET_SECONDS", 0.05)
     jev = SlowJev(default_action="move_E")
     harness = StintHarness(jev, make_brief(max_ticks=10), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
@@ -635,7 +635,7 @@ async def test_a_slow_jev_answer_falls_back_to_repeating_the_last_action(
 ) -> None:
     import asyncio
 
-    from agents.jev_agent import stint as stint_module
+    from agents.jev_agent.stint import runner as stint_runner
 
     class SlowJev(FakeJevClient):
         async def decide(self, state, options):  # type: ignore[no-untyped-def]
@@ -643,7 +643,7 @@ async def test_a_slow_jev_answer_falls_back_to_repeating_the_last_action(
                 await asyncio.sleep(0.2)
             return await super().decide(state, options)
 
-    monkeypatch.setattr(stint_module, "JEV_TICK_BUDGET_SECONDS", 0.05)
+    monkeypatch.setattr(stint_runner, "JEV_TICK_BUDGET_SECONDS", 0.05)
     jev = SlowJev(default_action="move_E")
     harness = StintHarness(jev, make_brief(max_ticks=10), trace)
     await harness.tick(make_observation(1, make_entity("ada", (10, 10))))

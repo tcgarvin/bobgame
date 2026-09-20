@@ -126,11 +126,20 @@ and both sides follow; nothing is mirrored by hand any more.
 
 ### Module map
 
-Modules sit on numbered import layers and may only import from a strictly
-lower one; `tests/test_layering.py` parses the sources and enforces it, so a
-new module has to be placed on a layer deliberately. That is why the shared
-vocabulary lives in `briefs.py` and the planner's view of the tick loop in
-`bridge.py` rather than in function-local imports at the call sites.
+Modules *and packages* sit on numbered import layers and may only import from
+a strictly lower one; `tests/test_layering.py` parses the sources and enforces
+it, so a new module has to be placed on a layer deliberately. A package counts
+as one unit at its declared layer, and inside it `INTRA_ORDER` fixes the order
+its own submodules may import in. That is why the shared vocabulary lives in
+`briefs.py` and the planner's view of the tick loop in `bridge.py` rather than
+in function-local imports at the call sites.
+
+The six biggest modules are packages under their old import names, so
+`from agents.jev_agent.planner import Planner` still works. **Patch the module
+that owns a constant, never the re-export in a package's `__init__.py`**:
+`planner.toolset` (`MAX_TOOL_CALLS_PER_TURN`, `HARD_LIMIT_MARGIN`),
+`planner.turn` (`TURN_RETRY_SECONDS`), `planner.tools.building`
+(`BUILD_RESUPPLY_ROUNDS`), `stint.runner` (`JEV_TICK_BUDGET_SECONDS`).
 
 | Module | Responsibility |
 | --- | --- |
@@ -141,24 +150,24 @@ vocabulary lives in `briefs.py` and the planner's view of the tick loop in
 | `build.py` | Shape geometry and the `BuildExecutor` that drives the planner's `build` tool |
 | `pathfinding.py` | 8-connected A* with the world's diagonal-blocking rule; unknown tiles cost 3 |
 | `walk.py` | The one set of walking primitives — stand candidates, next step with stop-adjacent, the arrival test, the backstop tick budget — and `WalkDriver`, the code driver every code-owned walk uses |
-| `worldmodel.py` | Everything ever observed: tiles, objects, entities, own history, settlement |
+| `worldmodel/` | Everything ever observed: tiles, objects, entities, own history, settlement. `types` (the frozen value types and parsers), `notices` (sign and board read-tracking), `events` (the deaths this actor witnessed), `payload` (the snapshot codec), `model` (`WorldModel` itself, one class) |
 | `briefs.py` | The vocabulary the option and stint layers share: `Option`, `TravelState`, `Brief`, `BriefHail`, `DriverChoice`, `StintDriver`, and the `interrupted: ...` strings |
 | `bridge.py` | `AgentBridge`, the protocol the planner needs from the tick loop; `JevAgent` implements it. `direct_action` returns an `outcomes.ActionOutcome`, not a sentence |
 | `actions.py` | Preconditions and intent construction both layers share: an `Attempt` is either the intent to submit or the sentence saying why not. One `*_attempt` per action kind (shout, sleep, eat, collect-here, extract, dismantle, place, pickup, drop, deposit, withdraw, hail, join, give, write note, write sign), the placement helpers (`can_place_ground`, `can_place_structure`, `place_failure_lines`) and the `EXPOSURE` table saying which layer may take which kind |
 | `recipes.py` | Everything both layers do with the recipe table: `craftable_now`, the option's craft description, the recipe-chain crafting loop (`craft_chain`, `craft_once`, `stock_one`, `CraftTally`) and the "where does this raw material come from" lines |
 | `enclosure.py` | Seals, rooms, the enclosed fact and the actor's own pieces: the flood fills `build.py`, `options.py`, `planner.py` and `jevstate.py` share |
-| `options.py` | The legal actions for this tick, each carrying its proto Intent; walking is `step_towards:<target>` with a per-type quota (`STEP_GROUPS`), and `OPTION_SECTIONS` fixes what gets truncated first. Preconditions and intents come from `actions.py`, `recipes.py` and `walk.py` |
+| `options/` | The legal actions for this tick, each carrying its proto Intent; walking is `step_towards:<target>` with a per-type quota (`STEP_GROUPS`), and `OPTION_SECTIONS` fixes what gets truncated first. Preconditions and intents come from `actions.py`, `recipes.py` and `walk.py`. `common` (constants), then one module per section (`steps`, `survival`, `social`, `interaction`, `crafting`), then `base`, which assembles the tick's list |
 | `jevstate.py` | The compact JSON state (17x17 ASCII map, one `facts` list, the `so_far` block, a `nearby` list of only what the map cannot say) Jev sees |
 | `jevclient.py` | The TypeSafe System One call; `JevClient` protocol for fakes |
-| `stint.py` | One Jev call per tick under a `briefs.Brief` -> Intent, plus the code rules, `StintProgress` and `StintReport` |
+| `stint/` | One Jev call per tick under a `briefs.Brief` -> Intent, plus the code rules, `StintProgress` and `StintReport`. `endings` (thresholds, end reasons, explanations), `records` (`TickRecord`, `StintReport`), `runner` (the `Stint` machine; the rules stay methods because each reads and writes several of its streaks at once) |
 | `reflex.py` | The pre-registered reflex brief: persistence, trigger, cooldown, end rule |
-| `conversation.py` | Conversation mode: the converser, the per-turn session, the report and the note |
+| `conversation/` | Conversation mode: `protocol` (action names, end reasons, call shapes), `converser` (the two model agents and the timed call), `report` (what the planner reads afterwards), `session` (the tick-by-tick machine) |
 | `llm.py` | Model id resolution and model settings shared by the planner and the converser |
 | `pricing.py` | What a call cost: the Jev price constant and the `usage` block built from a run's model responses |
 | `tracelog.py` | The gzip JSONL trace files, the `AgentTrace` that owns them, and the log-root rules |
 | `journal.py` | The sleep-time journal: sections, token cap, the day log and the writer (docs/12) |
-| `planner.py` | The pydantic-ai agent, its tools, and the turn loop |
-| `agent.py` | The tick loop and the planner handshake |
+| `planner/` | The pydantic-ai agent, its tools and the turn loop: `common`, `prompt` (the system prompt), `status` (the clock line and the `!!` alerts), `validation` (what a bad tool argument is told), `describe` (`look`), `toolset` (the budget and the wrapper), `tools/` (`core`, `building`, `body`, `items_tools`, `signs`, `talking`, `reflex_tools`, `memory`, `common`), `factory` (the registration order the model sees) and `turn` (the `Planner` loop) |
+| `agent/` | The tick loop and the planner handshake: `modes` (the `Mode` str-enum, the loop's timings and the transition table), `sleeping` (the world's sleep wording, `SleepRecord`, the parked `sleep` tools), `saving` (`DrainState` and where a snapshot goes), `requests` (what a planner tool hands the loop), `status` (the viewer's status line) and `core` (`JevAgent`, one class: its per-tick priority order stays in one place, and the sleep transition, the drain and the conversation phase each reach a dozen of its fields) |
 
 ### The four modes
 
@@ -665,7 +674,10 @@ uv run mypy src/agents/jev_agent
 uv run black src/agents/jev_agent tests
 ```
 
-`tests/helpers.py` builds synthetic `Observation` protos, the `FakeJevClient`,
-the `FakeConverser` and the `converse_object`/`conversation_utterance_event`
-builders. No test makes a model call: the planner runs on pydantic-ai's
+Tests mirror the packages: `tests/planner/` and `tests/agent/` each have their
+own `conftest.py`, and everything shared across directories lives in
+`tests/helpers.py`: synthetic `Observation` protos, the `FakeJevClient`, the
+`FakeConverser`, the `converse_object`/`conversation_utterance_event`
+builders, the `RecordingBridge` planner double, the `FakeWorldClient` and
+`build_agent`, and the `world_model`/`bridge`/`deps` fixtures. No test makes a model call: the planner runs on pydantic-ai's
 `TestModel`/`FunctionModel` and the converser on the fake.

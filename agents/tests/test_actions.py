@@ -54,7 +54,7 @@ from agents.jev_agent.worldmodel import WorldModel
 from pydantic_ai.models.test import TestModel
 
 from helpers import make_entity, make_object, make_observation
-from test_planner import bridge, deps, world_model  # noqa: F401 - fixtures
+from helpers import bridge, deps, world_model  # noqa: F401 - fixtures
 
 EAST = NAME_TO_DIRECTION["E"]
 

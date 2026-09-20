@@ -2,15 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Sequence
+from pathlib import Path
+from typing import Any, AsyncIterator, Callable, Iterable, Mapping, Sequence
+
+import pytest
 
 from agents import world_pb2 as pb
-from agents.jev_agent.conversation import ConverserMove, MoveCall, NoteCall
+from agents.jev_agent.conversation import (
+    ConversationReport,
+    ConverserMove,
+    MoveCall,
+    NoteCall,
+)
+from agents.jev_agent.agent import JevAgent
+from agents.jev_agent.client import IntentResult
 from agents.jev_agent.jevclient import JevDecision
+from agents.jev_agent.journal import (
+    Journal,
+    JournalRewrite,
+    SECTION_LEARNINGS,
+    SECTION_ME,
+    SECTION_OTHERS,
+    SECTION_STORY,
+    SECTION_TOMORROW,
+    finish_rewrite,
+)
 from agents.jev_agent.outcomes import NO_DETAIL, SUBMITTED, ActionOutcome
+from agents.jev_agent.planner import PlannerDeps
+from agents.jev_agent.reflex import EMPTY_REFLEX, ReflexBrief
+from agents.jev_agent.stint import Brief, StintReport, never_ends
+from agents.jev_agent.worldmodel import WorldModel
 
 GRASS = "grass"
 WATER = "deep_water"
@@ -342,3 +367,225 @@ def canned_outcome(text: str) -> ActionOutcome:
         match.group("status") == "ok",
         "" if detail == NO_DETAIL else detail,
     )
+
+
+class RecordingBridge:
+    """An `AgentBridge` that records calls instead of touching a world."""
+
+    def __init__(self, world_model: WorldModel) -> None:
+        self._model = world_model
+        self.briefs: list[Brief] = []
+        self.drivers: list[object] = []
+        self.actions: list[tuple[pb.Intent, str]] = []
+        self.waits: list[int] = []
+        self.thoughts: list[str] = []
+        self.reflex = EMPTY_REFLEX
+        self.reflex_notes: list[str] = []
+        self.conversation_reports: list[ConversationReport] = []
+        self.conversation_purposes: list[str] = []
+        self.direct_result = ""
+        # Consumed one per `direct_action` call, ahead of `direct_result`.
+        self.direct_results: list[str] = []
+        self.wake_calls: list[int] = []
+        self.wake_result = ""
+        self.journal_waits = 0
+        self.active_waits = 0
+        # Called while a turn waits for the journal, to stand in for a rewrite
+        # finishing between turns.
+        self.on_journal_wait: Callable[[], None] = lambda: None
+        # The extra end rules `travel_to` hands down, one per stint.
+        self.end_checks: list[Callable[[WorldModel], str]] = []
+        # The end reason every recorded stint reports back.
+        self.stint_end_reason = "eject"
+
+    @property
+    def model(self) -> WorldModel:
+        return self._model
+
+    async def run_stint(
+        self,
+        brief: Brief,
+        driver: object | None = None,
+        end_check: Callable[[WorldModel], str] = never_ends,
+    ) -> StintReport:
+        self.briefs.append(brief)
+        self.drivers.append(driver)
+        self.end_checks.append(end_check)
+        return StintReport(
+            brief=brief,
+            ticks_used=3,
+            end_reason=self.stint_end_reason,
+            start_position=(10, 10),
+            end_position=(12, 10),
+            start_stats="hp 20/20, food 80/100",
+            end_stats="hp 20/20, food 77/100",
+            inventory_delta={"wood": 2},
+            action_counts={"extract": (3, 0)},
+            notable=["discovered 2 new objects"],
+            tail=["t3 extract:tree_1 -> accepted (eject 0.80, danger 0.01)"],
+        )
+
+    async def direct_action(self, intent: pb.Intent, description: str) -> ActionOutcome:
+        self.actions.append((intent, description))
+        if self.direct_results:
+            return canned_outcome(self.direct_results.pop(0))
+        if self.direct_result:
+            return canned_outcome(self.direct_result)
+        return ActionOutcome.from_event(description, "action", True, "")
+
+    async def wait_ticks(self, ticks: int) -> str:
+        self.waits.append(ticks)
+        return f"waited {ticks}"
+
+    async def await_wake(self, since_tick: int) -> str:
+        self.wake_calls.append(since_tick)
+        return self.wake_result
+
+    async def await_active(self) -> None:
+        self.active_waits += 1
+
+    async def await_conversation(self) -> ConversationReport | None:
+        if not self.conversation_reports:
+            return None
+        return self.conversation_reports.pop(0)
+
+    def set_reflex(self, brief: ReflexBrief) -> None:
+        self.reflex = brief
+
+    def clear_reflex(self) -> None:
+        self.reflex = EMPTY_REFLEX
+
+    def set_conversation_purpose(self, purpose: str) -> None:
+        self.conversation_purposes.append(purpose)
+
+    def drain_notes(self, *, for_prompt: bool = False) -> list[str]:
+        notes = list(self.reflex_notes)
+        self.reflex_notes.clear()
+        return notes
+
+    async def await_journal(self) -> None:
+        self.journal_waits += 1
+        self.on_journal_wait()
+
+    def set_thought(self, thought: str) -> None:
+        self.thoughts.append(thought)
+
+
+@pytest.fixture
+def world_model() -> WorldModel:
+    """A model with a tree, a chest, a board, and a neighbour in view."""
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10), inventory={"wood": 2}),
+            objects=[
+                make_object("tree_1", "tree", (12, 10)),
+                make_object("chest_1", "chest", (9, 10), {"contents": '{"berry": 3}'}),
+                make_object(
+                    "board_1",
+                    "message_board",
+                    (11, 11),
+                    {
+                        "notes": '[{"title": "Wood pile", "text": "chest by the '
+                        'spring", "author": "bob", "tick": 4}]'
+                    },
+                ),
+            ],
+            entities=[make_entity("bob", (11, 10))],
+        )
+    )
+    return model
+
+
+@pytest.fixture
+def bridge(world_model: WorldModel) -> RecordingBridge:
+    """A recording bridge over that model."""
+    return RecordingBridge(world_model)
+
+
+@pytest.fixture
+def deps(bridge: RecordingBridge, tmp_path: Path) -> PlannerDeps:
+    """Planner dependencies pointing at a throwaway memory file."""
+    return PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+
+
+class FakeWorldClient:
+    """Replays a fixed observation script and records everything submitted."""
+
+    def __init__(self, observations: Sequence[pb.Observation]) -> None:
+        self._observations = list(observations)
+        self.lease_id = "lease-1"
+        self.submitted: list[pb.Intent] = []
+        self.statuses: list[tuple[str, str, str, str]] = []
+        self.closed = False
+
+    async def acquire_lease(self) -> None:
+        return None
+
+    async def run_lease_renewal(self) -> None:
+        while True:
+            await asyncio.sleep(3600)
+
+    async def observations(self) -> AsyncIterator[pb.Observation]:
+        for observation in self._observations:
+            # Yield control so the planner task can make progress between ticks,
+            # exactly as it would while waiting on the real stream.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            yield observation
+
+    async def submit_intent(self, tick_id: int, intent: pb.Intent) -> IntentResult:
+        self.submitted.append(intent)
+        return IntentResult(accepted=True, reason="")
+
+    async def report_status(self, *status: str) -> bool:
+        self.statuses.append(tuple(status))  # type: ignore[arg-type]
+        return True
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def build_agent(world: FakeWorldClient, jev: FakeJevClient, tmp_path: Path) -> JevAgent:
+    """A JevAgent wired to fakes and a throwaway log directory."""
+    return JevAgent(
+        world,  # type: ignore[arg-type]
+        jev,
+        "ada",
+        log_root=tmp_path,
+        planner_model="test",
+    )
+
+
+class FakeJournalWriter:
+    """A `JournalWriter` that records its calls and answers when told to."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[tuple[str, str]] = []
+        self.clock_facts: list[str] = []
+        self.gate = asyncio.Event()
+        self.gate.set()
+
+    async def rewrite(
+        self, journal: Journal, day_log: str, entity_id: str, clock_fact: str = ""
+    ) -> JournalRewrite:
+        self.calls.append((day_log, entity_id))
+        self.clock_facts.append(clock_fact)
+        await self.gate.wait()
+        if self.error is not None:
+            raise self.error
+        return finish_rewrite(
+            journal,
+            {
+                SECTION_STORY: "I slept.",
+                SECTION_ME: "A builder.",
+                SECTION_OTHERS: "",
+                SECTION_LEARNINGS: "",
+                SECTION_TOMORROW: "Chop six wood.",
+            },
+            len,
+            {"cost_usd": 0.002},
+            "fake-journal-model",
+        )

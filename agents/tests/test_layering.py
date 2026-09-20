@@ -1,10 +1,16 @@
 """The package's import layering, enforced by parsing the source.
 
-Every module in `agents.jev_agent` sits on a numbered layer and may only import
-from a strictly lower one. That keeps the dependency graph acyclic without
-anybody having to remember it, and it is why the shared vocabulary lives in
-`briefs.py` and the planner's view of the tick loop in `bridge.py` rather than
-in function-local imports scattered through the call sites.
+Every top-level module *or package* in `agents.jev_agent` sits on a numbered
+layer and may only import from a strictly lower one. That keeps the dependency
+graph acyclic without anybody having to remember it, and it is why the shared
+vocabulary lives in `briefs.py` and the planner's view of the tick loop in
+`bridge.py` rather than in function-local imports scattered through the call
+sites.
+
+A package counts as one unit at its declared layer: every file inside it, its
+`__init__` included, may import siblings only from below that layer. Inside a
+package the order is declared by `INTRA_ORDER` and checked the same way, so
+`options.steps` cannot reach back up into `options.base`.
 
 Imports guarded by `if TYPE_CHECKING:` are exempt: they never run, so they
 cannot make a cycle. `snapshot.py` uses one to name `JevAgent`.
@@ -59,28 +65,78 @@ LAYERS: dict[str, int] = {
     "__init__": 99,
 }
 
+# Inside a split package, the order its own submodules may import in. Bottom
+# first; `__init__` is always the top and is added automatically.
+INTRA_ORDER: dict[str, tuple[str, ...]] = {
+    "conversation": ("protocol", "converser", "report", "session"),
+    "agent": ("modes", "sleeping", "saving", "requests", "status", "core"),
+    "planner": (
+        "common",
+        "prompt",
+        "status",
+        "validation",
+        "describe",
+        "toolset",
+        "tools",
+        "factory",
+        "turn",
+    ),
+    "stint": ("endings", "records", "runner"),
+    "worldmodel": ("types", "notices", "events", "payload", "model"),
+    "options": (
+        "common",
+        "steps",
+        "survival",
+        "social",
+        "interaction",
+        "crafting",
+        "base",
+    ),
+}
+
 
 def _module_files() -> list[Path]:
-    return sorted(PACKAGE_DIR.glob("*.py"))
+    """Every source file in the package, top-level modules and package files."""
+    return sorted(PACKAGE_DIR.rglob("*.py"))
 
 
-def _runtime_imports(source: str) -> set[str]:
-    """Sibling modules `source` imports outside an `if TYPE_CHECKING:` block."""
+def _unit(path: Path) -> str:
+    """The top-level module or package `path` belongs to."""
+    return path.relative_to(PACKAGE_DIR).parts[0].removesuffix(".py")
+
+
+def _intra_position(path: Path, order: tuple[str, ...]) -> int:
+    """How far up its own package `path` sits; `__init__` is above everything."""
+    parts = path.relative_to(PACKAGE_DIR).parts[1:]
+    name = parts[0].removesuffix(".py")
+    if name == "__init__":
+        return len(order)
+    if name in order:
+        return order.index(name)
+    # A nested sub-package (planner/tools/) sits where its directory does.
+    raise KeyError(name)
+
+
+def _imports(source: str) -> list[tuple[int, str]]:
+    """`(level, first name)` for every relative import outside `TYPE_CHECKING`."""
     tree = ast.parse(source)
     type_checking_nodes: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.If) and _is_type_checking_test(node.test):
             for child in ast.walk(node):
                 type_checking_nodes.add(id(child))
-    siblings: set[str] = set()
+    found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
         if id(node) in type_checking_nodes:
             continue
-        if node.level == 1 and node.module:
-            siblings.add(node.module.split(".")[0])
-    return siblings
+        if node.module:
+            found.append((node.level, node.module.split(".")[0]))
+        else:
+            # `from . import items` - the names are the modules.
+            found.extend((node.level, alias.name) for alias in node.names)
+    return found
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
@@ -91,25 +147,64 @@ def _is_type_checking_test(test: ast.expr) -> bool:
     return False
 
 
-def test_every_module_has_a_declared_layer() -> None:
+def test_every_unit_has_a_declared_layer() -> None:
     """A new module must be placed on a layer deliberately, not by accident."""
-    found = {path.stem for path in _module_files()}
+    found = {_unit(path) for path in _module_files()}
     assert found == set(LAYERS), (
         f"undeclared: {sorted(found - set(LAYERS))}; "
         f"declared but missing: {sorted(set(LAYERS) - found)}"
     )
 
 
-@pytest.mark.parametrize("path", _module_files(), ids=lambda p: p.stem)
+def test_every_split_package_declares_its_own_order() -> None:
+    packages = {
+        _unit(path)
+        for path in _module_files()
+        if len(path.relative_to(PACKAGE_DIR).parts) > 1
+    }
+    assert packages == set(INTRA_ORDER), (
+        f"packages without an order: {sorted(packages - set(INTRA_ORDER))}; "
+        f"orders without a package: {sorted(set(INTRA_ORDER) - packages)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    _module_files(),
+    ids=lambda p: str(p.relative_to(PACKAGE_DIR)),
+)
 def test_module_imports_only_from_lower_layers(path: Path) -> None:
-    module = path.stem
-    layer = LAYERS[module]
-    for dependency in sorted(_runtime_imports(path.read_text())):
-        if dependency not in LAYERS:
+    """Sibling imports go strictly downward, whatever depth they are made at."""
+    unit = _unit(path)
+    layer = LAYERS[unit]
+    depth = len(path.relative_to(PACKAGE_DIR).parts)
+    for level, name in _imports(path.read_text()):
+        # `level` counts the dots: inside `jev_agent/x.py` one dot is a
+        # sibling; inside `jev_agent/pkg/x.py` it takes two.
+        if level != depth:
             continue
-        assert LAYERS[dependency] < layer, (
-            f"{module} (layer {layer}) imports {dependency} "
-            f"(layer {LAYERS[dependency]}); imports must go strictly downward"
+        if name not in LAYERS:
+            continue
+        assert LAYERS[name] < layer, (
+            f"{path.name} (unit {unit}, layer {layer}) imports {name} "
+            f"(layer {LAYERS[name]}); imports must go strictly downward"
+        )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [p for p in _module_files() if len(p.relative_to(PACKAGE_DIR).parts) > 1],
+    ids=lambda p: str(p.relative_to(PACKAGE_DIR)),
+)
+def test_package_submodules_import_in_the_declared_order(path: Path) -> None:
+    order = INTRA_ORDER[_unit(path)]
+    position = _intra_position(path, order)
+    for level, name in _imports(path.read_text()):
+        if level != len(path.relative_to(PACKAGE_DIR).parts) - 1 or name not in order:
+            continue
+        assert order.index(name) < position, (
+            f"{path.name} imports {name}, which is not below it in "
+            f"{_unit(path)}'s declared order {order}"
         )
 
 
@@ -117,7 +212,7 @@ def test_no_function_local_sibling_imports() -> None:
     """Sibling imports sit at module top level, where the layering is visible.
 
     The one exception is a `TYPE_CHECKING` block, which this check ignores
-    because `_runtime_imports` does.
+    because `_imports` does.
     """
     offenders: list[str] = []
     for path in _module_files():
@@ -126,6 +221,6 @@ def test_no_function_local_sibling_imports() -> None:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for inner in ast.walk(node):
-                if isinstance(inner, ast.ImportFrom) and inner.level == 1:
+                if isinstance(inner, ast.ImportFrom) and inner.level:
                     offenders.append(f"{path.stem}.{node.name}: {inner.module}")
     assert offenders == []

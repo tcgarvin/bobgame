@@ -1,10 +1,9 @@
-"""Conversation mode: the actor talks, one world turn at a time.
+"""One conversation, from the tick the actor sits down to the report.
 
 A conversation is a world object with a seat for up to four settlers and a
 round-robin turn order (docs/09_conversation_and_reflex.md section 2). While
 the actor holds a seat, this module owns its body: it submits `wait` every tick
-except on its own turn, and on its turn it asks the *converser*, a small
-language-model agent with no tools, for one move.
+except on its own turn, and on its turn it asks the converser for one move.
 
 The model call runs as a background task, so the tick loop never waits on it
 and never misses the intent deadline. Every tick, whether or not it is this
@@ -21,390 +20,56 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import structlog
-from pydantic import BaseModel, Field
-from pydantic_ai import Agent
 
-from .. import world_pb2 as pb
-from . import items
-from .geometry import Coord
-from .journal import append_scratch_line, read_journal
-from .llm import planner_model_settings, resolve_model_name
-from .outcomes import Seat, parse_gave, parse_seat
-from .actions import converse_intent, give_intent
-from .walk import WalkDriver, stand_candidates
-from .pricing import CostLedger, usage_from_messages
-from .tracelog import AgentTrace
-from .worldmodel import ConversationInfo, TickDigest, TranscriptLine, WorldModel
+from ... import world_pb2 as pb
+from ..actions import converse_intent, give_intent
+from ..geometry import Coord
+from ..journal import append_scratch_line, read_journal
+from ..outcomes import Seat, parse_gave, parse_seat
+from ..tracelog import AgentTrace
+from ..walk import WalkDriver, stand_candidates
+from ..worldmodel import ConversationInfo, TickDigest, TranscriptLine, WorldModel
+from .converser import run_converser
+from .protocol import (
+    ACTION_EAT,
+    ACTION_GIVE,
+    ACTION_JOIN,
+    ACTION_LEAVE,
+    ACTION_PASS,
+    ACTION_SPEAK,
+    CONVERSER_TIMEOUT_SECONDS,
+    CONVERSE_ACTION_TYPE,
+    DUPLICATE_TICK_WINDOW,
+    END_CLOSED,
+    END_DIED,
+    END_LEFT,
+    END_NOBODY_JOINED,
+    END_REMOVED,
+    GIVE_ACTION_TYPE,
+    JOIN_ACTIONS,
+    MAX_NOTE_CHARACTERS,
+    MOVE_ACTION_TYPES,
+    NOTE_STALE,
+    NO_MOVE_ACTION,
+    OBJECT_GRACE_TICKS,
+    OUTCOME_NOT_CARRIED_OUT,
+    OUTCOME_NO_KIND,
+    OUTCOME_NO_TARGET,
+    Converser,
+    ConverserMove,
+    MoveOutcome,
+    NoteCall,
+    PendingCall,
+)
+from .converser import NOTE_INSTRUCTION
+from .report import ConversationReport, sleep_end_reason
 
 logger = structlog.get_logger(__name__)
-
-ACTION_OPEN = "open"
-ACTION_JOIN = "join"
-# Mirrored in `items.py` with the other world constants, and named here beside
-# the actions it belongs with.
-ACTION_HAIL = items.ACTION_HAIL
-# The world's own word for the target's side of a hail: a seat it never asked
-# for (docs/09 section 9).
-ACTION_HAILED = items.ACTION_HAILED
-ACTION_SPEAK = "speak"
-ACTION_PASS = "pass"
-ACTION_LEAVE = "leave"
-ACTION_GIVE = "give"
-ACTION_EAT = "eat"
-
-CONVERSE_ACTION_TYPE = items.CONVERSE_ACTION_TYPE
-GIVE_ACTION_TYPE = "give"
-EAT_ACTION_TYPE = "eat"
-
-# The action types the world reports back for a converser move.
-MOVE_ACTION_TYPES = (CONVERSE_ACTION_TYPE, GIVE_ACTION_TYPE, EAT_ACTION_TYPE)
-
-# End reasons reported to the planner.
-END_CLOSED = "closed"
-END_LEFT = "left"
-END_REMOVED = "removed"
-END_DIED = "died"
-END_NOBODY_JOINED = "nobody joined"
-# The actor fell asleep with a seat: the body is gone from the conversation
-# until it wakes, so the session ends here. On a new-moon night the world puts
-# everyone to sleep and closes every conversation on the same tick
-# (docs/14 section 1), which is the reason the planner is given.
-END_ASLEEP = "asleep"
-END_NEW_MOON = "new_moon"
-
-# What each of those two reasons means, added to the report so the planner is
-# told the physics rather than left with a word.
-SLEEP_END_TEXT: Mapping[str, str] = {
-    END_ASLEEP: "You fell asleep, so your seat ended.",
-    END_NEW_MOON: (
-        "The new moon put everyone to sleep and closed every conversation on "
-        "the island on the same tick."
-    ),
-}
-
-# How the actor came to hold its seat, as the `conversation_start` trace says
-# it. The hailed settler's `via`; the hailer's is `hail`, the world's own word.
-VIA_HAILED = ACTION_HAILED
-JOIN_ACTIONS = (ACTION_OPEN, ACTION_JOIN, ACTION_HAIL, ACTION_HAILED)
-# The seats the actor never asked for: it was hailed.
-UNASKED_VIA = (VIA_HAILED,)
-
-# The world creates the conversation object on the tick it accepts the `open`
-# or `join`, but an observation can lag by a tick; wait this long for the
-# object to show up before declaring the conversation over.
-OBJECT_GRACE_TICKS = 3
-
-# The converser's answer must arrive well inside a tick to be worth using.
-CONVERSER_TIMEOUT_SECONDS = 60.0
-
-MAX_NOTE_CHARACTERS = 400
-
-# Trace note for an answer the world had already moved past when it arrived.
-NOTE_STALE = "stale"
-
-# What is recorded when the world never acted on a move that was submitted.
-OUTCOME_NOT_CARRIED_OUT = "the world did not carry it out"
-
-# A move the code refused before it reached the world.
-OUTCOME_NO_TARGET = "refused: a give needs the name of who receives it"
-OUTCOME_NO_KIND = "refused: a give needs the name of an item in your pack"
-
-# Two sources stamp the same spoken line with different ticks: the speaker's
-# own tick in object state, and the tick the listener observed it. Lines this
-# close together from the same speaker with the same text are one line.
-DUPLICATE_TICK_WINDOW = 2
-
-# Stands in for the answer a cancelled or failed call never produced.
-NO_MOVE_ACTION = ""
-
-
-def converser_narrative(
-    settler_count: int = items.DEFAULT_SETTLER_COUNT,
-) -> str:
-    """The converser's system prompt for a scenario with this many settlers."""
-    return f"""\
-You are one of {items.settler_count_word(settler_count)} people who woke up together on a large, wild island with
-nothing but your hands. The others are real agents like you. Together, build a
-civilization that lasts: a shelter of your own each, and food, safety and rest
-you can count on tomorrow. You are in a
-conversation with some of them right now, and this is your turn to act in it.
-
-How a conversation works:
-- This is the settlers' one channel where the others answer back: everything
-  else (`shout`, a board, a sign) only ever goes one way.
-- A conversation sits on an anchor tile. Up to {items.CONVERSATION_MAX_PARTICIPANTS} settlers stand on tiles next to
-  it and take turns in the order they joined. Anyone within {items.SAY_RADIUS} tiles hears what
-  is said, whether or not they are in it.
-- While you are in the conversation your body stays on its tile and the moves
-  below are the only things you can do. Walking, gathering, crafting, placing
-  and fighting only happen after you `leave` or the conversation closes.
-  The world keeps ticking while you talk: food drops 1 every 4 ticks and at
-  food 0 you lose health.
-- On your turn you may `speak` (one line of at most {items.CONVERSATION_TEXT_LIMIT} characters), `pass`,
-  `leave`, `give` items to someone in the conversation or standing next to
-  you, or `eat` one item from your pack (a berry restores 20 food). Speaking
-  or passing ends your turn; giving and eating do not, so afterwards you are
-  asked again on the next tick.
-- A turn you do not use within {items.CONVERSATION_TURN_TICKS} ticks counts as a pass. The conversation
-  closes when fewer than two settlers are left in it, when everyone passes in
-  one full round, or after {items.CONVERSATION_MAX_UTTERANCES} lines.
-- A `give` needs the item in your pack, the exact item name, and an amount.
-- You may be in this conversation because someone walked up and addressed you
-  rather than because you asked for one. Their line is the first one in the
-  transcript and the turn is yours.
-
-Answer with one move: the action, the text if you are speaking, the target,
-item kind and amount if you are giving, and the item kind if you are eating.
-"""
-
-
-# The default-sized scenario's prompt, for tests and for anything that reads
-# the narrative without building an agent.
-CONVERSER_NARRATIVE = converser_narrative()
-
-NOTE_INSTRUCTION = (
-    "The conversation is over. Answer with two short fields, either of which "
-    "may be empty: what was agreed or learned in the conversation, and "
-    "separately what you yourself said you would do. No preamble, just the "
-    "two fields."
-)
-
-
-class ClosingNote(BaseModel):
-    """The two things worth keeping once a conversation ends."""
-
-    agreed_or_learned: str = Field(
-        default="", description="what was agreed or learned, or empty"
-    )
-    you_said_you_would: str = Field(
-        default="", description="what you yourself said you would do, or empty"
-    )
-
-
-class ConverserMove(BaseModel):
-    """One move in a conversation: what to do on this turn."""
-
-    action: str = Field(description="speak, pass, leave, give or eat")
-    text: str = Field(default="", description="what to say when the action is speak")
-    give_to: str = Field(default="", description="who receives, when giving")
-    kind: str = Field(default="", description="item kind to give or eat")
-    amount: int = Field(default=1, description="how many to give")
-
-
-@dataclass(frozen=True)
-class MoveCall:
-    """One converser move call: its answer and what the call cost.
-
-    `usage` is the block described in docs/11_cost_accounting.md, or empty for
-    a converser that makes no model call (a test double, say).
-    """
-
-    move: ConverserMove
-    usage: Mapping[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class NoteCall:
-    """The closing note (docs/09 section 10, item 5) and what it cost.
-
-    `agreed` is what was agreed or learned; `commitment` is what this settler
-    itself said it would do. Either may be empty.
-    """
-
-    agreed: str = ""
-    commitment: str = ""
-    usage: Mapping[str, Any] = field(default_factory=dict)
-
-
-class Converser(Protocol):
-    """The language-model half of conversation mode."""
-
-    async def move(self, prompt: str) -> MoveCall:
-        """Choose this turn's move."""
-
-    async def note(self, prompt: str) -> NoteCall:
-        """What, if anything, to keep from the conversation."""
-
-
-@dataclass(frozen=True)
-class MoveOutcome:
-    """What the world made of one move this actor submitted."""
-
-    tick: int
-    turn: int
-    move: str
-    outcome: str
-
-    def as_line(self) -> str:
-        """`t272 give 3 berry to cleo -> not enough berry to give`."""
-        return f"t{self.tick} {self.move} -> {self.outcome}"
-
-
-@dataclass(frozen=True)
-class CallResult:
-    """One finished converser call: its answer and how long it really took."""
-
-    move: ConverserMove
-    latency_ms: int
-    error: str = ""
-    usage: Mapping[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class PendingCall:
-    """The background converser call for one turn."""
-
-    task: asyncio.Task[CallResult]
-    turn: int
-    started: float
-
-    def elapsed_ms(self) -> int:
-        """Milliseconds since the call was started."""
-        return int((time.monotonic() - self.started) * 1000)
-
-
-async def run_converser(
-    converser: Converser, prompt: str, timeout: float
-) -> CallResult:
-    """Ask the converser for a move and time the call from inside.
-
-    Timing here rather than at collection time is the point: the tick loop may
-    only look at the task several ticks later, so a latency measured then would
-    be the wait, not the call. A failed call becomes a `pass` with the error
-    recorded, because one bad answer must not end the conversation.
-    """
-    started = time.monotonic()
-    try:
-        call = await asyncio.wait_for(converser.move(prompt), timeout)
-    except asyncio.CancelledError:
-        raise
-    except Exception as error:  # noqa: BLE001 - a failed converser is not fatal
-        elapsed = int((time.monotonic() - started) * 1000)
-        logger.warning("converser_call_failed", error=str(error))
-        return CallResult(ConverserMove(action=ACTION_PASS), elapsed, str(error))
-    return CallResult(
-        call.move, int((time.monotonic() - started) * 1000), usage=call.usage
-    )
-
-
-class ModelConverser:
-    """A `Converser` backed by two pydantic-ai agents on the planner's model.
-
-    One has the structured `ConverserMove` output and no tools; the other
-    writes the note kept after the conversation. Neither has any tool and
-    neither can touch the world.
-    """
-
-    def __init__(
-        self,
-        model_name: str = "",
-        ledger: CostLedger = CostLedger(),
-        settler_count: int = items.DEFAULT_SETTLER_COUNT,
-    ) -> None:
-        self.model_name = resolve_model_name(model_name)
-        # As in `Planner`: the agent passes its own ledger, the default is a
-        # sink for tests.
-        self.ledger = ledger
-        self.settler_count = settler_count
-        narrative = converser_narrative(settler_count)
-        settings = planner_model_settings(self.model_name)
-        self.move_agent: Agent[None, ConverserMove] = Agent(
-            self.model_name,
-            output_type=ConverserMove,
-            system_prompt=narrative,
-            model_settings=settings,
-            retries=2,
-        )
-        self.note_agent: Agent[None, ClosingNote] = Agent(
-            self.model_name,
-            output_type=ClosingNote,
-            system_prompt=narrative,
-            model_settings=settings,
-            retries=1,
-        )
-
-    async def move(self, prompt: str) -> MoveCall:
-        """Ask the model for one move."""
-        result = await self.move_agent.run(prompt)
-        usage = usage_from_messages(result.new_messages())
-        self.ledger.add_converser(usage)
-        return MoveCall(result.output, usage)
-
-    async def note(self, prompt: str) -> NoteCall:
-        """Ask the model what to keep from the conversation."""
-        result = await self.note_agent.run(prompt)
-        usage = usage_from_messages(result.new_messages())
-        self.ledger.add_converser(usage)
-        output = result.output
-        return NoteCall(
-            output.agreed_or_learned.strip(), output.you_said_you_would.strip(), usage
-        )
-
-
-def sleep_end_reason(model: WorldModel) -> str:
-    """Why a seat ended when the body fell asleep holding it.
-
-    The world closes every conversation on the tick a new moon puts everyone
-    to sleep, so that night has its own reason (docs/14 section 1).
-    """
-    return END_NEW_MOON if model.clock.new_moon_tonight else END_ASLEEP
-
-
-@dataclass
-class ConversationReport:
-    """What the planner reads once the conversation has ended."""
-
-    conversation_id: str
-    start_tick: int
-    end_tick: int
-    participants: tuple[str, ...]
-    end_reason: str
-    transcript: tuple[TranscriptLine, ...]
-    given: tuple[str, ...] = ()
-    received: Mapping[str, int] = field(default_factory=dict)
-    # What this settler said it would do, and what was agreed or learned
-    # (docs/09 section 10, item 5); either may be empty.
-    commitment: str = ""
-    agreed: str = ""
-
-    def to_text(self) -> str:
-        """Render the report for the planner's tool result.
-
-        Leads with the two closing-note fields, before the transcript, so the
-        planner sees what to act on without reading the whole exchange.
-        """
-        lines = [
-            f"CONVERSATION REPORT: {self.conversation_id}",
-            f"  ticks: {self.start_tick}-{self.end_tick}",
-            f"  participants: {', '.join(self.participants) or 'nobody else'}",
-            f"  ended because: {self.end_reason}",
-        ]
-        explanation = SLEEP_END_TEXT.get(self.end_reason, "")
-        if explanation:
-            lines.append(f"  {explanation}")
-        lines += [
-            f"  you said you would: {self.commitment or '(none)'}",
-            f"  agreed or learned: {self.agreed or '(none)'}",
-        ]
-        if self.transcript:
-            lines.append("  transcript:")
-            lines.extend(f"    {line.as_line()}" for line in self.transcript)
-        else:
-            lines.append("  transcript: nothing was said")
-        if self.given:
-            lines.append("  you gave: " + "; ".join(self.given))
-        if self.received:
-            received = ", ".join(
-                f"{kind} +{count}" for kind, count in sorted(self.received.items())
-            )
-            lines.append(f"  items you were given: {received}")
-        return "\n".join(lines)
 
 
 def free_seat_tiles(model: WorldModel, anchor: Coord) -> list[Coord]:
