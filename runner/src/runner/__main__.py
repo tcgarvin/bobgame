@@ -6,8 +6,11 @@ from pathlib import Path
 
 import structlog
 
-from .config import load_config, find_config, Config, RunnerConfig, AgentConfig
+from .config import load_config, find_config
 from .manager import ProcessManager
+
+# The project ships one scenario; its runner config is the default.
+DEFAULT_CONFIG = "hamlet"
 
 
 def setup_signal_handlers(manager: ProcessManager) -> None:
@@ -35,7 +38,8 @@ def main() -> None:
     parser.add_argument(
         "--config",
         type=str,
-        help="Path or name of runner TOML config file",
+        default=DEFAULT_CONFIG,
+        help=f"Path or name of runner TOML config file (default: {DEFAULT_CONFIG})",
     )
     parser.add_argument(
         "--server",
@@ -70,28 +74,18 @@ def main() -> None:
 
     logger = structlog.get_logger()
 
-    # Load config
-    if args.config:
-        try:
-            config_path = find_config(args.config)
-        except FileNotFoundError:
-            # Try as direct path
-            config_path = Path(args.config)
-            if not config_path.exists():
-                logger.error("config_not_found", path=args.config)
-                raise SystemExit(1)
+    # Load config. There is no built-in fallback: a config that cannot be
+    # found is an error naming what was looked for.
+    try:
+        config_path = find_config(args.config)
+    except FileNotFoundError as exc:
+        config_path = Path(args.config)
+        if not config_path.exists():
+            logger.error("config_not_found", path=args.config, error=str(exc))
+            raise SystemExit(1)
 
-        config = load_config(config_path)
-        logger.info("config_loaded", path=str(config_path))
-    else:
-        # Default config with simple agent
-        config = Config(
-            runner=RunnerConfig(),
-            agents={
-                "default": AgentConfig(module="agents.random_agent"),
-            },
-        )
-        logger.info("using_default_config")
+    config = load_config(config_path)
+    logger.info("config_loaded", path=str(config_path))
 
     # Apply CLI overrides
     if args.server:

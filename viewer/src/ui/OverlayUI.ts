@@ -88,7 +88,6 @@ export function statusChip(entity: InterpolatedEntity): { text: string; kind: st
       entity.maxFatigue > 0 && entity.fatigue >= entity.maxFatigue;
     return collapsed ? { text: 'collapsed', kind: '' } : { text: 'asleep', kind: '' };
   }
-  if (entity.openToTalk) return { text: 'open to talk', kind: 'talk' };
   return null;
 }
 

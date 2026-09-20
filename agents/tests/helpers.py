@@ -29,7 +29,8 @@ def make_entity(
     fatigue: int = 0,
     max_fatigue: int = 100,
     asleep: bool = False,
-    open_to_talk: bool = False,
+    sleeping_on: str = "",
+    collapsed: bool = False,
 ) -> pb.Entity:
     """A proto Entity with sensible player defaults."""
     items = [
@@ -50,7 +51,8 @@ def make_entity(
         fatigue=fatigue,
         max_fatigue=max_fatigue,
         asleep=asleep,
-        open_to_talk=open_to_talk,
+        sleeping_on=sleeping_on,
+        collapsed=collapsed,
     )
 
 
@@ -149,20 +151,14 @@ def utterance_event(
     text: str,
     position: tuple[int, int],
     channel: str = "local",
-    open_to_talk: bool = False,
 ) -> pb.ObservationEvent:
-    """An `Utterance` observation event spoken from `position`.
-
-    `open_to_talk` marks it as an invitation, as the world does for a say that
-    carried the flag (docs/09 section 8.2).
-    """
+    """An `Utterance` observation event spoken from `position`."""
     return pb.ObservationEvent(
         utterance=pb.Utterance(
             speaker_id=speaker_id,
             channel=channel,
             text=text,
             position=pb.Position(x=position[0], y=position[1]),
-            open_to_talk=open_to_talk,
         )
     )
 

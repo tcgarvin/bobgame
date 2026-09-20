@@ -526,19 +526,14 @@ CONVERSATION_MAX_UTTERANCES = 40
 CONVERSATION_TEXT_LIMIT = 300
 CONVERSATION_TRANSCRIPT_KEPT = 12
 
-# A say with `open_to_talk` keeps the speaker open for this many ticks: anyone
-# standing next to them may accept and a conversation starts (docs/09 section 8).
-INVITATION_TICKS = 40
-# The `ConverseIntent` action that takes up an open invitation.
-ACTION_ACCEPT = "accept"
-# The `ConverseIntent` action that walks up to a settler and addresses it,
-# without any invitation (docs/09 section 9). The world reports it to the
+# The `ConverseIntent` action that walks up to a settler and addresses it
+# (docs/09 section 9). The world reports it to the
 # hailer as `hail conv_N <target>` and to the target as
 # `hailed conv_N <hailer>`.
 ACTION_HAIL = "hail"
 ACTION_HAILED = "hailed"
 # A settler cannot be hailed until this many ticks after its last conversation
-# ended. Invitations, accepting, opening and joining are unaffected.
+# ended. Opening and joining are unaffected.
 HAIL_COOLDOWN_TICKS = 60
 # `EntityActed.action_type` for every `ConverseIntent`, whatever its action.
 CONVERSE_ACTION_TYPE = "converse"

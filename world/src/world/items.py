@@ -138,10 +138,8 @@ CONVERSATION_MAX_UTTERANCES = 40
 CONVERSATION_TEXT_LIMIT = 300
 # Transcript lines kept in object state.
 CONVERSATION_TRANSCRIPT_KEPT = 12
-# How long a spoken invitation ("open to talk", docs/09, section 8) stays open.
-INVITATION_TICKS = 40
 # How long after its last conversation ended a settler cannot be hailed
-# (docs/09, section 9). Invitations, joining and opening are unaffected.
+# (docs/09, section 9). Joining and opening are unaffected.
 HAIL_COOLDOWN_TICKS = 60
 
 # --- Signs (docs/08_building.md, "Signs") ---------------------------------

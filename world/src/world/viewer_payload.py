@@ -28,12 +28,8 @@ def position_state(position: Position) -> dict[str, int]:
     return {"x": position.x, "y": position.y}
 
 
-def entity_state(entity: Entity, tick: int) -> dict[str, Any]:
-    """JSON shape for an entity sent to the viewer.
-
-    `tick` is the tick the payload describes; the invitation flag
-    (`open_to_talk`) is derived from it (docs/09, section 8.2).
-    """
+def entity_state(entity: Entity) -> dict[str, Any]:
+    """JSON shape for an entity sent to the viewer."""
     return {
         "entity_id": entity.entity_id,
         "position": position_state(entity.position),
@@ -50,7 +46,6 @@ def entity_state(entity: Entity, tick: int) -> dict[str, Any]:
         "asleep": entity.asleep,
         "sleeping_on": entity.sleeping_on,
         "collapsed": entity.collapsed,
-        "open_to_talk": entity.is_open_to_talk(tick),
         "inventory": {kind: count for kind, count in entity.inventory.items},
     }
 
@@ -65,11 +60,11 @@ def clock_payload(clock: WorldClock) -> dict[str, Any]:
     }
 
 
-def entity_from_state(state: dict[str, Any], tick: int) -> Entity:
+def entity_from_state(state: dict[str, Any]) -> Entity:
     """Rebuild an Entity from the JSON shape `entity_state` produces.
 
-    The payload carries only the invitation flag, so an open invitation is
-    rebuilt as one that lasts until just after `tick`, with no text.
+    Keys the current payload no longer carries (an old recording's
+    `open_to_talk`, say) are ignored.
 
     Recordings made before 2026-09-18 call the food stat `hunger`/`max_hunger`;
     those keys are still read here so old runs replay.
@@ -102,7 +97,6 @@ def entity_from_state(state: dict[str, Any], tick: int) -> Entity:
         asleep=bool(state.get("asleep", False)),
         sleeping_on=state.get("sleeping_on", ""),
         collapsed=bool(state.get("collapsed", False)),
-        open_until_tick=tick + 1 if state.get("open_to_talk", False) else -1,
     )
 
 
@@ -169,7 +163,6 @@ def utterance_payload(utterance: UtteranceEvent) -> dict[str, Any]:
         "text": utterance.text,
         "position": position_state(utterance.position),
         "conversation_id": utterance.conversation_id,
-        "open_to_talk": utterance.open_to_talk,
     }
 
 
@@ -221,6 +214,4 @@ def entity_despawned_payload(despawned: EntityDespawnedEvent) -> dict[str, Any]:
 
 def entity_updates(world: World) -> list[dict[str, Any]]:
     """Full state of every entity in the world."""
-    return [
-        entity_state(entity, world.tick) for entity in world.all_entities().values()
-    ]
+    return [entity_state(entity) for entity in world.all_entities().values()]

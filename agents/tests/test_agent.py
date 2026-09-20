@@ -566,7 +566,9 @@ async def test_a_reflex_pauses_a_conversation_and_hands_it_back(
             [4],
             9,
             objects_by_tick={tick: [seated] for tick in range(1, 10)},
-            events_by_tick={2: [acted_event("ada", "converse", True, "join conv_1")]},
+            events_by_tick={
+                2: [acted_event("ada", "converse", True, "hailed conv_1 mira")]
+            },
         )
     )
     agent = build_agent(world, FakeJevClient(default_action="wait"), tmp_path)
@@ -602,7 +604,9 @@ async def test_a_join_during_a_stint_ends_it_and_appends_the_conversation(
             [],
             8,
             objects_by_tick=objects,
-            events_by_tick={2: [acted_event("ada", "converse", True, "join conv_1")]},
+            events_by_tick={
+                2: [acted_event("ada", "converse", True, "hailed conv_1 mira")]
+            },
         )
     )
     agent = build_agent(world, FakeJevClient(default_action="wait"), tmp_path)
@@ -859,11 +863,11 @@ async def test_the_status_report_carries_the_running_cost(tmp_path: Path) -> Non
     assert costs[-1]["total_usd"] == costs[-1]["jev_usd"]
 
 
-# -- invitations: a conversation that starts by itself (docs/09 section 8.3) --
+# -- a conversation that starts by itself: this actor was hailed (docs/09 9) --
 
 
-def accepted_observations(count: int, *, seated_until: int) -> list[pb.Observation]:
-    """ada is pulled into conv_1 at tick 2, which closes after `seated_until`."""
+def hailed_observations(count: int, *, seated_until: int) -> list[pb.Observation]:
+    """mira hails ada into conv_1 at tick 2, which closes after `seated_until`."""
     seated = converse_object("conv_1", (11, 10), ["mira", "ada"], speaker="mira")
     return [
         make_observation(
@@ -871,7 +875,7 @@ def accepted_observations(count: int, *, seated_until: int) -> list[pb.Observati
             make_entity("ada", (10, 10)),
             objects=[seated] if tick <= seated_until else [],
             events=(
-                [acted_event("ada", "converse", True, "join conv_1")]
+                [acted_event("ada", "converse", True, "hailed conv_1 mira")]
                 if tick == 2
                 else []
             ),
@@ -883,7 +887,7 @@ def accepted_observations(count: int, *, seated_until: int) -> list[pb.Observati
 async def test_a_conversation_that_starts_by_itself_interrupts_a_direct_action(
     tmp_path: Path,
 ) -> None:
-    world = FakeWorldClient(accepted_observations(8, seated_until=4))
+    world = FakeWorldClient(hailed_observations(8, seated_until=4))
     agent = build_agent(world, FakeJevClient(default_action="wait"), tmp_path)
     agent.converser = FakeConverser()
     outcomes: list[str] = []
@@ -905,10 +909,10 @@ async def test_a_conversation_that_starts_by_itself_interrupts_a_direct_action(
     assert outcomes[1] == "wait 1 ticks -> interrupted: conversation conv_1 started"
 
 
-async def test_an_uninvited_conversation_is_traced_as_accepted(
+async def test_an_unasked_for_conversation_is_traced_as_hailed(
     tmp_path: Path,
 ) -> None:
-    world = FakeWorldClient(accepted_observations(6, seated_until=4))
+    world = FakeWorldClient(hailed_observations(6, seated_until=4))
     agent = build_agent(world, FakeJevClient(default_action="wait"), tmp_path)
     agent.converser = FakeConverser()
 
@@ -924,13 +928,13 @@ async def test_an_uninvited_conversation_is_traced_as_accepted(
     ) as handle:
         lines = [json.loads(line) for line in handle if line.strip()]
     start = next(line for line in lines if line["event"] == "conversation_start")
-    assert start["via"] == "accepted"
+    assert start["via"] == "hailed"
 
 
 async def test_the_report_of_a_conversation_nobody_asked_for_reaches_the_planner(
     tmp_path: Path,
 ) -> None:
-    world = FakeWorldClient(accepted_observations(8, seated_until=4))
+    world = FakeWorldClient(hailed_observations(8, seated_until=4))
     agent = build_agent(world, FakeJevClient(default_action="wait"), tmp_path)
     agent.converser = FakeConverser(note_text="mira wants planks")
 
@@ -952,7 +956,7 @@ async def test_a_queued_stint_waits_for_the_conversation_and_then_runs(
     tmp_path: Path,
 ) -> None:
     jev = FakeJevClient(default_action="wait")
-    world = FakeWorldClient(accepted_observations(10, seated_until=4))
+    world = FakeWorldClient(hailed_observations(10, seated_until=4))
     agent = build_agent(world, jev, tmp_path)
     agent.converser = FakeConverser()
     reports: list[object] = []

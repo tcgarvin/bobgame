@@ -220,28 +220,6 @@ class TestProtoConversion:
         assert isinstance(speak, ConverseIntent)
         assert speak.direction is None
 
-    def test_the_invitation_fields_convert(self) -> None:
-        """docs/09, section 8.2: the say flag and the accept target."""
-        say = intent_from_proto(
-            "bob", pb.Intent(say=pb.SayIntent(text="hi", open_to_talk=True))
-        )
-        assert isinstance(say, SayIntent)
-        assert say.open_to_talk is True
-
-        plain = intent_from_proto("bob", pb.Intent(say=pb.SayIntent(text="hi")))
-        assert isinstance(plain, SayIntent)
-        assert plain.open_to_talk is False
-
-        accept = intent_from_proto(
-            "bob",
-            pb.Intent(
-                converse=pb.ConverseIntent(action="accept", target_entity_id="mira")
-            ),
-        )
-        assert isinstance(accept, ConverseIntent)
-        assert accept.action == "accept"
-        assert accept.target_entity_id == "mira"
-
     def test_malformed_intents_raise(self) -> None:
         for proto_intent in (
             pb.Intent(),

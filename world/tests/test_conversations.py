@@ -29,7 +29,6 @@ from world.items import (
     CONVERSATION_TRANSCRIPT_KEPT,
     CONVERSATION_TURN_TICKS,
     HAIL_COOLDOWN_TICKS,
-    INVITATION_TICKS,
     WOOD_WALL,
 )
 from world.lease import LeaseManager
@@ -45,9 +44,7 @@ from world.tick import (
     TickResult,
     process_tick,
 )
-from world.conversion import entity_to_proto
 from world.types import (
-    CONVERSE_ACCEPT,
     CONVERSE_HAIL,
     CONVERSE_JOIN,
     CONVERSE_LEAVE,
@@ -60,9 +57,8 @@ from world.types import (
     MoveIntent,
     PlaceIntent,
     Position,
-    SayIntent,
 )
-from world.viewer_payload import entity_state, utterance_payload
+from world.viewer_payload import utterance_payload
 
 ANCHOR = Position(x=5, y=5)
 
@@ -135,21 +131,6 @@ def hail_intent(entity_id: str, target_entity_id: str, text: str) -> ConverseInt
         target_entity_id=target_entity_id,
         text=text,
     )
-
-
-def accept_intent(entity_id: str, target_entity_id: str) -> ConverseIntent:
-    return ConverseIntent(
-        entity_id=entity_id,
-        action=CONVERSE_ACCEPT,
-        target_entity_id=target_entity_id,
-    )
-
-
-def invite_intent(
-    entity_id: str, text: str = "anyone want to talk?", channel: str = "local"
-) -> SayIntent:
-    """A say that carries the invitation flag."""
-    return SayIntent(entity_id=entity_id, text=text, channel=channel, open_to_talk=True)
 
 
 def failures(result: TickResult, entity_id: str) -> list[str]:
@@ -570,7 +551,7 @@ class TestRecordingAndReplay:
             run_dir=tmp_path / "20260917-120000-test",
             run_id="20260917-120000-test",
             config_name="test",
-            config_path="world/configs/default.toml",
+            config_path="world/configs/hamlet.toml",
             world=world,
             tick_config=TickConfig(tick_duration_ms=100, intent_deadline_ms=50),
         )
@@ -608,325 +589,6 @@ class TestLookups:
     def test_conversation_of_returns_none_for_a_bystander(self, world: World) -> None:
         open_and_join(world)
         assert conversation_of(world, "cleo") is None
-
-
-# --- Invitations (docs/09, section 8) ---------------------------------------
-
-
-class TestSayingAnInvitation:
-    def test_flagged_say_opens_the_invitation(self, world: World) -> None:
-        run_tick(world, invite_intent("ada", "who has clay?"))
-
-        ada = world.get_entity("ada")
-        assert ada.open_until_tick == 0 + INVITATION_TICKS
-        assert ada.invitation_text == "who has clay?"
-        assert ada.invitation_tick == 0
-        assert ada.is_open_to_talk(world.tick)
-
-    def test_utterance_and_payload_carry_the_flag(self, world: World) -> None:
-        result = run_tick(world, invite_intent("ada"))
-
-        assert len(result.utterances) == 1
-        assert result.utterances[0].open_to_talk is True
-        assert utterance_payload(result.utterances[0])["open_to_talk"] is True
-
-    def test_a_plain_say_leaves_no_invitation(self, world: World) -> None:
-        result = run_tick(
-            world, SayIntent(entity_id="ada", text="just talking", channel="local")
-        )
-
-        assert result.utterances[0].open_to_talk is False
-        assert world.get_entity("ada").is_open_to_talk(world.tick) is False
-
-    def test_a_plain_say_does_not_end_a_live_invitation(self, world: World) -> None:
-        run_tick(world, invite_intent("ada", "who has clay?"))
-        run_tick(world, SayIntent(entity_id="ada", text="still here"))
-
-        ada = world.get_entity("ada")
-        assert ada.is_open_to_talk(world.tick)
-        assert ada.invitation_text == "who has clay?"
-
-    def test_the_flag_is_ignored_on_the_thought_channel(self, world: World) -> None:
-        result = run_tick(world, invite_intent("ada", "hmm", channel="thought"))
-
-        assert result.utterances[0].open_to_talk is False
-        assert world.get_entity("ada").is_open_to_talk(world.tick) is False
-
-    def test_a_shout_can_invite(self, world: World) -> None:
-        run_tick(world, invite_intent("ada", "come talk", channel="shout"))
-        assert world.get_entity("ada").is_open_to_talk(world.tick)
-
-    def test_the_invitation_expires(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        # Said on tick 0, so the last tick it is live on is tick 39.
-        idle_ticks(world, INVITATION_TICKS - 2)
-        assert world.tick == INVITATION_TICKS - 1
-        assert world.get_entity("ada").is_open_to_talk(world.tick)
-
-        idle_ticks(world, 1)
-        assert world.tick == INVITATION_TICKS
-        assert world.get_entity("ada").is_open_to_talk(world.tick) is False
-
-    def test_saying_again_renews_the_invitation(self, world: World) -> None:
-        run_tick(world, invite_intent("ada", "first"))
-        idle_ticks(world, 10)
-        run_tick(world, invite_intent("ada", "second"))
-
-        ada = world.get_entity("ada")
-        assert ada.open_until_tick == 11 + INVITATION_TICKS
-        assert ada.invitation_text == "second"
-        assert ada.invitation_tick == 11
-
-    def test_death_ends_the_invitation(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        kill_entity(world, "ada", "", TickEvents())
-        assert world.get_entity("ada").is_open_to_talk(world.tick) is False
-
-    def test_opening_a_conversation_ends_the_invitation(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        run_tick(world, open_intent("ada", Direction.EAST, "hello"))
-        assert world.get_entity("ada").is_open_to_talk(world.tick) is False
-
-    def test_joining_a_conversation_ends_the_invitation(self, world: World) -> None:
-        run_tick(world, open_intent("ada", Direction.EAST, "hello"))
-        conversation_id = all_conversations(world)[0].object_id
-        run_tick(world, invite_intent("bram"))
-        run_tick(world, join_intent("bram", conversation_id))
-        assert world.get_entity("bram").is_open_to_talk(world.tick) is False
-
-    def test_the_entity_proto_and_payload_carry_the_flag(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        ada = world.get_entity("ada")
-
-        assert entity_to_proto(ada, world.tick).open_to_talk is True
-        assert entity_state(ada, world.tick)["open_to_talk"] is True
-        assert entity_to_proto(ada, world.tick + INVITATION_TICKS).open_to_talk is False
-        assert entity_state(ada, world.tick + INVITATION_TICKS)["open_to_talk"] is False
-
-    def test_the_payload_flag_is_false_without_an_invitation(
-        self, world: World
-    ) -> None:
-        bram = world.get_entity("bram")
-        assert entity_state(bram, world.tick)["open_to_talk"] is False
-        assert entity_to_proto(bram, world.tick).open_to_talk is False
-
-
-class TestAccept:
-    def test_accept_opens_a_conversation_for_both(self, world: World) -> None:
-        run_tick(world, invite_intent("ada", "who has clay?"))
-        result = run_tick(world, accept_intent("evan", "ada"))
-
-        conversations = all_conversations(world)
-        assert len(conversations) == 1
-        conversation = conversations[0]
-        assert conversation.object_type == CONVERSATION
-        assert read_participants(conversation) == ["ada", "evan"]
-        assert conversation.get_state("opened_by") == "ada"
-        assert conversation.get_state(SPEAKER_KEY) == "ada"
-        assert conversation.get_state(UTTERANCES_KEY) == "0"
-        assert conversation.get_state(PASSES_KEY) == "0"
-        assert [added.obj.object_id for added in result.objects_added] == [
-            conversation.object_id
-        ]
-
-    def test_the_invitation_line_is_the_first_transcript_entry(
-        self, world: World
-    ) -> None:
-        run_tick(world, invite_intent("ada", "who has clay?"))
-        idle_ticks(world, 3)
-        run_tick(world, accept_intent("evan", "ada"))
-
-        conversation = all_conversations(world)[0]
-        assert read_transcript(conversation) == [
-            {"tick": 0, "speaker": "ada", "text": "who has clay?"}
-        ]
-
-    def test_accept_emits_both_acted_events_and_no_utterance(
-        self, world: World
-    ) -> None:
-        run_tick(world, invite_intent("ada"))
-        result = run_tick(world, accept_intent("evan", "ada"))
-        conversation_id = all_conversations(world)[0].object_id
-
-        details = {
-            (action.entity_id, action.details)
-            for action in result.action_results
-            if action.action_type == "converse" and action.success
-        }
-        assert details == {
-            ("evan", f"accept {conversation_id} ada"),
-            ("ada", f"join {conversation_id}"),
-        }
-        assert result.utterances == []
-
-    def test_accept_clears_the_invitation(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        run_tick(world, accept_intent("evan", "ada"))
-        assert world.get_entity("ada").is_open_to_talk(world.tick) is False
-
-    def test_the_accepters_own_invitation_is_cleared(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"), invite_intent("evan"))
-        run_tick(world, accept_intent("evan", "ada"))
-        assert world.get_entity("evan").is_open_to_talk(world.tick) is False
-
-    def test_the_anchor_is_the_smallest_free_shared_tile(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        run_tick(world, accept_intent("evan", "ada"))
-
-        # evan (4,4) and ada (4,5) share (3,4), (3,5), (5,4) and (5,5); (5,4)
-        # holds cleo, and (3,4) is the smallest in (x, y) order.
-        assert all_conversations(world)[0].position == Position(x=3, y=4)
-
-    def test_the_anchor_skips_blocked_tiles(self, world: World) -> None:
-        for index, position in enumerate(
-            (Position(x=3, y=4), Position(x=3, y=5)), start=1
-        ):
-            world.add_object(
-                WorldObject(
-                    object_id=f"wall_{index}",
-                    position=position,
-                    object_type=WOOD_WALL,
-                )
-            )
-        run_tick(world, invite_intent("ada"))
-        run_tick(world, accept_intent("evan", "ada"))
-
-        assert all_conversations(world)[0].position == Position(x=5, y=5)
-
-    def test_the_new_conversation_runs_like_any_other(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        run_tick(world, accept_intent("evan", "ada"))
-        result = run_tick(world, speak_intent("ada", "i have clay"))
-
-        conversation = all_conversations(world)[0]
-        assert conversation.get_state(SPEAKER_KEY) == "evan"
-        assert [line["text"] for line in read_transcript(conversation)] == [
-            "anyone want to talk?",
-            "i have clay",
-        ]
-        assert result.utterances[0].channel == CONVERSATION_CHANNEL
-
-
-class TestAcceptFailures:
-    def test_no_invitation_from_a_silent_settler(self, world: World) -> None:
-        result = run_tick(world, accept_intent("evan", "ada"))
-        assert failures(result, "evan") == ["no invitation from ada"]
-        assert all_conversations(world) == []
-
-    def test_no_invitation_after_it_expired(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        idle_ticks(world, INVITATION_TICKS)
-        result = run_tick(world, accept_intent("evan", "ada"))
-        assert failures(result, "evan") == ["no invitation from ada"]
-
-    def test_no_invitation_from_an_unknown_settler(self, world: World) -> None:
-        result = run_tick(world, accept_intent("evan", "nobody"))
-        assert failures(result, "evan") == ["no invitation from nobody"]
-
-    def test_no_invitation_from_the_dead(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        kill_entity(world, "ada", "", TickEvents())
-        result = run_tick(world, accept_intent("evan", "ada"))
-        assert failures(result, "evan") == ["no invitation from ada"]
-
-    def test_not_next_to_the_inviter(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        result = run_tick(world, accept_intent("bram", "ada"))
-        assert failures(result, "bram") == ["not next to ada"]
-
-    def test_the_accepter_is_already_in_a_conversation(self, world: World) -> None:
-        # evan (4,4) takes a seat, then cleo (5,4) next to it invites.
-        open_and_join(world, joiners=("evan",))
-        run_tick(world, invite_intent("cleo"))
-        result = run_tick(world, accept_intent("evan", "cleo"))
-        assert failures(result, "evan") == ["already in a conversation"]
-
-    def test_the_inviter_is_already_in_a_conversation(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        run_tick(world, open_intent("ada", Direction.EAST, "hello"))
-        result = run_tick(world, accept_intent("evan", "ada"))
-        assert failures(result, "evan") == ["ada is already in a conversation"]
-
-    def test_no_free_tile_next_to_both(self, world: World) -> None:
-        # evan (4,4) and ada (4,5) share (3,4), (3,5), (5,4) and (5,5); cleo
-        # stands on (5,4), so walling the other three leaves nothing.
-        for index, position in enumerate(
-            (Position(x=3, y=4), Position(x=3, y=5), Position(x=5, y=5)), start=1
-        ):
-            world.add_object(
-                WorldObject(
-                    object_id=f"wall_{index}",
-                    position=position,
-                    object_type=WOOD_WALL,
-                )
-            )
-        run_tick(world, invite_intent("ada"))
-        result = run_tick(world, accept_intent("evan", "ada"))
-
-        assert failures(result, "evan") == ["no free tile next to both of you"]
-        assert all_conversations(world) == []
-
-    def test_two_accepters_race_and_the_smaller_id_wins(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        result = run_tick(
-            world, accept_intent("evan", "ada"), accept_intent("cleo", "ada")
-        )
-
-        conversations = all_conversations(world)
-        assert len(conversations) == 1
-        conversation = conversations[0]
-        assert read_participants(conversation) == ["ada", "cleo"]
-        assert failures(result, "evan") == [f"{conversation.object_id} already started"]
-
-    def test_the_loser_can_join_on_a_later_tick(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"))
-        run_tick(world, accept_intent("evan", "ada"), accept_intent("cleo", "ada"))
-        conversation = all_conversations(world)[0]
-        run_tick(world, join_intent("evan", conversation.object_id))
-
-        assert read_participants(world.get_object(conversation.object_id)) == [
-            "ada",
-            "cleo",
-            "evan",
-        ]
-
-
-class TestInvitationRecordingAndReplay:
-    def test_the_recorded_tick_and_the_replay_carry_the_flag(
-        self, world: World, tmp_path: Path
-    ) -> None:
-        recorder = RunRecorder(
-            run_dir=tmp_path / "20260918-120000-test",
-            run_id="20260918-120000-test",
-            config_name="test",
-            config_path="world/configs/default.toml",
-            world=world,
-            tick_config=TickConfig(tick_duration_ms=100, intent_deadline_ms=50),
-        )
-        recorder.start()
-        recorder.record_tick(run_tick(world, invite_intent("ada", "who has clay?")))
-        recorder.record_tick(run_tick(world, accept_intent("evan", "ada")))
-        recorder.close()
-
-        session = ReplaySession(
-            RunLoader(tmp_path / "20260918-120000-test"), tmp_path / "cache"
-        )
-        session.seek(0)
-        message = session.tick_completed(0)
-        states = {update["entity_id"]: update for update in message["entity_updates"]}
-        assert states["ada"]["open_to_talk"] is True
-        assert states["bram"]["open_to_talk"] is False
-        assert message["utterances"][0]["open_to_talk"] is True
-        assert session.world.get_entity("ada").is_open_to_talk(0)
-
-        # The accept on tick 1 clears it again.
-        session.seek(1)
-        replayed = {
-            update["entity_id"]: update
-            for update in session.tick_completed(1)["entity_updates"]
-        }
-        assert replayed["ada"]["open_to_talk"] is False
-        assert session.world.get_entity("ada").is_open_to_talk(1) is False
 
 
 class TestHail:
@@ -1005,12 +667,6 @@ class TestHail:
         )
         transcript = read_transcript(all_conversations(world)[0])
         assert transcript[0]["text"] == "x" * CONVERSATION_TEXT_LIMIT
-
-    def test_hail_clears_both_invitations(self, world: World) -> None:
-        run_tick(world, invite_intent("ada"), invite_intent("evan"))
-        run_tick(world, hail_intent("evan", "ada", "hi"))
-        assert world.get_entity("ada").is_open_to_talk(world.tick) is False
-        assert world.get_entity("evan").is_open_to_talk(world.tick) is False
 
     def test_the_target_can_leave(self, world: World) -> None:
         run_tick(world, hail_intent("evan", "ada", "hi"))
@@ -1130,12 +786,6 @@ class TestHailCooldown:
         self.close_one_conversation(world)
         idle_ticks(world, HAIL_COOLDOWN_TICKS - 1)
         run_tick(world, hail_intent("evan", "ada", "again?"))
-        assert len(all_conversations(world)) == 1
-
-    def test_the_cooldown_does_not_block_an_accept(self, world: World) -> None:
-        self.close_one_conversation(world)
-        run_tick(world, invite_intent("ada"))
-        run_tick(world, accept_intent("evan", "ada"))
         assert len(all_conversations(world)) == 1
 
     def test_the_cooldown_does_not_block_opening_or_joining(self, world: World) -> None:

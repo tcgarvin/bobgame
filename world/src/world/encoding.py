@@ -40,41 +40,6 @@ def encode_terrain_rle(terrain: NDArray[np.uint8]) -> bytes:
     return result.getvalue()
 
 
-def decode_terrain_rle(data: bytes, shape: tuple[int, int]) -> NDArray[np.uint8]:
-    """Decode RLE-compressed terrain data.
-
-    Args:
-        data: RLE-encoded bytes from encode_terrain_rle.
-        shape: Expected output shape (height, width).
-
-    Returns:
-        2D uint8 array with decoded terrain.
-
-    Raises:
-        ValueError: If decoded length doesn't match expected shape.
-    """
-    expected_size = shape[0] * shape[1]
-    result = np.zeros(expected_size, dtype=np.uint8)
-
-    pos = 0
-    i = 0
-    while i < len(data) - 1:
-        value = data[i]
-        count = data[i + 1]
-        if pos + count > expected_size:
-            raise ValueError(f"RLE decode overflow: {pos + count} > {expected_size}")
-        result[pos : pos + count] = value
-        pos += count
-        i += 2
-
-    if pos != expected_size:
-        raise ValueError(
-            f"RLE decode size mismatch: got {pos}, expected {expected_size}"
-        )
-
-    return result.reshape(shape)
-
-
 def encode_terrain_base64(terrain: NDArray[np.uint8]) -> str:
     """Encode terrain as base64 string (RLE compressed).
 
@@ -86,41 +51,3 @@ def encode_terrain_base64(terrain: NDArray[np.uint8]) -> str:
     """
     rle_bytes = encode_terrain_rle(terrain)
     return base64.b64encode(rle_bytes).decode("ascii")
-
-
-def decode_terrain_base64(data: str, shape: tuple[int, int]) -> NDArray[np.uint8]:
-    """Decode base64-encoded RLE terrain data.
-
-    Args:
-        data: Base64-encoded string.
-        shape: Expected output shape (height, width).
-
-    Returns:
-        2D uint8 array with decoded terrain.
-    """
-    rle_bytes = base64.b64decode(data)
-    return decode_terrain_rle(rle_bytes, shape)
-
-
-def encode_terrain_changes(changes: list[tuple[int, int, int]]) -> list[dict[str, int]]:
-    """Encode sparse terrain changes as JSON-serializable list.
-
-    Args:
-        changes: List of (local_x, local_y, floor_type) tuples.
-
-    Returns:
-        List of dicts with x, y, floor_type keys.
-    """
-    return [{"x": x, "y": y, "floor_type": ft} for x, y, ft in changes]
-
-
-def decode_terrain_changes(data: list[dict[str, int]]) -> list[tuple[int, int, int]]:
-    """Decode sparse terrain changes from JSON.
-
-    Args:
-        data: List of dicts with x, y, floor_type keys.
-
-    Returns:
-        List of (local_x, local_y, floor_type) tuples.
-    """
-    return [(d["x"], d["y"], d["floor_type"]) for d in data]

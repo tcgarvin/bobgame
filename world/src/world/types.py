@@ -200,10 +200,6 @@ AUDIBLE_CHANNELS: frozenset[str] = frozenset(
 SAY_CHANNELS: frozenset[str] = frozenset(
     {LOCAL_CHANNEL, SHOUT_CHANNEL, THOUGHT_CHANNEL}
 )
-# Channels on which `open_to_talk` is honoured (docs/09, section 8.2). A
-# thought nobody hears cannot invite anyone, so the flag is ignored there.
-INVITATION_CHANNELS: frozenset[str] = frozenset({LOCAL_CHANNEL, SHOUT_CHANNEL})
-
 # Earshot per channel, in Chebyshev tiles. `local` is a passing remark, `shout`
 # is far enough to call the settlement to a fight; conversation lines carry at
 # `local` range so bystanders can overhear. Used both to filter observations
@@ -219,25 +215,18 @@ HEARING_RADIUS_BY_CHANNEL: Mapping[str, int] = {
 
 
 class SayIntent(EntityIntent, frozen=True):
-    """Intent to speak on a channel ("local", "shout" or "thought").
-
-    `open_to_talk` marks the line as an invitation: on `local` and `shout` it
-    opens the speaker to being walked up to for `INVITATION_TICKS` ticks.
-    """
+    """Intent to speak on a channel ("local", "shout" or "thought")."""
 
     text: str
     channel: str = "local"
-    open_to_talk: bool = False
 
 
-# ConverseIntent actions (docs/09_conversation_and_reflex.md, sections 2.3
-# and 8.2).
+# ConverseIntent actions (docs/09_conversation_and_reflex.md, section 2.3).
 CONVERSE_OPEN = "open"
 CONVERSE_JOIN = "join"
 CONVERSE_SPEAK = "speak"
 CONVERSE_PASS = "pass"
 CONVERSE_LEAVE = "leave"
-CONVERSE_ACCEPT = "accept"
 CONVERSE_HAIL = "hail"
 CONVERSE_ACTIONS: frozenset[str] = frozenset(
     {
@@ -246,20 +235,18 @@ CONVERSE_ACTIONS: frozenset[str] = frozenset(
         CONVERSE_SPEAK,
         CONVERSE_PASS,
         CONVERSE_LEAVE,
-        CONVERSE_ACCEPT,
         CONVERSE_HAIL,
     }
 )
 
 
 class ConverseIntent(EntityIntent, frozen=True):
-    """Intent to open, join, speak in, pass in, leave, accept or hail.
+    """Intent to open, join, speak in, pass in, leave or hail.
 
     `direction` names the anchor tile for `open`; `conversation_id` names the
-    conversation for `join`; `target_entity_id` names the settler whose
-    invitation `accept` takes up, or the settler `hail` walks up to and
-    addresses with `text` (docs/09, section 9). `speak` and `pass` act on the
-    conversation the entity already sits in.
+    conversation for `join`; `target_entity_id` names the settler `hail` walks
+    up to and addresses with `text` (docs/09, section 9). `speak` and `pass`
+    act on the conversation the entity already sits in.
     """
 
     action: str

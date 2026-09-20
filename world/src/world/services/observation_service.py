@@ -18,7 +18,7 @@ from ..conversion import (
 )
 from ..events import ActionResult
 from ..lease import LeaseManager
-from ..state import Entity, World
+from ..state import World
 from ..tick import TickContext, TickLoop, TickResult
 from ..types import (
     AUDIBLE_CHANNELS,
@@ -154,10 +154,10 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
 
         centre = entity.position
 
-        self_proto = _entity_proto(entity, context.tick_id)
+        self_proto = entity_to_proto(entity)
 
         visible_entities = [
-            _entity_proto(other, context.tick_id)
+            entity_to_proto(other)
             for other in self.world.all_entities().values()
             if other.entity_id != entity_id
             and _within(other.position, centre, VIEW_RADIUS)
@@ -239,7 +239,6 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
                             x=utterance.position.x, y=utterance.position.y
                         ),
                         conversation_id=utterance.conversation_id,
-                        open_to_talk=utterance.open_to_talk,
                     )
                 )
             )
@@ -375,19 +374,3 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
                     tile = tile.model_copy(update={"walkable": False})
                 tiles.append(tile_to_proto(tile))
         return tiles
-
-
-def _entity_proto(entity: Entity, tick: int) -> pb.Entity:
-    """Convert an entity, making sure the stat fields are populated.
-
-    `conversion.entity_to_proto` is owned by the mechanics track; until it maps
-    the new stat fields this fills them in so observations always carry them.
-    """
-    proto = entity_to_proto(entity, tick)
-    proto.health = entity.health
-    proto.max_health = entity.max_health
-    proto.food = entity.food
-    proto.max_food = entity.max_food
-    proto.wielded = entity.wielded
-    proto.alive = entity.alive
-    return proto

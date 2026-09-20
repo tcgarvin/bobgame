@@ -78,7 +78,7 @@ class TestEntityConversion:
             position=Position(x=5, y=10),
             entity_type="player",
         )
-        proto = entity_to_proto(entity, tick=0)
+        proto = entity_to_proto(entity)
 
         assert proto.entity_id == "test-entity"
         assert proto.position.x == 5
@@ -91,7 +91,7 @@ class TestEntityConversion:
             position=Position(x=0, y=0),
             tags=("npc", "friendly"),
         )
-        proto = entity_to_proto(entity, tick=0)
+        proto = entity_to_proto(entity)
 
         assert list(proto.tags) == ["npc", "friendly"]
 
@@ -101,7 +101,7 @@ class TestEntityConversion:
             position=Position(x=0, y=0),
             status_bits=0b1010,
         )
-        proto = entity_to_proto(entity, tick=0)
+        proto = entity_to_proto(entity)
 
         assert proto.status_bits == 0b1010
 
@@ -113,7 +113,7 @@ class TestEntityConversion:
             tags=["hostile"],
             status_bits=0b0101,
         )
-        entity = entity_from_proto(proto, tick=0)
+        entity = entity_from_proto(proto)
 
         assert entity.entity_id == "test-entity"
         assert entity.position == Position(x=5, y=10)
@@ -129,8 +129,8 @@ class TestEntityConversion:
             tags=("merchant", "friendly"),
             status_bits=42,
         )
-        proto = entity_to_proto(original, tick=0)
-        back = entity_from_proto(proto, tick=0)
+        proto = entity_to_proto(original)
+        back = entity_from_proto(proto)
 
         assert back.entity_id == original.entity_id
         assert back.position == original.position

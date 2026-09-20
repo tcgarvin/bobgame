@@ -41,7 +41,6 @@ from .foraging import (
     process_extract_phase,
     process_regeneration,
 )
-from .items import INVITATION_TICKS
 from .movement import MoveResult, process_movement_phase
 from .sleep import process_fatigue_phase, process_sleep_phase
 from .stats import (
@@ -64,7 +63,6 @@ from .types import (
     ExtractIntent,
     GiveIntent,
     HEARING_RADIUS_BY_CHANNEL,
-    INVITATION_CHANNELS,
     PickupIntent,
     PlaceIntent,
     RestIntent,
@@ -219,10 +217,6 @@ def _process_say_phase(
 ) -> None:
     """Emit one utterance per speaker; channel filtering happens downstream.
 
-    A line said with `open_to_talk` on an audible channel also opens the
-    speaker's invitation to talk (docs/09, section 8.2); on the thought channel
-    the flag is ignored.
-
     The action result's details carry who heard it (comma-separated entity
     ids, empty when nobody did) for `local` and `shout`, so the speaker's own
     tool result can say so; `thought` (viewer-only, no in-world hearers) keeps
@@ -234,24 +228,14 @@ def _process_say_phase(
             events.acted(entity_id, "say", False, f"unknown channel {intent.channel}")
             continue
         entity = world.get_entity(entity_id)
-        inviting = intent.open_to_talk and intent.channel in INVITATION_CHANNELS
         events.utterances.append(
             UtteranceEvent(
                 speaker_id=entity_id,
                 channel=intent.channel,
                 text=intent.text,
                 position=entity.position,
-                open_to_talk=inviting,
             )
         )
-        if inviting:
-            world.set_entity(
-                entity.with_invitation(
-                    text=intent.text,
-                    tick=world.tick,
-                    open_until_tick=world.tick + INVITATION_TICKS,
-                )
-            )
         if intent.channel in HEARING_RADIUS_BY_CHANNEL:
             detail = (
                 f"heard: {', '.join(_hearer_ids(world, entity_id, intent.channel))}"

@@ -165,7 +165,6 @@ def intent_from_proto(entity_id: str, intent: pb.Intent) -> EntityIntent:
             entity_id=entity_id,
             text=intent.say.text,
             channel=intent.say.channel or "local",
-            open_to_talk=intent.say.open_to_talk,
         )
 
     if action == "converse":

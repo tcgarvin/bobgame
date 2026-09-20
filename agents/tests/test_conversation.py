@@ -234,16 +234,7 @@ def test_a_join_is_recognised_from_the_worlds_own_action_event() -> None:
     assert joined_conversation_id(digest) == ""  # type: ignore[arg-type]
 
 
-def test_an_accepted_invitation_is_recognised_as_taking_a_seat() -> None:
-    model = WorldModel("ada")
-    digest = observe(
-        model, 2, events=[acted_event("ada", "converse", True, "accept conv_7 mira")]
-    )
-
-    assert joined_conversation(digest) == ("conv_7", "accept")  # type: ignore[arg-type]
-
-
-def test_the_inviters_side_of_an_accept_reads_as_an_ordinary_join() -> None:
+def test_a_join_is_recognised_as_taking_a_seat() -> None:
     model = WorldModel("ada")
     digest = observe(
         model, 2, events=[acted_event("ada", "converse", True, "join conv_7")]

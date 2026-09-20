@@ -56,7 +56,6 @@ ACTION_OPEN = "open"
 ACTION_JOIN = "join"
 # Mirrored in `items.py` with the other world constants, and named here beside
 # the actions it belongs with.
-ACTION_ACCEPT = items.ACTION_ACCEPT
 ACTION_HAIL = items.ACTION_HAIL
 # The world's own word for the target's side of a hail: a seat it never asked
 # for (docs/09 section 9).
@@ -82,14 +81,11 @@ END_DIED = "died"
 END_NOBODY_JOINED = "nobody joined"
 
 # How the actor came to hold its seat, as the `conversation_start` trace says
-# it. `accepted` is the inviter's side of an `accept`: the world reports it as
-# a plain `join` although the actor submitted nothing (docs/09 section 8.2).
-VIA_ACCEPTED = "accepted"
-# The hailed settler's `via`; the hailer's is `hail`, the world's own word.
+# it. The hailed settler's `via`; the hailer's is `hail`, the world's own word.
 VIA_HAILED = ACTION_HAILED
-JOIN_ACTIONS = (ACTION_OPEN, ACTION_JOIN, ACTION_ACCEPT, ACTION_HAIL, ACTION_HAILED)
-# The seats the actor never asked for: it was accepted, or it was hailed.
-UNASKED_VIA = (VIA_ACCEPTED, VIA_HAILED)
+JOIN_ACTIONS = (ACTION_OPEN, ACTION_JOIN, ACTION_HAIL, ACTION_HAILED)
+# The seats the actor never asked for: it was hailed.
+UNASKED_VIA = (VIA_HAILED,)
 
 # The world creates the conversation object on the tick it accepts the `open`
 # or `join`, but an observation can lag by a tick; wait this long for the
@@ -494,12 +490,9 @@ def joined_conversation(digest: TickDigest) -> tuple[str, str]:
 
     The world reports a successful `ConverseIntent` as an `EntityActed` with
     action type `converse` and details that start with the action name and the
-    conversation id: `open conv_12`, `join conv_12`, `accept conv_12 mira`
-    for the settler who accepted, `hail conv_12 mira` for the
-    settler who hailed one, and `hailed conv_12 ivo` for the settler that hail
-    seated. The inviter's own side of an accept arrives as `join conv_12`, so
-    the action alone cannot tell the two apart; `JevAgent` does that from what
-    it submitted.
+    conversation id: `open conv_12`, `join conv_12`, `hail conv_12 mira` for
+    the settler who hailed one, and `hailed conv_12 ivo` for the settler that
+    hail seated.
 
     Both values are empty when the actor took no seat.
     """
@@ -513,7 +506,7 @@ def joined_conversation(digest: TickDigest) -> tuple[str, str]:
 
 
 def joined_conversation_id(digest: TickDigest) -> str:
-    """The conversation the actor opened, joined or accepted into this tick."""
+    """The conversation the actor opened, joined or was seated in this tick."""
     return joined_conversation(digest)[0]
 
 
@@ -640,9 +633,8 @@ class ConversationSession:
     def begin(self, via: str = ACTION_JOIN) -> None:
         """Write the `conversation_start` trace line.
 
-        `via` is how the seat was taken: `open`, `join`, `accept`, `hail`,
-        `accepted` for the settler someone accepted, or
-        `hailed` for the settler someone walked up to and addressed.
+        `via` is how the seat was taken: `open`, `join`, `hail`, or `hailed`
+        for the settler someone walked up to and addressed.
         """
         payload: dict[str, Any] = {
             "event": "conversation_start",

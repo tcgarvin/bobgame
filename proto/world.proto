@@ -42,7 +42,11 @@ message Entity {
   int32 fatigue = 13;       // 0 = fresh, max_fatigue = exhausted (docs/10)
   int32 max_fatigue = 14;
   bool asleep = 15;
-  bool open_to_talk = 16;   // has a live invitation (docs/09 section 8)
+  reserved 16;              // was open_to_talk (the invitation mechanic)
+  // Object id of the bed slept on, "" for the ground (and while awake).
+  string sleeping_on = 17;
+  // True while the sleep was forced by exhaustion rather than chosen.
+  bool collapsed = 18;
 }
 
 // The world's day clock (docs/10_metal_and_sleep.md, "The day").
@@ -182,9 +186,10 @@ message Observation {
 }
 
 message ObservationEvent {
+  // 1 was entity_entered (EntityEnteredView), 2 was entity_left
+  // (EntityLeftView); neither was ever produced.
+  reserved 1, 2;
   oneof event {
-    EntityEnteredView entity_entered = 1;
-    EntityLeftView entity_left = 2;
     EntityMoved entity_moved = 3;
     EntityActed entity_acted = 4;
     Utterance utterance = 5;
@@ -224,15 +229,6 @@ message ObjectRemoved {
   Position position = 2;
 }
 
-message EntityEnteredView {
-  Entity entity = 1;
-}
-
-message EntityLeftView {
-  string entity_id = 1;
-  Position last_known_position = 2;
-}
-
 message EntityMoved {
   string entity_id = 1;
   Position from = 2;
@@ -252,7 +248,7 @@ message Utterance {
   string text = 3;
   Position position = 4;
   string conversation_id = 5;  // set for channel "conversation" and for the opening line
-  bool open_to_talk = 6;       // the speaker is open to talk (docs/09 section 8)
+  reserved 6;                  // was open_to_talk (the invitation mechanic)
 }
 
 message ObjectChanged {
@@ -278,10 +274,10 @@ message SubmitIntentRequest {
 }
 
 message Intent {
+  reserved 3;  // was UseIntent use; never implemented
   oneof action {
     MoveIntent move = 1;
     PickupIntent pickup = 2;
-    UseIntent use = 3;
     SayIntent say = 4;
     WaitIntent wait = 5;
     CollectIntent collect = 6;
@@ -386,18 +382,13 @@ message PickupIntent {
   int32 amount = 2;  // default 1
 }
 
-message UseIntent {
-  string kind = 1;
-  int32 amount = 2;  // default 1
-}
-
 // channel "local": heard by entities within earshot (Utterance event).
 // channel "shout": heard much farther away (60 tiles); for calling for help.
 // channel "thought": not heard by anyone; broadcast to the viewer only.
 message SayIntent {
   string text = 1;
   string channel = 2;  // default "local"
-  bool open_to_talk = 3;  // invitation: anyone adjacent may start a conversation (docs/09 section 8)
+  reserved 3;          // was open_to_talk (the invitation mechanic)
 }
 
 message WaitIntent {}
@@ -414,11 +405,10 @@ message WaitIntent {}
 //   action "pass":  give up the turn without speaking.
 //   action "leave": stop being a participant.
 message ConverseIntent {
-  string action = 1;           // open | join | speak | pass | leave | accept | hail
+  string action = 1;           // open | join | speak | pass | leave | hail
   Direction direction = 2;
   string conversation_id = 3;
   string text = 4;             // open/speak: the line; hail: the opening line
-  // accept: the inviter (docs/09 section 8);
   // hail: the settler addressed (docs/09 section 9)
   string target_entity_id = 5;
 }
@@ -468,53 +458,5 @@ message AgentStatusAck {
   bool accepted = 1;
 }
 
-// ============================================================================
-// Viewer Service (Read-Only)
-// ============================================================================
-
-service ViewerService {
-  rpc StreamViewerEvents(ViewerFilter) returns (stream ViewerEvent);
-  rpc GetSnapshot(ViewerFilter) returns (WorldSnapshot);
-}
-
-message ViewerFilter {
-  repeated string entity_ids = 1;  // empty = all
-  Position region_min = 2;  // optional region filter
-  Position region_max = 3;
-}
-
-message ViewerEvent {
-  int64 tick_id = 1;
-
-  oneof event {
-    TickCompleted tick_completed = 2;
-    EntitySpawned entity_spawned = 3;
-    EntityDespawned entity_despawned = 4;
-    EntityMoved entity_moved = 5;
-    EntityActed entity_acted = 6;
-    Utterance utterance = 7;
-    ObjectChanged object_changed = 8;
-  }
-}
-
-message TickCompleted {
-  int64 tick_id = 1;
-  int32 entities_moved = 2;
-  int32 actions_processed = 3;
-}
-
-message EntitySpawned {
-  Entity entity = 1;
-}
-
-message EntityDespawned {
-  string entity_id = 1;
-  string reason = 2;
-}
-
-message WorldSnapshot {
-  int64 tick_id = 1;
-  repeated Entity entities = 2;
-  repeated WorldObject objects = 3;
-  // Note: tiles are static, loaded separately
-}
+// The viewer is fed by the WebSocket JSON protocol (docs/07_replay.md), not by
+// gRPC; the former ViewerService and its messages were never implemented.

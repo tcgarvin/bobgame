@@ -17,7 +17,7 @@ class TestAgentProcess:
         """Test initial state is PENDING."""
         process = AgentProcess(
             entity_id="test",
-            module="agents.random_agent",
+            module="tests.fake_agent",
             server_address="localhost:50051",
         )
         assert process.state == ProcessState.PENDING
@@ -29,9 +29,9 @@ class TestAgentProcess:
         """Test that start builds the correct command."""
         process = AgentProcess(
             entity_id="alice",
-            module="agents.random_agent",
+            module="tests.fake_agent",
             server_address="localhost:50051",
-            args=["--eat-probability", "0.5"],
+            args=["--fake-flag", "0.5"],
             log_dir=temp_dir,
         )
 
@@ -50,19 +50,19 @@ class TestAgentProcess:
             assert cmd[1] == "run"
             assert cmd[2] == "python"
             assert cmd[3] == "-m"
-            assert cmd[4] == "agents.random_agent"
+            assert cmd[4] == "tests.fake_agent"
             assert "--server" in cmd
             assert "localhost:50051" in cmd
             assert "--entity" in cmd
             assert "alice" in cmd
-            assert "--eat-probability" in cmd
+            assert "--fake-flag" in cmd
             assert "0.5" in cmd
 
     def test_start_sets_running_state(self, temp_dir):
         """Test that start sets state to RUNNING."""
         process = AgentProcess(
             entity_id="test",
-            module="agents.random_agent",
+            module="tests.fake_agent",
             server_address="localhost:50051",
             log_dir=temp_dir,
         )
@@ -81,7 +81,7 @@ class TestAgentProcess:
         """Test that start raises if process is already running."""
         process = AgentProcess(
             entity_id="test",
-            module="agents.random_agent",
+            module="tests.fake_agent",
             server_address="localhost:50051",
             log_dir=temp_dir,
         )
@@ -100,7 +100,7 @@ class TestAgentProcess:
         """Test that poll detects process exit."""
         process = AgentProcess(
             entity_id="test",
-            module="agents.random_agent",
+            module="tests.fake_agent",
             server_address="localhost:50051",
             log_dir=temp_dir,
         )
@@ -123,7 +123,7 @@ class TestAgentProcess:
         """Test that poll detects process crash."""
         process = AgentProcess(
             entity_id="test",
-            module="agents.random_agent",
+            module="tests.fake_agent",
             server_address="localhost:50051",
             log_dir=temp_dir,
         )
@@ -145,7 +145,7 @@ class TestAgentProcess:
         """Test that stop terminates the process."""
         process = AgentProcess(
             entity_id="test",
-            module="agents.random_agent",
+            module="tests.fake_agent",
             server_address="localhost:50051",
             log_dir=temp_dir,
         )
@@ -168,7 +168,7 @@ class TestAgentProcess:
         """Test that stop force kills if graceful shutdown times out."""
         process = AgentProcess(
             entity_id="test",
-            module="agents.random_agent",
+            module="tests.fake_agent",
             server_address="localhost:50051",
             log_dir=temp_dir,
         )
@@ -194,7 +194,7 @@ class TestAgentProcess:
         """Test that mark_restarting increments restart count."""
         process = AgentProcess(
             entity_id="test",
-            module="agents.random_agent",
+            module="tests.fake_agent",
             server_address="localhost:50051",
         )
 
@@ -214,7 +214,7 @@ class TestAgentProcess:
 
         process = AgentProcess(
             entity_id="test",
-            module="agents.random_agent",
+            module="tests.fake_agent",
             server_address="localhost:50051",
             log_dir=log_dir,
         )

@@ -34,7 +34,6 @@ from pydantic_ai.toolsets import FunctionToolset, ToolsetTool, WrapperToolset
 from .. import world_pb2 as pb
 from . import items
 from .conversation import (
-    ACTION_ACCEPT,
     ACTION_HAIL,
     ACTION_JOIN,
     ACTION_OPEN,

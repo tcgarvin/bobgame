@@ -545,8 +545,10 @@ class TestRestPhaseWiring:
         ctx = TickContext(
             tick_id=world.tick, start_time_ms=0, deadline_ms=0, world=world
         )
-        ctx.submit_rest_intent(
-            RestIntent(entity_id="bob", object_id="bed_1"), enforce_deadline=False
+        ctx.submit_intent(
+            "bob",
+            RestIntent(entity_id="bob", object_id="bed_1"),
+            enforce_deadline=False,
         )
 
         result = process_tick(world, ctx)

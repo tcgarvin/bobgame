@@ -1,7 +1,7 @@
 #!/bin/bash
-# Detached live runs of a bobgame scenario.
+# Detached live runs of the bobgame scenario (hamlet, the only one).
 #
-#   tools/live_run.sh start <config> <seconds>   start ./dev.sh detached, auto-stop after <seconds>
+#   tools/live_run.sh start <seconds>            start ./dev.sh detached, auto-stop after <seconds>
 #   tools/live_run.sh status                     one-screen health + progress report
 #   tools/live_run.sh wait-ticks                 block until the world records ticks (max 3 minutes)
 #   tools/live_run.sh wait                       block until the run ends (or 9 minutes pass)
@@ -13,6 +13,8 @@
 
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The project has exactly one scenario.
+CONFIG="hamlet"
 PID_FILE="$ROOT/runs/.live_run.pid"
 OUT_FILE="$ROOT/runs/.live_run.out"
 PORTS=(50051 8765 8766 5173)
@@ -34,8 +36,11 @@ port_busy() {
 }
 
 cmd_start() {
-    local config="${1:?usage: start <config> <seconds>}"
-    local seconds="${2:?usage: start <config> <seconds>}"
+    local seconds="${1:?usage: start <seconds>}"
+    if ! [[ "$seconds" =~ ^[0-9]+$ ]] || [ "$seconds" -lt 1 ]; then
+        echo "REFUSED: '$seconds' is not a number of seconds. Usage: start <seconds> (the only scenario is $CONFIG)."
+        return 2
+    fi
     if is_alive; then
         echo "REFUSED: a live run is already active (pid $(cat "$PID_FILE")). Run 'status' or 'stop' first."
         return 2
@@ -52,15 +57,15 @@ cmd_start() {
         echo "REFUSED: only ${free_mb} MB memory available, need ${MIN_FREE_MB}. Wait a minute and retry once; report if it persists."
         return 2
     fi
-    if [ ! -f "$ROOT/world/configs/$config.toml" ]; then
-        echo "REFUSED: no world/configs/$config.toml"
+    if [ ! -f "$ROOT/world/configs/$CONFIG.toml" ]; then
+        echo "REFUSED: no world/configs/$CONFIG.toml"
         return 2
     fi
     mkdir -p "$ROOT/runs"
     cd "$ROOT" || return 1
-    setsid nohup timeout -s INT "$seconds" ./dev.sh "$config" >"$OUT_FILE" 2>&1 < /dev/null &
+    setsid nohup timeout -s INT "$seconds" ./dev.sh "$CONFIG" >"$OUT_FILE" 2>&1 < /dev/null &
     echo $! >"$PID_FILE"
-    echo "STARTED pid=$(cat "$PID_FILE") config=$config auto_stop_after=${seconds}s"
+    echo "STARTED pid=$(cat "$PID_FILE") config=$CONFIG auto_stop_after=${seconds}s"
     echo "The world needs about 40 s to load the island. Run 'wait-ticks' next."
 }
 

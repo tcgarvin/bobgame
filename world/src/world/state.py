@@ -32,7 +32,6 @@ from .exceptions import (
 from .items import BLOCKING_OBJECT_TYPES, WOLF_BLOCKING_OBJECT_TYPES
 from .types import Position
 
-
 # status_bits flag for a dead entity (bit 0), see docs/05_jev_agents_design.md.
 STATUS_BIT_DEAD = 1
 
@@ -158,14 +157,6 @@ class Entity(BaseModel, frozen=True):
     sleeping_on: str = ""
     # True while the sleep was forced by exhaustion rather than chosen.
     collapsed: bool = False
-    # Invitation to talk (docs/09_conversation_and_reflex.md, section 8.2).
-    # `open_until_tick` is the first tick on which the invitation is gone, so
-    # it is live while `tick < open_until_tick`; -1 means no invitation. The
-    # text and the tick of the line that opened it are kept so an `accept` can
-    # make it the new conversation's first transcript entry.
-    open_until_tick: int = -1
-    invitation_text: str = ""
-    invitation_tick: int = -1
     # The tick this entity's last conversation seat ended (docs/09, section 9).
     # It cannot be hailed again until `HAIL_COOLDOWN_TICKS` have passed; -1
     # means it has never sat in one.
@@ -214,30 +205,6 @@ class Entity(BaseModel, frozen=True):
             update={"asleep": False, "sleeping_on": "", "collapsed": False}
         )
 
-    def is_open_to_talk(self, tick: int) -> bool:
-        """True while this entity's invitation to talk is still open at `tick`."""
-        return tick < self.open_until_tick
-
-    def with_invitation(self, text: str, tick: int, open_until_tick: int) -> "Entity":
-        """Return copy carrying an invitation to talk said at `tick`."""
-        return self.model_copy(
-            update={
-                "open_until_tick": open_until_tick,
-                "invitation_text": text,
-                "invitation_tick": tick,
-            }
-        )
-
-    def without_invitation(self) -> "Entity":
-        """Return copy with no invitation to talk."""
-        return self.model_copy(
-            update={
-                "open_until_tick": -1,
-                "invitation_text": "",
-                "invitation_tick": -1,
-            }
-        )
-
     def with_conversation_ended(self, tick: int) -> "Entity":
         """Return copy whose hail cooldown starts at `tick` (docs/09, section 9)."""
         return self.model_copy(update={"last_conversation_end_tick": tick})
@@ -261,9 +228,6 @@ class Entity(BaseModel, frozen=True):
                 "asleep": False,
                 "sleeping_on": "",
                 "collapsed": False,
-                "open_until_tick": -1,
-                "invitation_text": "",
-                "invitation_tick": -1,
             }
         )
 
@@ -282,9 +246,6 @@ class Entity(BaseModel, frozen=True):
                 "inventory": Inventory(),
                 "wielded": "",
                 "status_bits": self.status_bits & ~STATUS_BIT_DEAD,
-                "open_until_tick": -1,
-                "invitation_text": "",
-                "invitation_tick": -1,
             }
         )
 

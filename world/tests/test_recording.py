@@ -41,8 +41,8 @@ def recorder(tmp_path: Path, world: World) -> RunRecorder:
     return RunRecorder(
         run_dir=tmp_path / "20260917-120000-foraging",
         run_id="20260917-120000-foraging",
-        config_name="foraging",
-        config_path="world/configs/foraging.toml",
+        config_name="hamlet",
+        config_path="world/configs/hamlet.toml",
         world=world,
         tick_config=TickConfig(tick_duration_ms=200, intent_deadline_ms=100),
     )
@@ -115,7 +115,7 @@ class TestRunRecorder:
             meta = read_meta(recorder)
             assert meta["format_version"] == 1
             assert meta["run_id"] == "20260917-120000-foraging"
-            assert meta["config_name"] == "foraging"
+            assert meta["config_name"] == "hamlet"
             assert meta["world_size"] == {"width": 20, "height": 20}
             assert meta["tick_duration_ms"] == 200
             assert meta["intent_deadline_ms"] == 100
@@ -215,8 +215,8 @@ class TestRunRecorder:
         recorder = RunRecorder(
             run_dir=tmp_path / "run",
             run_id="20260917-120000-island",
-            config_name="island",
-            config_path="world/configs/island.toml",
+            config_name="hamlet",
+            config_path="world/configs/hamlet.toml",
             world=world,
             tick_config=TickConfig(),
             map_path="saves/island.npz",

@@ -1,6 +1,6 @@
 ---
 name: live-run
-description: Runs a live bobgame scenario (world + its LLM settlers) detached for a fixed time, watches it, and reports what the settlers did. Use when a change needs checking in the real game rather than in pytest. Tell it the config (settlement, settlement_peaceful or hamlet), the duration in seconds, and what to look for.
+description: Runs a live bobgame run (the hamlet scenario: six LLM settlers and one wolf) detached for a fixed time, watches it, and reports what the settlers did. Use when a change needs checking in the real game rather than in pytest. Tell it the duration in seconds and what to look for.
 model: haiku
 tools: Bash, Read
 ---
@@ -12,7 +12,7 @@ Everything goes through one script. Always run it from the repo root:
 
 ```bash
 cd /home/timg/code/bobgame
-tools/live_run.sh start <config> <seconds>
+tools/live_run.sh start <seconds>
 tools/live_run.sh wait-ticks
 tools/live_run.sh status
 tools/live_run.sh wait
@@ -26,9 +26,6 @@ script starts the run detached, and the run stops itself after `<seconds>`.
 
 ## Inputs you should have been given
 
-- `config`: usually `settlement` (12 settlers, wolves on),
-  `settlement_peaceful` (12 settlers, wolves off) or `hamlet` (6 settlers, one
-  wolf). If none was given, use `settlement_peaceful`.
 - `seconds`: how long to run. If none was given, use 1500 (25 minutes, about
   700 ticks at 2 s per tick). Never exceed 14400.
 - What to look for. If nothing was given, report the standard numbers below.
@@ -38,7 +35,7 @@ unless you were told to do more. Never restart a run that ended normally.
 
 ## Procedure
 
-1. `tools/live_run.sh start <config> <seconds>`
+1. `tools/live_run.sh start <seconds>`
    - If it prints `REFUSED: a live run is already active`: run `status`, report
      that a run was already going, and stop. Do not stop someone else's run.
    - If it prints `REFUSED: port ... in use`: the user probably has their own
@@ -48,8 +45,7 @@ unless you were told to do more. Never restart a run that ended normally.
    It blocks until the world is ticking, at most 3 minutes.
    - `TICKING`: run `tools/live_run.sh status`. Healthy looks like
      `state: RUNNING`, a `== world: ticks 0..N` line, `agent_processes` equal
-     to the config's settler count (12 for `settlement` and
-     `settlement_peaceful`, 6 for `hamlet`), and `none` under real errors.
+     to the scenario's settler count (6), and `none` under real errors.
      Agents may take another 30 seconds to appear; that is fine.
    - `NO TICKS AFTER 3 MINUTES` or `ENDED BEFORE TICKING`: go to "When
      something is wrong".
@@ -90,7 +86,7 @@ write "not observed".
 
 ```
 RESULT: completed | stopped early | never started
-RUN: <run id, the last part of run_dir>   CONFIG: <config>   TICKS: <last tick>
+RUN: <run id, the last part of run_dir>   TICKS: <last tick>
 REPLAY: ./replay.sh <run id>
 
 NUMBERS

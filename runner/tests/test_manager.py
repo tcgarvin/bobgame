@@ -26,7 +26,7 @@ def simple_config():
             backoff_multiplier=2.0,
         ),
         agents={
-            "default": AgentConfig(module="agents.random_agent"),
+            "default": AgentConfig(module="tests.fake_agent"),
         },
     )
 

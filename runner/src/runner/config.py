@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 class AgentConfig(BaseModel):
     """Configuration for spawning an agent."""
 
-    module: str  # Python module path, e.g., "agents.random_agent"
+    module: str  # Python module path, e.g., "agents.jev_agent"
     args: list[str] = Field(default_factory=list)  # Additional CLI args
     env: dict[str, str] = Field(default_factory=dict)  # Env overrides
 

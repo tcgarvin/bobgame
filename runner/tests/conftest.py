@@ -28,12 +28,12 @@ max_backoff_ms = 1000
 backoff_multiplier = 2.0
 
 [agents.default]
-module = "agents.random_agent"
-args = ["--eat-probability", "0.1"]
+module = "tests.fake_agent"
+args = ["--fake-flag", "0.1"]
 
 [agents.alice]
-module = "agents.random_agent"
-args = ["--eat-probability", "0.5"]
+module = "tests.fake_agent"
+args = ["--fake-flag", "0.5"]
 """
 
 

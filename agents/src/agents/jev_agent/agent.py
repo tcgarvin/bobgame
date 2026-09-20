@@ -41,7 +41,6 @@ from .conversation import (
     ACTION_JOIN,
     ACTION_OPEN,
     UNASKED_VIA,
-    VIA_ACCEPTED,
     ConversationReport,
     ConversationSession,
     Converser,
@@ -338,9 +337,6 @@ class JevAgent:
         self._held_stint: _HeldStint | None = None
         self._conversation: ConversationSession | None = None
         self._conversation_waiters: list[_ConversationWaiter] = []
-        # (tick, action) of the last `ConverseIntent` submitted, so a seat the
-        # actor never asked for can be recognised. -1 means none yet.
-        self._last_converse: tuple[int, str] = (-1, "")
         # -1 means awake; otherwise the tick the current sleep began.
         self._asleep_since = -1
         self._sleep_fatigue_before = 0
@@ -603,9 +599,6 @@ class JevAgent:
                 sink("rejected: dead")
             await self._report_status()
             return
-
-        if intent.HasField("converse"):
-            self._last_converse = (observation.tick_id, intent.converse.action)
 
         try:
             result = await self.world.submit_intent(observation.tick_id, intent)
@@ -1036,16 +1029,15 @@ class JevAgent:
     def _detect_join(self, digest: TickDigest) -> None:
         """Enter conversation mode when the world says the actor took a seat.
 
-        The seat may come from an `open`, a `join`, an `accept` of someone
-        else's invitation, a `hail` of another settler, someone accepting this
-        actor's own invitation, or someone hailing this actor. In the last two
-        cases the actor asked for nothing, so whatever single-tick action it
-        had in flight is answered as interrupted.
+        The seat may come from an `open`, a `join`, a `hail` of another
+        settler, or someone hailing this actor. In the last case the actor
+        asked for nothing, so whatever single-tick action it had in flight is
+        answered as interrupted.
         """
         conversation_id, action = joined_conversation(digest)
         if not conversation_id or self._conversation is not None:
             return
-        via = self._join_via(action)
+        via = action
         stint = self._active_stint
         purpose = self._conversation_purpose(via, action, digest, stint)
         if stint is not None:
@@ -1053,8 +1045,7 @@ class JevAgent:
             self._finish_stint(hold=True)
         elif via in UNASKED_VIA:
             # Nothing in flight belongs to this seat: the planner asked for an
-            # action and got a conversation instead (it was accepted, or
-            # someone hailed it).
+            # action and someone hailed this actor instead.
             self._refuse_direct_requests(conversation_interruption(conversation_id))
         self._begin_conversation(conversation_id, via, purpose)
         self._pending_purpose = ""
@@ -1080,20 +1071,6 @@ class JevAgent:
         if via in (ACTION_OPEN, ACTION_HAIL):
             return self._pending_purpose
         return ""
-
-    def _join_via(self, action: str) -> str:
-        """How the seat was taken, for the `conversation_start` trace line.
-
-        The world reports the inviter's side of an `accept` as a plain `join`,
-        so a `join` this actor did not ask for on the previous tick is the
-        inviter being accepted.
-        """
-        if action != ACTION_JOIN:
-            return action
-        tick, last_action = self._last_converse
-        if last_action in (ACTION_JOIN, ACTION_OPEN) and tick >= self._model.tick - 1:
-            return action
-        return VIA_ACCEPTED
 
     def _begin_conversation(
         self, conversation_id: str, via: str = ACTION_JOIN, purpose: str = ""
@@ -1136,9 +1113,9 @@ class JevAgent:
         """Write the note, then deliver the report to whoever is owed it.
 
         A tool parked on `await_conversation` gets it, or a stint the join cut
-        short carries it. A conversation nobody asked for - one that started
-        because someone accepted this actor's invitation - has no such owner,
-        so the report is queued as a note like a reflex line.
+        short carries it. A conversation nobody asked for - one another settler
+        started by hailing this actor - has no such owner, so the report is
+        queued as a note like a reflex line.
         """
         report = await session.write_report()
         text = report.to_text()

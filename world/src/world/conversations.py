@@ -37,7 +37,6 @@ from .items import (
 )
 from .state import WOLF_ENTITY_TYPE, World, WorldObject
 from .types import (
-    CONVERSE_ACCEPT,
     CONVERSE_HAIL,
     CONVERSE_JOIN,
     CONVERSE_LEAVE,
@@ -334,9 +333,8 @@ def _open_conversation(
     )
     world.add_object(obj)
     events.objects_added.append(ObjectAddedEvent(obj=obj))
-    _clear_invitation(world, entity_id)
-    # The opening line goes out on the local channel so bystanders hear the
-    # invitation and learn which conversation it belongs to.
+    # The opening line goes out on the local channel so bystanders hear it and
+    # learn which conversation it belongs to.
     events.utterances.append(
         UtteranceEvent(
             speaker_id=entity_id,
@@ -347,14 +345,6 @@ def _open_conversation(
         )
     )
     events.acted(entity_id, ACTION_TYPE, True, f"open {obj.object_id}")
-
-
-def _clear_invitation(world: World, entity_id: str) -> None:
-    """Drop an entity's invitation to talk now that it has a seat."""
-    entity = world.all_entities().get(entity_id)
-    if entity is None or entity.open_until_tick < 0:
-        return
-    world.set_entity(entity.without_invitation())
 
 
 def _shared_anchor(world: World, a: Position, b: Position) -> Position | None:
@@ -381,86 +371,10 @@ def _shared_anchor(world: World, a: Position, b: Position) -> Position | None:
     return None
 
 
-def _accept_invitation(
-    world: World, intent: ConverseIntent, events: TickEvents
-) -> None:
-    """Handle one `accept` action (docs/09, section 8.2).
-
-    The accepter walks up to a settler who said something with `open_to_talk`;
-    the world opens the conversation on a tile next to them both, seats the
-    inviter as the opener and makes its invitation line the first transcript
-    entry. No utterance is emitted: the invitation was already heard.
-    """
-    entity_id = intent.entity_id
-    entity = world.get_entity(entity_id)
-    target_id = intent.target_entity_id
-
-    target = world.all_entities().get(target_id)
-    if target is None or not target.alive or target.entity_type == WOLF_ENTITY_TYPE:
-        _fail(events, entity_id, f"no invitation from {target_id}")
-        return
-    # Taking a seat clears the invitation, so the target's conversation is
-    # checked first: an accepter that lost this tick's race is told the
-    # conversation has already started and can `join` it later.
-    seated = conversation_of(world, target_id)
-    if seated is not None:
-        if read_count(seated, OPENED_TICK_KEY) == world.tick:
-            _fail(events, entity_id, f"{seated.object_id} already started")
-        else:
-            _fail(events, entity_id, f"{target_id} is already in a conversation")
-        return
-    if not target.is_open_to_talk(world.tick):
-        _fail(events, entity_id, f"no invitation from {target_id}")
-        return
-    if not is_adjacent(entity.position, target.position):
-        _fail(events, entity_id, f"not next to {target_id}")
-        return
-    if conversation_of(world, entity_id) is not None:
-        _fail(events, entity_id, "already in a conversation")
-        return
-
-    anchor = _shared_anchor(world, entity.position, target.position)
-    if anchor is None:
-        _fail(events, entity_id, "no free tile next to both of you")
-        return
-
-    tick = str(world.tick)
-    opening = {
-        "tick": target.invitation_tick,
-        "speaker": target_id,
-        "text": target.invitation_text,
-    }
-    obj = WorldObject(
-        object_id=world.generate_object_id(CONVERSATION_ID_PREFIX),
-        position=anchor,
-        object_type=CONVERSATION,
-        state=(
-            (PARTICIPANTS_KEY, _encode([target_id, entity_id])),
-            # The inviter opened it, so it speaks first (section 2.4).
-            (SPEAKER_KEY, target_id),
-            (TURN_STARTED_KEY, tick),
-            (OPENED_TICK_KEY, tick),
-            (OPENED_BY_KEY, target_id),
-            (UTTERANCES_KEY, "0"),
-            (PASSES_KEY, "0"),
-            (TRANSCRIPT_KEY, _encode([opening])),
-        ),
-    )
-    world.add_object(obj)
-    events.objects_added.append(ObjectAddedEvent(obj=obj))
-    _clear_invitation(world, target_id)
-    _clear_invitation(world, entity_id)
-    events.acted(entity_id, ACTION_TYPE, True, f"accept {obj.object_id} {target_id}")
-    # The inviter is seated too, so its agent sees the same join it would see
-    # after a `join` action of its own.
-    events.acted(target_id, ACTION_TYPE, True, f"join {obj.object_id}")
-
-
 def _hail(world: World, intent: ConverseIntent, events: TickEvents) -> None:
     """Handle one `hail` action (docs/09, section 9).
 
-    A hail is one settler walking up to another and addressing it. Unlike an
-    `accept` it needs no invitation, so the roles are flipped: the hailer
+    A hail is one settler walking up to another and addressing it: the hailer
     opens the conversation with its line and the target speaks next.
     """
     entity_id = intent.entity_id
@@ -535,8 +449,6 @@ def _hail(world: World, intent: ConverseIntent, events: TickEvents) -> None:
     )
     world.add_object(obj)
     events.objects_added.append(ObjectAddedEvent(obj=obj))
-    _clear_invitation(world, entity_id)
-    _clear_invitation(world, target_id)
     # The opening line is ordinary local speech as well, so bystanders hear it
     # and learn which conversation it belongs to (as `open` does).
     events.utterances.append(
@@ -592,7 +504,6 @@ def _join_conversation(
         updates[TURN_STARTED_KEY] = str(world.tick)
         updates[PASSES_KEY] = "0"
     _commit(world, obj, _with_updates(obj, updates), events)
-    _clear_invitation(world, entity_id)
     events.acted(entity_id, ACTION_TYPE, True, f"join {obj.object_id}")
 
 
@@ -754,8 +665,6 @@ def process_conversation_phase(
 
     for intent in by_action.get(CONVERSE_OPEN, ()):
         _open_conversation(world, intent, events)
-    for intent in by_action.get(CONVERSE_ACCEPT, ()):
-        _accept_invitation(world, intent, events)
     for intent in by_action.get(CONVERSE_HAIL, ()):
         _hail(world, intent, events)
     for intent in by_action.get(CONVERSE_JOIN, ()):

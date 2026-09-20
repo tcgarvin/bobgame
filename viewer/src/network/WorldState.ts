@@ -133,8 +133,6 @@ export interface InterpolatedEntity {
   fatigue: number;
   maxFatigue: number;
   asleep: boolean;
-  /** True while the entity's invitation to talk is live (docs/09 section 8). */
-  openToTalk: boolean;
   inventory: Record<string, number>;
 }
 
@@ -839,7 +837,6 @@ export class WorldState {
     if (update.max_fatigue !== undefined) entity.maxFatigue = update.max_fatigue;
     if (update.fatigue !== undefined) entity.fatigue = update.fatigue;
     if (update.asleep !== undefined) entity.asleep = update.asleep;
-    if (update.open_to_talk !== undefined) entity.openToTalk = update.open_to_talk;
     if (update.inventory !== undefined) entity.inventory = { ...update.inventory };
 
     this.entityStatsHandler?.(entity, entity.health - previousHealth);
@@ -1013,7 +1010,6 @@ export class WorldState {
       fatigue: state.fatigue ?? 0,
       maxFatigue: state.max_fatigue ?? DEFAULT_MAX_FATIGUE,
       asleep: state.asleep ?? false,
-      openToTalk: state.open_to_talk ?? false,
       inventory: { ...(state.inventory ?? {}) },
     };
   }

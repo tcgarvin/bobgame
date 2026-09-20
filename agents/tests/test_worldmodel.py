@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 from agents import world_pb2 as pb
-from agents.jev_agent.items import INVITATION_TICKS
 from agents.jev_agent.worldmodel import WorldModel
 
 from helpers import (
@@ -321,27 +320,6 @@ def test_a_workshop_table_is_found_only_when_it_is_within_reach() -> None:
     assert far.workshop_table_near() is None
 
 
-# -- a flagged say is still heard as ordinary speech -------------------------
-
-
-def test_a_flagged_say_is_heard_like_any_other_local_line() -> None:
-    model = WorldModel("ada")
-    model.update(
-        make_observation(
-            5,
-            make_entity("ada", (10, 10)),
-            events=[
-                utterance_event(
-                    "mira", "Come and plan the wall.", (14, 10), open_to_talk=True
-                )
-            ],
-        )
-    )
-
-    heard = model.recent_utterances(1)[0]
-    assert (heard.speaker_id, heard.text) == ("mira", "Come and plan the wall.")
-
-
 # -- message board unread tracking (docs/09 section 6) -----------------------
 
 
@@ -429,3 +407,27 @@ def test_unread_count_drops_to_zero_once_read_and_rises_on_a_new_note() -> None:
         )
     )
     assert model.unread_note_count("board_1") == 1
+
+
+# -- the body clock the world sends (docs/10_metal_and_sleep.md, section 4) ---
+
+
+def test_sleeping_on_and_collapsed_reach_the_entity_info() -> None:
+    """The proto carries both, so the actor can tell a nap from a collapse."""
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10), asleep=True, sleeping_on="bed_1"),
+            entities=[
+                make_entity("bram", (11, 10), asleep=True, collapsed=True),
+            ],
+        )
+    )
+
+    assert model.self_info.asleep is True
+    assert model.self_info.sleeping_on == "bed_1"
+    assert model.self_info.collapsed is False
+
+    bram = model.entities["bram"]
+    assert (bram.sleeping_on, bram.collapsed) == ("", True)

@@ -3,14 +3,20 @@
 # a single wolf that arrives from further out, so a group can live with it.
 # See docs/05_jev_agents_design.md.
 #
-# Loads the pre-generated 4000x4000 island map and spawns every entity on the
-# free walkable tiles nearest the computed settlement centre (x/y below are
-# ignored in settlement spawn mode).
+# Uses the 4000x4000 island map: generation_mode = "generate" loads
+# saves/island.npz when it exists and otherwise generates the map from
+# terrain_seed and saves it there (2-5 minutes on a first run). The same map
+# can be built ahead of time with `cd world && uv run python -m world.terrain`,
+# whose defaults match the values below.
+#
+# Every entity spawns on the free walkable tiles nearest the computed
+# settlement centre (the x/y below are ignored in settlement spawn mode).
 
 [world]
 width = 4000
 height = 4000
-generation_mode = "load"
+generation_mode = "generate"
+terrain_seed = 12345
 map_save_path = "saves/island.npz"
 spawn_mode = "settlement"
 wolves = true

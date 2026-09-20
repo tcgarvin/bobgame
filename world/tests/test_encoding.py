@@ -1,20 +1,33 @@
-"""Tests for terrain encoding utilities."""
+"""Tests for terrain encoding utilities.
+
+Only the encoders are shipped: the viewer decodes the base64/RLE payload in
+TypeScript, so the Python decoders were dead code. The roundtrip tests below
+decode with a small local helper that mirrors the viewer's reader.
+"""
+
+import base64
 
 import numpy as np
-import pytest
+from numpy.typing import NDArray
 
-from world.encoding import (
-    decode_terrain_base64,
-    decode_terrain_changes,
-    decode_terrain_rle,
-    encode_terrain_base64,
-    encode_terrain_changes,
-    encode_terrain_rle,
-)
+from world.encoding import encode_terrain_base64, encode_terrain_rle
+
+
+def decode_rle(data: bytes, shape: tuple[int, int]) -> NDArray[np.uint8]:
+    """Decode `encode_terrain_rle` output, as the viewer's reader does."""
+    expected_size = shape[0] * shape[1]
+    result = np.zeros(expected_size, dtype=np.uint8)
+    pos = 0
+    for index in range(0, len(data) - 1, 2):
+        value, count = data[index], data[index + 1]
+        result[pos : pos + count] = value
+        pos += count
+    assert pos == expected_size, f"decoded {pos}, expected {expected_size}"
+    return result.reshape(shape)
 
 
 class TestRLEEncoding:
-    """Tests for RLE terrain encoding/decoding."""
+    """Tests for RLE terrain encoding."""
 
     def test_encode_uniform_terrain(self) -> None:
         """Uniform terrain compresses well."""
@@ -34,8 +47,7 @@ class TestRLEEncoding:
         terrain[0::2, 0::2] = 1
         terrain[1::2, 1::2] = 1
 
-        encoded = encode_terrain_rle(terrain)
-        decoded = decode_terrain_rle(encoded, (4, 4))
+        decoded = decode_rle(encode_terrain_rle(terrain), (4, 4))
 
         np.testing.assert_array_equal(terrain, decoded)
 
@@ -44,8 +56,7 @@ class TestRLEEncoding:
         np.random.seed(42)
         terrain = np.random.randint(0, 7, size=(32, 32), dtype=np.uint8)
 
-        encoded = encode_terrain_rle(terrain)
-        decoded = decode_terrain_rle(encoded, (32, 32))
+        decoded = decode_rle(encode_terrain_rle(terrain), (32, 32))
 
         np.testing.assert_array_equal(terrain, decoded)
 
@@ -56,18 +67,9 @@ class TestRLEEncoding:
         terrain[0:5, :] = 0  # water at top
         terrain[:, 0:3] = 2  # sand on left
 
-        encoded = encode_terrain_rle(terrain)
-        decoded = decode_terrain_rle(encoded, (32, 32))
+        decoded = decode_rle(encode_terrain_rle(terrain), (32, 32))
 
         np.testing.assert_array_equal(terrain, decoded)
-
-    def test_decode_wrong_size_raises(self) -> None:
-        """Decoding with wrong shape raises ValueError."""
-        terrain = np.full((32, 32), 3, dtype=np.uint8)
-        encoded = encode_terrain_rle(terrain)
-
-        with pytest.raises(ValueError, match="overflow"):
-            decode_terrain_rle(encoded, (16, 16))
 
     def test_empty_terrain(self) -> None:
         """Empty terrain encodes to empty bytes."""
@@ -78,8 +80,7 @@ class TestRLEEncoding:
     def test_single_value(self) -> None:
         """Single value terrain."""
         terrain = np.array([[5]], dtype=np.uint8)
-        encoded = encode_terrain_rle(terrain)
-        decoded = decode_terrain_rle(encoded, (1, 1))
+        decoded = decode_rle(encode_terrain_rle(terrain), (1, 1))
 
         assert decoded[0, 0] == 5
 
@@ -119,7 +120,7 @@ class TestBase64Encoding:
         encoded = encode_terrain_base64(terrain)
         assert isinstance(encoded, str)
 
-        decoded = decode_terrain_base64(encoded, (32, 32))
+        decoded = decode_rle(base64.b64decode(encoded), (32, 32))
         np.testing.assert_array_equal(terrain, decoded)
 
     def test_base64_is_ascii(self) -> None:
@@ -133,41 +134,3 @@ class TestBase64Encoding:
             c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
             for c in encoded
         )
-
-
-class TestTerrainChanges:
-    """Tests for sparse terrain change encoding."""
-
-    def test_encode_changes(self) -> None:
-        """Changes encode to JSON-serializable format."""
-        changes = [(5, 10, 3), (0, 0, 1), (31, 31, 5)]
-        encoded = encode_terrain_changes(changes)
-
-        assert encoded == [
-            {"x": 5, "y": 10, "floor_type": 3},
-            {"x": 0, "y": 0, "floor_type": 1},
-            {"x": 31, "y": 31, "floor_type": 5},
-        ]
-
-    def test_decode_changes(self) -> None:
-        """Changes decode from JSON format."""
-        data = [
-            {"x": 5, "y": 10, "floor_type": 3},
-            {"x": 0, "y": 0, "floor_type": 1},
-        ]
-        decoded = decode_terrain_changes(data)
-
-        assert decoded == [(5, 10, 3), (0, 0, 1)]
-
-    def test_roundtrip_changes(self) -> None:
-        """Changes survive encoding roundtrip."""
-        original = [(1, 2, 3), (4, 5, 6), (7, 8, 0)]
-        encoded = encode_terrain_changes(original)
-        decoded = decode_terrain_changes(encoded)
-
-        assert decoded == original
-
-    def test_empty_changes(self) -> None:
-        """Empty change list encodes/decodes correctly."""
-        assert encode_terrain_changes([]) == []
-        assert decode_terrain_changes([]) == []

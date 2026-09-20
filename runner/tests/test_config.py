@@ -15,19 +15,19 @@ class TestAgentConfig:
 
     def test_defaults(self):
         """Test default values."""
-        config = AgentConfig(module="agents.random_agent")
-        assert config.module == "agents.random_agent"
+        config = AgentConfig(module="tests.fake_agent")
+        assert config.module == "tests.fake_agent"
         assert config.args == []
         assert config.env == {}
 
     def test_with_args(self):
         """Test with custom args."""
         config = AgentConfig(
-            module="agents.random_agent",
-            args=["--eat-probability", "0.5"],
+            module="tests.fake_agent",
+            args=["--fake-flag", "0.5"],
             env={"DEBUG": "1"},
         )
-        assert config.args == ["--eat-probability", "0.5"]
+        assert config.args == ["--fake-flag", "0.5"]
         assert config.env == {"DEBUG": "1"}
 
 
@@ -104,10 +104,10 @@ class TestLoadConfig:
         assert "default" in config.agents
         assert "alice" in config.agents
 
-        assert config.agents["default"].module == "agents.random_agent"
-        assert config.agents["default"].args == ["--eat-probability", "0.1"]
+        assert config.agents["default"].module == "tests.fake_agent"
+        assert config.agents["default"].args == ["--fake-flag", "0.1"]
 
-        assert config.agents["alice"].args == ["--eat-probability", "0.5"]
+        assert config.agents["alice"].args == ["--fake-flag", "0.5"]
 
     def test_load_config_file_not_found(self, temp_dir):
         """Test error on missing file."""

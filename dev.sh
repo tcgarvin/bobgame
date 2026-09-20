@@ -7,10 +7,9 @@
 #   ./dev.sh [config]
 #
 # Arguments:
-#   config - Optional config name (default: island)
-#            Available: default, foraging, island (see world/configs/)
+#   config - Optional config name (default: hamlet, the only scenario)
 #
-# The island config generates a 4000x4000 procedural world on first run
+# The hamlet config generates the 4000x4000 procedural island on first run
 # and saves it to saves/island.npz. Subsequent runs load the existing map.
 #
 # Starts:
@@ -38,7 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIDS=()
 
 # Default config
-CONFIG="${1:-island}"
+CONFIG="${1:-hamlet}"
 
 # Parse arguments
 for arg in "$@"; do
@@ -47,7 +46,7 @@ for arg in "$@"; do
             echo "Usage: $0 [config]"
             echo ""
             echo "Arguments:"
-            echo "  config  Config name from world/configs/ (default: island)"
+            echo "  config  Config name from world/configs/ (default: hamlet)"
             echo ""
             echo "Starts all components for development:"
             echo "  - World server (gRPC :50051, WebSocket :8765)"
@@ -60,9 +59,9 @@ for arg in "$@"; do
             echo "Replay an earlier run with ./replay.sh [run_id] and"
             echo "summarise one with python tools/analyze_run.py [run_dir]."
             echo ""
-            echo "The island config generates a 4000x4000 procedural world on first"
-            echo "run and saves it to saves/island.npz. Subsequent runs load the"
-            echo "existing map for faster startup."
+            echo "The hamlet config generates the 4000x4000 procedural island on"
+            echo "first run and saves it to saves/island.npz. Subsequent runs load"
+            echo "the existing map for faster startup."
             echo ""
             echo "Available configs:"
             for cfg in "$SCRIPT_DIR/world/configs"/*.toml; do
@@ -175,13 +174,19 @@ wait_for_port() {
 }
 
 # Start World Server
+WORLD_CONFIG="$SCRIPT_DIR/world/configs/$CONFIG.toml"
+if [ ! -f "$WORLD_CONFIG" ]; then
+    log_error "No world config for '$CONFIG': $WORLD_CONFIG does not exist."
+    log_error "Available: $(ls "$SCRIPT_DIR/world/configs" | sed 's/\.toml$//' | tr '\n' ' ')"
+    exit 1
+fi
 log_info "Starting World Server with config '$CONFIG'..."
 
 # Check if this config might need terrain generation
 NEEDS_GENERATION=false
-if [ "$CONFIG" = "island" ] && [ ! -f "$SCRIPT_DIR/saves/island.npz" ]; then
+if [ ! -f "$SCRIPT_DIR/saves/island.npz" ]; then
     NEEDS_GENERATION=true
-    log_warn "First run with island config - generating 4000x4000 terrain..."
+    log_warn "No saves/island.npz yet - generating the 4000x4000 island..."
     log_warn "This may take 2-5 minutes. Progress will be shown below."
     echo ""
 fi
@@ -234,10 +239,12 @@ else
 fi
 
 # Start Runner (manages all agents)
-# Use a runner config matching the world config name when one exists.
+# The runner config must match the world config name.
 RUNNER_CONFIG="$SCRIPT_DIR/runner/configs/$CONFIG.toml"
 if [ ! -f "$RUNNER_CONFIG" ]; then
-    RUNNER_CONFIG="$SCRIPT_DIR/runner/configs/foraging.toml"
+    log_error "No runner config for '$CONFIG': $RUNNER_CONFIG does not exist."
+    log_error "Every world config needs a matching runner config."
+    exit 1
 fi
 log_info "Starting Agent Runner with $(basename "$RUNNER_CONFIG")..."
 cd "$SCRIPT_DIR/runner"

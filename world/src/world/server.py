@@ -34,6 +34,8 @@ logger = structlog.get_logger()
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
 # Default ports
+# The project ships one scenario (world/configs/hamlet.toml).
+DEFAULT_CONFIG = "hamlet"
 DEFAULT_PORT = 50051
 DEFAULT_WS_PORT = 8765
 
@@ -408,7 +410,9 @@ def main() -> None:
     parser.add_argument(
         "--config",
         type=str,
-        help=f"Config name or path (available: {', '.join(list_configs())})",
+        default=DEFAULT_CONFIG,
+        help=f"Config name or path (default: {DEFAULT_CONFIG}, "
+        f"available: {', '.join(list_configs())})",
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="gRPC port")
     parser.add_argument(
@@ -437,11 +441,6 @@ def main() -> None:
         "(default: $BOBGAME_RUN_DIR or <project_root>/runs/<run id>)",
     )
     parser.add_argument(
-        "--no-record",
-        action="store_true",
-        help="Do not record this run",
-    )
-    parser.add_argument(
         "--spawn-bush",
         type=str,
         nargs="*",
@@ -451,23 +450,16 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Load config if specified
-    config_name = "default"
-    config_rel_path = ""
-    if args.config:
-        try:
-            config_path = find_config(args.config)
-            config = load_config(config_path)
-            logger.info("config_loaded", path=str(config_path))
-            config_name = config_path.stem
-            config_rel_path = _relative_to_root(config_path)
-        except FileNotFoundError as e:
-            parser.error(str(e))
-    else:
-        # Default config: small 10x10 world
-        from .config import Config, WorldConfig
-
-        config = Config(world=WorldConfig(width=10, height=10))
+    # Load the named config. There is no built-in fallback world: a config
+    # that cannot be found is an error naming what was looked for.
+    try:
+        config_path = find_config(args.config)
+    except FileNotFoundError as e:
+        parser.error(str(e))
+    config = load_config(config_path)
+    logger.info("config_loaded", path=str(config_path))
+    config_name = config_path.stem
+    config_rel_path = _relative_to_root(config_path)
 
     # Apply CLI overrides
     width = args.width if args.width is not None else config.world.width
@@ -630,16 +622,10 @@ def main() -> None:
 
     # Recording destination
     run_id = generate_run_id(config_name)
-    run_dir: Path | None = None
-    if not args.no_record:
-        run_dir = (
-            Path(args.run_dir)
-            if args.run_dir
-            else default_run_dir(PROJECT_ROOT, run_id)
-        )
-        logger.info("recording_run", run_id=run_id, run_dir=str(run_dir))
-    else:
-        logger.info("recording_disabled")
+    run_dir = (
+        Path(args.run_dir) if args.run_dir else default_run_dir(PROJECT_ROOT, run_id)
+    )
+    logger.info("recording_run", run_id=run_id, run_dir=str(run_dir))
 
     # The map path recorded in meta is relative to the project root, as the
     # config writes it; only a map that actually exists is recorded.

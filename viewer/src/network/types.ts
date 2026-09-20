@@ -24,8 +24,6 @@ export interface EntityStats {
   max_fatigue?: number;
   /** True while the entity sleeps; it acts on nothing until it wakes. */
   asleep?: boolean;
-  /** True while the entity's invitation to talk is live (docs/09 section 8). */
-  open_to_talk?: boolean;
   inventory?: Record<string, number>;
 }
 

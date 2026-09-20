@@ -381,7 +381,7 @@ class ViewerWebSocketService:
     ) -> dict[str, Any]:
         """Entity state for a spawn message, falling back to the event data."""
         try:
-            return entity_state(self.world.get_entity(entity_id), self.world.tick)
+            return entity_state(self.world.get_entity(entity_id))
         except EntityNotFoundError:
             return {
                 "entity_id": entity_id,
@@ -394,7 +394,6 @@ class ViewerWebSocketService:
                 "max_food": 0,
                 "wielded": "",
                 "alive": False,
-                "open_to_talk": False,
                 "inventory": {},
             }
 

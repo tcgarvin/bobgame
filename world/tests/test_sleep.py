@@ -581,23 +581,31 @@ class TestPayloads:
             asleep=True,
             sleeping_on="bed_1",
         )
-        state = entity_state(entity, tick=0)
+        state = entity_state(entity)
         assert state["fatigue"] == 42
         assert state["max_fatigue"] == 100
         assert state["asleep"] is True
         assert state["sleeping_on"] == "bed_1"
-        assert entity_from_state(state, tick=0) == entity
+        assert entity_from_state(state) == entity
 
     def test_entity_from_state_reads_the_legacy_hunger_keys(self) -> None:
         """Payloads recorded before 2026-09-18 call the food stat `hunger`."""
         entity = Entity(entity_id="bob", position=Position(x=1, y=2), food=37)
-        state = entity_state(entity, tick=0)
+        state = entity_state(entity)
         state["hunger"] = state.pop("food")
         state["max_hunger"] = state.pop("max_food")
 
-        rebuilt = entity_from_state(state, tick=0)
+        rebuilt = entity_from_state(state)
         assert rebuilt.food == 37
         assert rebuilt.max_food == entity.max_food
+
+    def test_entity_from_state_ignores_a_legacy_open_to_talk_key(self) -> None:
+        """Runs recorded before the invitation mechanic went carry the key."""
+        entity = Entity(entity_id="bob", position=Position(x=1, y=2))
+        state = entity_state(entity)
+        state["open_to_talk"] = True
+
+        assert entity_from_state(state) == entity
 
     def test_clock_payload_shape(self) -> None:
         world = _world()

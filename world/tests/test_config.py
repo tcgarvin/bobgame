@@ -7,6 +7,7 @@ from world.config import (
     WorldConfig,
     config_to_entities,
     find_config,
+    list_configs,
     load_config,
 )
 from world.wolves import (
@@ -90,12 +91,16 @@ class TestShippedConfigs:
         assert settings.spawn_max_distance == 45
         assert settings.spawn_interval_ticks == 120
 
-    def test_settlement_is_unchanged(self) -> None:
-        config = load_config(find_config("settlement"))
+    def test_hamlet_is_the_only_shipped_config(self) -> None:
+        assert list_configs() == ["hamlet"]
 
-        assert len(config.entities) == 12
-        assert config.world.wolves is True
-        settings = config.world.wolf_settings()
-        assert settings.max_wolves == MAX_WOLVES
-        assert settings.spawn_min_distance == SPAWN_MIN_DISTANCE
-        assert settings.spawn_max_distance == SPAWN_MAX_DISTANCE
+    def test_hamlet_generates_the_island_when_the_save_is_missing(self) -> None:
+        config = load_config(find_config("hamlet"))
+
+        assert config.world.generation_mode == "generate"
+        assert config.world.map_save_path == "saves/island.npz"
+        assert config.world.terrain_seed == 12345
+
+    def test_an_unknown_config_name_is_refused(self) -> None:
+        with pytest.raises(FileNotFoundError, match="not found"):
+            find_config("settlement")

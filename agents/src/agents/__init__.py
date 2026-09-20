@@ -1,20 +1,6 @@
-"""Agent implementations for Bob's World."""
+"""Agent implementations for Bob's World.
 
-
-# Lazy imports to avoid RuntimeWarning when running submodules directly
-def __getattr__(name: str):
-    if name == "RandomAgent":
-        from .random_agent import RandomAgent
-
-        return RandomAgent
-    if name == "discover_entities":
-        from .random_agent import discover_entities
-
-        return discover_entities
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-__all__ = [
-    "RandomAgent",
-    "discover_entities",
-]
+The runnable agent is `agents.jev_agent` (planner + Jev). Import its
+submodules directly; this package exposes no eager re-exports, so running a
+submodule with `python -m` does not warn about a double import.
+"""

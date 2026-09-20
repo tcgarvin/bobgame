@@ -181,9 +181,10 @@ class EntityInfo:
     fatigue: int = 0
     max_fatigue: int = items.MAX_FATIGUE
     asleep: bool = False
-    # True while this entity's invitation to talk is still open: anyone next to
-    # it may accept and a conversation starts (docs/09 section 8).
-    open_to_talk: bool = False
+    # Object id of the bed slept on, "" for the ground (and while awake).
+    sleeping_on: str = ""
+    # True while the sleep was forced by exhaustion rather than chosen.
+    collapsed: bool = False
 
     @property
     def fatigue_word(self) -> str:
@@ -205,8 +206,7 @@ class HeardUtterance:
 
     `conversation_id` is empty for ordinary speech; it names the conversation
     for a line spoken in one, and for the opening line, which is heard on the
-    local channel. `open_to_talk` is set when the speaker said it as an
-    invitation, so it stays open to an accept for `INVITATION_TICKS`.
+    local channel.
     """
 
     tick: int
@@ -215,7 +215,6 @@ class HeardUtterance:
     text: str
     position: Coord
     conversation_id: str = ""
-    open_to_talk: bool = False
 
 
 @dataclass(frozen=True)
@@ -613,7 +612,6 @@ class WorldModel:
                     utterance.text,
                     (utterance.position.x, utterance.position.y),
                     utterance.conversation_id,
-                    utterance.open_to_talk,
                 )
                 self.heard.append(heard)
                 digest.utterances.append(heard)
@@ -1026,7 +1024,8 @@ def _entity_info(entity: pb.Entity, tick: int) -> EntityInfo:
         fatigue=entity.fatigue,
         max_fatigue=entity.max_fatigue or items.MAX_FATIGUE,
         asleep=entity.asleep,
-        open_to_talk=entity.open_to_talk,
+        sleeping_on=entity.sleeping_on,
+        collapsed=entity.collapsed,
     )
 
 
