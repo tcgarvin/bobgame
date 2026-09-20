@@ -133,6 +133,15 @@ def generate_run_id(config_name: str, now: datetime | None = None) -> str:
     return f"{stamp}-{config_name}"
 
 
+def run_id_for(config_name: str) -> str:
+    """The run id: `$BOBGAME_RUN_ID` when dev.sh set one, else a fresh one.
+
+    dev.sh names the run directory after the id it exports; inventing a second
+    id here made `meta.json` disagree with the directory name.
+    """
+    return os.environ.get("BOBGAME_RUN_ID", "") or generate_run_id(config_name)
+
+
 def default_run_dir(project_root: Path, run_id: str) -> Path:
     """Run directory for `run_id`: `$BOBGAME_RUN_DIR` if set, else runs/<run_id>."""
     from_env = os.environ.get("BOBGAME_RUN_DIR", "")

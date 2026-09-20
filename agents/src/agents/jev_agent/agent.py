@@ -90,19 +90,21 @@ from .snapshot import (
     snapshot_path,
     write_snapshot,
 )
-from .stint import (
+from .briefs import (
     INTERRUPTED_BY_CONVERSATION,
     INTERRUPTED_BY_REFLEX,
+    Brief,
+    StintDriver,
+    conversation_interruption,
+)
+from .stint import (
     END_ASLEEP,
     END_JOINED_CONVERSATION,
     END_NEW_MOON,
     END_PREEMPTED_BY_REFLEX,
     STINT_KIND_REFLEX,
-    Brief,
     Stint,
-    StintDriver,
     StintReport,
-    conversation_interruption,
     never_ends,
 )
 from .pricing import CostLedger, LedgerJevClient, pricing_payload

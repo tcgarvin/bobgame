@@ -21,16 +21,25 @@ from .geometry import Coord, chebyshev
 from .jevclient import JevClient, JevDecision
 from .jevstate import StintProgress, build_state, collapse_action
 from .pricing import jev_cost_usd
+from .briefs import (
+    HAIL_REFUSAL_LIMIT,
+    INTERRUPTED_BY_CONVERSATION,
+    INTERRUPTED_BY_REFLEX,
+    MAX_BRIEF_HAILS,
+    Brief,
+    BriefHail,
+    DriverChoice,
+    Option,
+    StintDriver,
+    TravelState,
+    conversation_interruption,
+    was_interrupted,
+)
 from .options import (
     HAIL_KEY_PREFIX,
-    HAIL_REFUSAL_LIMIT,
     KEEP_GOING,
-    MAX_BRIEF_HAILS,
     MAX_OPTIONS,
     STEP_KEY_PREFIX,
-    BriefHail,
-    Option,
-    TravelState,
     brief_object_ids,
     enumerate_options,
     options_to_criteria,
@@ -120,112 +129,10 @@ END_JOINED_CONVERSATION = "joined_conversation"
 STINT_KIND_ORDINARY = "stint"
 STINT_KIND_REFLEX = "reflex"
 
-# What a planner single-tick action is answered with when something else took
-# the body before it could run. Nothing happened, so the planner's tool budget
-# is not charged for it (`BudgetedToolset.call_tool`). They live here rather
-# than in `agent.py` because `planner.py` has to recognise them and `agent.py`
-# already imports this module.
-INTERRUPTED_BY_REFLEX = "interrupted: reflex stint started"
-# A conversation can start while the planner is mid-turn, because someone
-# hailed this settler (docs/09 sections 8.3 and 9). The conversation owns the
-# body from that tick, so single-tick actions are answered with this instead.
-INTERRUPTED_BY_CONVERSATION = "interrupted: conversation {conversation_id} started"
-_INTERRUPTION_PREFIX = "interrupted: "
-
-
-def conversation_interruption(conversation_id: str) -> str:
-    """The answer a single-tick action gets when a conversation took the body."""
-    return INTERRUPTED_BY_CONVERSATION.format(conversation_id=conversation_id)
-
-
-def was_interrupted(result: str) -> bool:
-    """Whether a tool result says the action never ran because of an interruption.
-
-    Both forms are rendered as `"<what> -> interrupted: ..."`, so one substring
-    covers the reflex and the conversation alike.
-    """
-    return f"-> {_INTERRUPTION_PREFIX}" in result
-
 
 def never_ends(model: "WorldModel") -> str:
     """The default extra end rule: no stint ends because of it."""
     return ""
-
-
-@dataclass(frozen=True)
-class DriverChoice:
-    """What a code driver wants to do on one tick."""
-
-    option: Option
-    note: str = ""
-
-
-class StintDriver(Protocol):
-    """Code that replaces Jev for a stint, one deterministic decision per tick.
-
-    Used by the planner's `build` tool: laying out walls and roads is arithmetic,
-    not judgement, and Jev cannot reason about coordinates tick by tick.
-    """
-
-    name: str
-
-    def stop_reason(self, model: WorldModel) -> str:
-        """Why the stint should end now, or `""` to carry on."""
-
-    def choose(self, model: WorldModel) -> DriverChoice:
-        """The action for this tick. Only called when `stop_reason` was empty."""
-
-    def summary(self) -> str:
-        """A few lines of progress for the planner's report."""
-
-
-@dataclass(frozen=True)
-class Brief:
-    """What the planner told Jev to do, and the limits it set."""
-
-    instruction: str
-    success_condition: str
-    max_ticks: int
-    notes: str = ""
-    check_every: int = 1
-    travel: TravelState | None = None
-    # The only phrases Jev may shout during this stint; empty means it cannot.
-    shouts: tuple[str, ...] = ()
-    # The only settlers Jev may hail, each with the line to say; empty means it
-    # cannot start a conversation (docs/09 section 9.3).
-    hails: tuple[BriefHail, ...] = ()
-    # Named destinations Jev may step toward, so it never sees a coordinate.
-    places: Mapping[str, Coord] = field(default_factory=dict)
-
-    def summary(self) -> str:
-        """One-line form for status reports and the viewer."""
-        return f"{self.instruction} (until: {self.success_condition})"
-
-    @property
-    def text(self) -> str:
-        """Instruction and notes together, for scanning out the ids it names."""
-        return f"{self.instruction}\n{self.notes}"
-
-    def as_payload(self) -> dict[str, Any]:
-        """The brief as the replay contract serialises it."""
-        travel = self.travel
-        return {
-            "instruction": self.instruction,
-            "success_condition": self.success_condition,
-            "max_ticks": self.max_ticks,
-            "notes": self.notes,
-            "check_every": self.check_every,
-            "shouts": list(self.shouts),
-            "hails": [hail.as_payload() for hail in self.hails],
-            "places": {
-                name: [target[0], target[1]] for name, target in self.places.items()
-            },
-            "travel": (
-                None
-                if travel is None
-                else {"target": list(travel.target), "label": travel.label}
-            ),
-        }
 
 
 @dataclass(frozen=True)

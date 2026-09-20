@@ -4,12 +4,13 @@ See docs/05_jev_agents_design.md for the contract this package implements.
 """
 
 from .agent import JevAgent, run_agent
+from .briefs import Brief, Option, TravelState
 from .conversation import ConversationReport, ConversationSession, ModelConverser
 from .jevclient import JevClient, JevDecision, TypeSafeJevClient
-from .options import Option, TravelState, enumerate_options
+from .options import enumerate_options
 from .planner import Planner, describe_world
 from .reflex import ReflexBrief, ReflexStore, ReflexWatch
-from .stint import Brief, Stint, StintReport
+from .stint import Stint, StintReport
 from .tracelog import AgentTrace, JsonlGzWriter, resolve_log_root
 from .worldmodel import WorldModel
 

@@ -5,23 +5,26 @@ import warnings
 
 from . import world_pb2 as world__pb2
 
-GRPC_GENERATED_VERSION = '1.76.0'
+GRPC_GENERATED_VERSION = "1.76.0"
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
 try:
     from grpc._utilities import first_version_is_lower
-    _version_not_supported = first_version_is_lower(GRPC_VERSION, GRPC_GENERATED_VERSION)
+
+    _version_not_supported = first_version_is_lower(
+        GRPC_VERSION, GRPC_GENERATED_VERSION
+    )
 except ImportError:
     _version_not_supported = True
 
 if _version_not_supported:
     raise RuntimeError(
-        f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in world_pb2_grpc.py depends on'
-        + f' grpcio>={GRPC_GENERATED_VERSION}.'
-        + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
-        + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
+        f"The grpc package installed is at version {GRPC_VERSION},"
+        + " but the generated code in world_pb2_grpc.py depends on"
+        + f" grpcio>={GRPC_GENERATED_VERSION}."
+        + f" Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}"
+        + f" or downgrade your generated code using grpcio-tools<={GRPC_VERSION}."
     )
 
 
@@ -39,10 +42,11 @@ class TickServiceStub(object):
             channel: A grpc.Channel.
         """
         self.StreamTicks = channel.unary_stream(
-                '/world.TickService/StreamTicks',
-                request_serializer=world__pb2.StreamTicksRequest.SerializeToString,
-                response_deserializer=world__pb2.TickEvent.FromString,
-                _registered_method=True)
+            "/world.TickService/StreamTicks",
+            request_serializer=world__pb2.StreamTicksRequest.SerializeToString,
+            response_deserializer=world__pb2.TickEvent.FromString,
+            _registered_method=True,
+        )
 
 
 class TickServiceServicer(object):
@@ -55,25 +59,26 @@ class TickServiceServicer(object):
     def StreamTicks(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
 
 def add_TickServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'StreamTicks': grpc.unary_stream_rpc_method_handler(
-                    servicer.StreamTicks,
-                    request_deserializer=world__pb2.StreamTicksRequest.FromString,
-                    response_serializer=world__pb2.TickEvent.SerializeToString,
-            ),
+        "StreamTicks": grpc.unary_stream_rpc_method_handler(
+            servicer.StreamTicks,
+            request_deserializer=world__pb2.StreamTicksRequest.FromString,
+            response_serializer=world__pb2.TickEvent.SerializeToString,
+        ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'world.TickService', rpc_method_handlers)
+        "world.TickService", rpc_method_handlers
+    )
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('world.TickService', rpc_method_handlers)
+    server.add_registered_method_handlers("world.TickService", rpc_method_handlers)
 
 
- # This class is part of an EXPERIMENTAL API.
+# This class is part of an EXPERIMENTAL API.
 class TickService(object):
     """============================================================================
     Tick Service
@@ -82,20 +87,22 @@ class TickService(object):
     """
 
     @staticmethod
-    def StreamTicks(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def StreamTicks(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/world.TickService/StreamTicks',
+            "/world.TickService/StreamTicks",
             world__pb2.StreamTicksRequest.SerializeToString,
             world__pb2.TickEvent.FromString,
             options,
@@ -106,7 +113,8 @@ class TickService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
 
 class EntityDiscoveryServiceStub(object):
@@ -123,10 +131,11 @@ class EntityDiscoveryServiceStub(object):
             channel: A grpc.Channel.
         """
         self.ListControllableEntities = channel.unary_unary(
-                '/world.EntityDiscoveryService/ListControllableEntities',
-                request_serializer=world__pb2.ListControllableEntitiesRequest.SerializeToString,
-                response_deserializer=world__pb2.ControllableEntitiesResponse.FromString,
-                _registered_method=True)
+            "/world.EntityDiscoveryService/ListControllableEntities",
+            request_serializer=world__pb2.ListControllableEntitiesRequest.SerializeToString,
+            response_deserializer=world__pb2.ControllableEntitiesResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class EntityDiscoveryServiceServicer(object):
@@ -139,25 +148,28 @@ class EntityDiscoveryServiceServicer(object):
     def ListControllableEntities(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
 
 def add_EntityDiscoveryServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'ListControllableEntities': grpc.unary_unary_rpc_method_handler(
-                    servicer.ListControllableEntities,
-                    request_deserializer=world__pb2.ListControllableEntitiesRequest.FromString,
-                    response_serializer=world__pb2.ControllableEntitiesResponse.SerializeToString,
-            ),
+        "ListControllableEntities": grpc.unary_unary_rpc_method_handler(
+            servicer.ListControllableEntities,
+            request_deserializer=world__pb2.ListControllableEntitiesRequest.FromString,
+            response_serializer=world__pb2.ControllableEntitiesResponse.SerializeToString,
+        ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'world.EntityDiscoveryService', rpc_method_handlers)
+        "world.EntityDiscoveryService", rpc_method_handlers
+    )
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('world.EntityDiscoveryService', rpc_method_handlers)
+    server.add_registered_method_handlers(
+        "world.EntityDiscoveryService", rpc_method_handlers
+    )
 
 
- # This class is part of an EXPERIMENTAL API.
+# This class is part of an EXPERIMENTAL API.
 class EntityDiscoveryService(object):
     """============================================================================
     Entity Discovery Service (for Runner)
@@ -166,20 +178,22 @@ class EntityDiscoveryService(object):
     """
 
     @staticmethod
-    def ListControllableEntities(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def ListControllableEntities(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/world.EntityDiscoveryService/ListControllableEntities',
+            "/world.EntityDiscoveryService/ListControllableEntities",
             world__pb2.ListControllableEntitiesRequest.SerializeToString,
             world__pb2.ControllableEntitiesResponse.FromString,
             options,
@@ -190,7 +204,8 @@ class EntityDiscoveryService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
 
 class LeaseServiceStub(object):
@@ -207,20 +222,23 @@ class LeaseServiceStub(object):
             channel: A grpc.Channel.
         """
         self.AcquireLease = channel.unary_unary(
-                '/world.LeaseService/AcquireLease',
-                request_serializer=world__pb2.AcquireLeaseRequest.SerializeToString,
-                response_deserializer=world__pb2.LeaseResponse.FromString,
-                _registered_method=True)
+            "/world.LeaseService/AcquireLease",
+            request_serializer=world__pb2.AcquireLeaseRequest.SerializeToString,
+            response_deserializer=world__pb2.LeaseResponse.FromString,
+            _registered_method=True,
+        )
         self.RenewLease = channel.unary_unary(
-                '/world.LeaseService/RenewLease',
-                request_serializer=world__pb2.RenewLeaseRequest.SerializeToString,
-                response_deserializer=world__pb2.LeaseResponse.FromString,
-                _registered_method=True)
+            "/world.LeaseService/RenewLease",
+            request_serializer=world__pb2.RenewLeaseRequest.SerializeToString,
+            response_deserializer=world__pb2.LeaseResponse.FromString,
+            _registered_method=True,
+        )
         self.ReleaseLease = channel.unary_unary(
-                '/world.LeaseService/ReleaseLease',
-                request_serializer=world__pb2.ReleaseLeaseRequest.SerializeToString,
-                response_deserializer=world__pb2.ReleaseLeaseResponse.FromString,
-                _registered_method=True)
+            "/world.LeaseService/ReleaseLease",
+            request_serializer=world__pb2.ReleaseLeaseRequest.SerializeToString,
+            response_deserializer=world__pb2.ReleaseLeaseResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class LeaseServiceServicer(object):
@@ -233,47 +251,48 @@ class LeaseServiceServicer(object):
     def AcquireLease(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def RenewLease(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def ReleaseLease(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
 
 def add_LeaseServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'AcquireLease': grpc.unary_unary_rpc_method_handler(
-                    servicer.AcquireLease,
-                    request_deserializer=world__pb2.AcquireLeaseRequest.FromString,
-                    response_serializer=world__pb2.LeaseResponse.SerializeToString,
-            ),
-            'RenewLease': grpc.unary_unary_rpc_method_handler(
-                    servicer.RenewLease,
-                    request_deserializer=world__pb2.RenewLeaseRequest.FromString,
-                    response_serializer=world__pb2.LeaseResponse.SerializeToString,
-            ),
-            'ReleaseLease': grpc.unary_unary_rpc_method_handler(
-                    servicer.ReleaseLease,
-                    request_deserializer=world__pb2.ReleaseLeaseRequest.FromString,
-                    response_serializer=world__pb2.ReleaseLeaseResponse.SerializeToString,
-            ),
+        "AcquireLease": grpc.unary_unary_rpc_method_handler(
+            servicer.AcquireLease,
+            request_deserializer=world__pb2.AcquireLeaseRequest.FromString,
+            response_serializer=world__pb2.LeaseResponse.SerializeToString,
+        ),
+        "RenewLease": grpc.unary_unary_rpc_method_handler(
+            servicer.RenewLease,
+            request_deserializer=world__pb2.RenewLeaseRequest.FromString,
+            response_serializer=world__pb2.LeaseResponse.SerializeToString,
+        ),
+        "ReleaseLease": grpc.unary_unary_rpc_method_handler(
+            servicer.ReleaseLease,
+            request_deserializer=world__pb2.ReleaseLeaseRequest.FromString,
+            response_serializer=world__pb2.ReleaseLeaseResponse.SerializeToString,
+        ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'world.LeaseService', rpc_method_handlers)
+        "world.LeaseService", rpc_method_handlers
+    )
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('world.LeaseService', rpc_method_handlers)
+    server.add_registered_method_handlers("world.LeaseService", rpc_method_handlers)
 
 
- # This class is part of an EXPERIMENTAL API.
+# This class is part of an EXPERIMENTAL API.
 class LeaseService(object):
     """============================================================================
     Lease Service
@@ -282,20 +301,22 @@ class LeaseService(object):
     """
 
     @staticmethod
-    def AcquireLease(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def AcquireLease(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/world.LeaseService/AcquireLease',
+            "/world.LeaseService/AcquireLease",
             world__pb2.AcquireLeaseRequest.SerializeToString,
             world__pb2.LeaseResponse.FromString,
             options,
@@ -306,23 +327,26 @@ class LeaseService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def RenewLease(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def RenewLease(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/world.LeaseService/RenewLease',
+            "/world.LeaseService/RenewLease",
             world__pb2.RenewLeaseRequest.SerializeToString,
             world__pb2.LeaseResponse.FromString,
             options,
@@ -333,23 +357,26 @@ class LeaseService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def ReleaseLease(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def ReleaseLease(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/world.LeaseService/ReleaseLease',
+            "/world.LeaseService/ReleaseLease",
             world__pb2.ReleaseLeaseRequest.SerializeToString,
             world__pb2.ReleaseLeaseResponse.FromString,
             options,
@@ -360,7 +387,8 @@ class LeaseService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
 
 class ObservationServiceStub(object):
@@ -377,10 +405,11 @@ class ObservationServiceStub(object):
             channel: A grpc.Channel.
         """
         self.StreamObservations = channel.unary_stream(
-                '/world.ObservationService/StreamObservations',
-                request_serializer=world__pb2.StreamObservationsRequest.SerializeToString,
-                response_deserializer=world__pb2.Observation.FromString,
-                _registered_method=True)
+            "/world.ObservationService/StreamObservations",
+            request_serializer=world__pb2.StreamObservationsRequest.SerializeToString,
+            response_deserializer=world__pb2.Observation.FromString,
+            _registered_method=True,
+        )
 
 
 class ObservationServiceServicer(object):
@@ -393,25 +422,28 @@ class ObservationServiceServicer(object):
     def StreamObservations(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
 
 def add_ObservationServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'StreamObservations': grpc.unary_stream_rpc_method_handler(
-                    servicer.StreamObservations,
-                    request_deserializer=world__pb2.StreamObservationsRequest.FromString,
-                    response_serializer=world__pb2.Observation.SerializeToString,
-            ),
+        "StreamObservations": grpc.unary_stream_rpc_method_handler(
+            servicer.StreamObservations,
+            request_deserializer=world__pb2.StreamObservationsRequest.FromString,
+            response_serializer=world__pb2.Observation.SerializeToString,
+        ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'world.ObservationService', rpc_method_handlers)
+        "world.ObservationService", rpc_method_handlers
+    )
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('world.ObservationService', rpc_method_handlers)
+    server.add_registered_method_handlers(
+        "world.ObservationService", rpc_method_handlers
+    )
 
 
- # This class is part of an EXPERIMENTAL API.
+# This class is part of an EXPERIMENTAL API.
 class ObservationService(object):
     """============================================================================
     Observation Service
@@ -420,20 +452,22 @@ class ObservationService(object):
     """
 
     @staticmethod
-    def StreamObservations(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def StreamObservations(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/world.ObservationService/StreamObservations',
+            "/world.ObservationService/StreamObservations",
             world__pb2.StreamObservationsRequest.SerializeToString,
             world__pb2.Observation.FromString,
             options,
@@ -444,7 +478,8 @@ class ObservationService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
 
 class ActionServiceStub(object):
@@ -461,10 +496,11 @@ class ActionServiceStub(object):
             channel: A grpc.Channel.
         """
         self.SubmitIntent = channel.unary_unary(
-                '/world.ActionService/SubmitIntent',
-                request_serializer=world__pb2.SubmitIntentRequest.SerializeToString,
-                response_deserializer=world__pb2.SubmitIntentResponse.FromString,
-                _registered_method=True)
+            "/world.ActionService/SubmitIntent",
+            request_serializer=world__pb2.SubmitIntentRequest.SerializeToString,
+            response_deserializer=world__pb2.SubmitIntentResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class ActionServiceServicer(object):
@@ -477,25 +513,26 @@ class ActionServiceServicer(object):
     def SubmitIntent(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
 
 def add_ActionServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'SubmitIntent': grpc.unary_unary_rpc_method_handler(
-                    servicer.SubmitIntent,
-                    request_deserializer=world__pb2.SubmitIntentRequest.FromString,
-                    response_serializer=world__pb2.SubmitIntentResponse.SerializeToString,
-            ),
+        "SubmitIntent": grpc.unary_unary_rpc_method_handler(
+            servicer.SubmitIntent,
+            request_deserializer=world__pb2.SubmitIntentRequest.FromString,
+            response_serializer=world__pb2.SubmitIntentResponse.SerializeToString,
+        ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'world.ActionService', rpc_method_handlers)
+        "world.ActionService", rpc_method_handlers
+    )
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('world.ActionService', rpc_method_handlers)
+    server.add_registered_method_handlers("world.ActionService", rpc_method_handlers)
 
 
- # This class is part of an EXPERIMENTAL API.
+# This class is part of an EXPERIMENTAL API.
 class ActionService(object):
     """============================================================================
     Action Service
@@ -504,20 +541,22 @@ class ActionService(object):
     """
 
     @staticmethod
-    def SubmitIntent(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def SubmitIntent(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/world.ActionService/SubmitIntent',
+            "/world.ActionService/SubmitIntent",
             world__pb2.SubmitIntentRequest.SerializeToString,
             world__pb2.SubmitIntentResponse.FromString,
             options,
@@ -528,7 +567,8 @@ class ActionService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
 
 class AgentStatusServiceStub(object):
@@ -545,10 +585,11 @@ class AgentStatusServiceStub(object):
             channel: A grpc.Channel.
         """
         self.ReportStatus = channel.unary_unary(
-                '/world.AgentStatusService/ReportStatus',
-                request_serializer=world__pb2.AgentStatusReport.SerializeToString,
-                response_deserializer=world__pb2.AgentStatusAck.FromString,
-                _registered_method=True)
+            "/world.AgentStatusService/ReportStatus",
+            request_serializer=world__pb2.AgentStatusReport.SerializeToString,
+            response_deserializer=world__pb2.AgentStatusAck.FromString,
+            _registered_method=True,
+        )
 
 
 class AgentStatusServiceServicer(object):
@@ -561,25 +602,28 @@ class AgentStatusServiceServicer(object):
     def ReportStatus(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
 
 def add_AgentStatusServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'ReportStatus': grpc.unary_unary_rpc_method_handler(
-                    servicer.ReportStatus,
-                    request_deserializer=world__pb2.AgentStatusReport.FromString,
-                    response_serializer=world__pb2.AgentStatusAck.SerializeToString,
-            ),
+        "ReportStatus": grpc.unary_unary_rpc_method_handler(
+            servicer.ReportStatus,
+            request_deserializer=world__pb2.AgentStatusReport.FromString,
+            response_serializer=world__pb2.AgentStatusAck.SerializeToString,
+        ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'world.AgentStatusService', rpc_method_handlers)
+        "world.AgentStatusService", rpc_method_handlers
+    )
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('world.AgentStatusService', rpc_method_handlers)
+    server.add_registered_method_handlers(
+        "world.AgentStatusService", rpc_method_handlers
+    )
 
 
- # This class is part of an EXPERIMENTAL API.
+# This class is part of an EXPERIMENTAL API.
 class AgentStatusService(object):
     """============================================================================
     Agent Status Service (agents report their internal state for the viewer)
@@ -588,20 +632,22 @@ class AgentStatusService(object):
     """
 
     @staticmethod
-    def ReportStatus(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def ReportStatus(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/world.AgentStatusService/ReportStatus',
+            "/world.AgentStatusService/ReportStatus",
             world__pb2.AgentStatusReport.SerializeToString,
             world__pb2.AgentStatusAck.FromString,
             options,
@@ -612,4 +658,5 @@ class AgentStatusService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )

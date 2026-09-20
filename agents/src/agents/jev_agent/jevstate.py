@@ -14,7 +14,7 @@ from typing import Any, Collection, Mapping, Sequence
 from . import items
 from .enclosure import enclosed_fact
 from .geometry import Coord, chebyshev, direction_name
-from .options import EMPTY_PLACES, BriefHail, TravelState
+from .briefs import EMPTY_PLACES, BriefHail, TravelState
 from .pathfinding import NO_PATH, next_step, path_length
 from .worldmodel import EntityInfo, HeardUtterance, ObjectInfo, WorldModel
 

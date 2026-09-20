@@ -112,19 +112,31 @@ written at startup with the prices the run is billed at (`pricing.py`). Contract
 
 ### Module map
 
+Modules sit on numbered import layers and may only import from a strictly
+lower one; `tests/test_layering.py` parses the sources and enforces it, so a
+new module has to be placed on a layer deliberately. That is why the shared
+vocabulary lives in `briefs.py` and the planner's view of the tick loop in
+`bridge.py` rather than in function-local imports at the call sites.
+
 | Module | Responsibility |
 | --- | --- |
 | `client.py` | Async wrapper over the sync gRPC stubs (stream on a thread, unary via `to_thread`), lease renewal every 10 s |
 | `geometry.py` | Direction tables, offsets, Chebyshev distance (`+y` is south) |
 | `items.py` | The agent-side mirror of `world/src/world/items.py`: recipes, item kinds, object layers, extraction yields |
+| `outcomes.py` | Reading the world's answer to one submitted intent (`action_succeeded`) |
 | `build.py` | Shape geometry and the `BuildExecutor` that drives the planner's `build` tool |
 | `pathfinding.py` | 8-connected A* with the world's diagonal-blocking rule; unknown tiles cost 3 |
+| `walk.py` | The one set of walking primitives — stand candidates, next step with stop-adjacent, the arrival test, the backstop tick budget — and `WalkDriver`, the code driver every code-owned walk uses |
 | `worldmodel.py` | Everything ever observed: tiles, objects, entities, own history, settlement |
+| `briefs.py` | The vocabulary the option and stint layers share: `Option`, `TravelState`, `Brief`, `BriefHail`, `DriverChoice`, `StintDriver`, and the `interrupted: ...` strings |
+| `bridge.py` | `AgentBridge`, the protocol the planner needs from the tick loop; `JevAgent` implements it |
+| `actions.py` | Preconditions and intent construction both layers share: an `Attempt` is either the intent to submit or the sentence saying why not (`shout_attempt`, `sleep_attempt`, `converse_intent`, `give_intent`) |
+| `recipes.py` | Everything both layers do with the recipe table: `craftable_now`, the option's craft description, the recipe-chain crafting loop (`craft_chain`, `craft_once`, `stock_one`, `CraftTally`) and the "where does this raw material come from" lines |
 | `enclosure.py` | Seals, rooms, the enclosed fact and the actor's own pieces: the flood fills `build.py`, `options.py`, `planner.py` and `jevstate.py` share |
-| `options.py` | The legal actions for this tick, each carrying its proto Intent; walking is `step_towards:<target>` with a per-type quota (`STEP_GROUPS`), and `OPTION_SECTIONS` fixes what gets truncated first |
+| `options.py` | The legal actions for this tick, each carrying its proto Intent; walking is `step_towards:<target>` with a per-type quota (`STEP_GROUPS`), and `OPTION_SECTIONS` fixes what gets truncated first. Preconditions and intents come from `actions.py`, `recipes.py` and `walk.py` |
 | `jevstate.py` | The compact JSON state (17x17 ASCII map, one `facts` list, the `so_far` block, a `nearby` list of only what the map cannot say) Jev sees |
 | `jevclient.py` | The TypeSafe System One call; `JevClient` protocol for fakes |
-| `stint.py` | `Brief` (instruction, success condition, notes, shouts, hails, `places`) -> one Jev call per tick -> Intent, plus the code rules, `StintProgress` and `StintReport` |
+| `stint.py` | One Jev call per tick under a `briefs.Brief` -> Intent, plus the code rules, `StintProgress` and `StintReport` |
 | `reflex.py` | The pre-registered reflex brief: persistence, trigger, cooldown, end rule |
 | `conversation.py` | Conversation mode: the converser, the per-turn session, the report and the note |
 | `llm.py` | Model id resolution and model settings shared by the planner and the converser |
@@ -256,8 +268,8 @@ its last conversation ended.
 `_validated_hails` refuses a settler this actor has not met (naming who it
 has), itself, a blank pair and a line over `CONVERSATION_TEXT_LIMIT`, each as a
 `ModelRetry`; `ReflexBrief` has none. `Brief.hails` is a tuple of
-`options.BriefHail(settler, line)` - it lives in `options.py` because
-`options.py` cannot import `stint.py`. `options.py` offers `hail:<settler>` in
+`briefs.BriefHail(settler, line)`; `briefs.py` is below both `options.py` and
+`stint.py`, so both can name it. `options.py` offers `hail:<settler>` in
 its own `OPTION_SECTIONS` entry (`hail`, between `survival` and
 `conversation`, so truncation cannot drop it): the hail intent next to the
 settler, otherwise a code-owned `stop_adjacent` walk, and never while this
@@ -295,19 +307,19 @@ Facts that live only here; the runs that produced them are in
   under the threat alert and `Planner.build_prompt` puts the same lines above
   the `look`. A dead or sleeping body gets none.
 - **`travel_to(x, y)` runs to arrival and takes no `max_ticks`.**
-  `travel_arrival(model, target)` returns `arrived` when standing on the
-  target, `arrived_next_to` when standing beside a target `is_walkable`
+  `walk.arrival(model, target)` (re-exported as `travel_arrival`) returns
+  `arrived` when standing on the target, `arrived_next_to` when standing beside a target `is_walkable`
   refuses, else `""`. The tool checks it first (returning "no walk needed: ...
   No tick spent.", costing nothing) and hands it to the stint as an
   `end_check`, so the walk ends the tick it arrives rather than waiting for two
   Jev `done` ticks. It otherwise ends on `no_path`, a danger stop or a food
-  stop; `travel_budget(model, target)` is only a backstop (`path_length *
-  TRAVEL_TICKS_PER_STEP (2) + TRAVEL_TICK_ALLOWANCE (20)`, clamped to
-  `TRAVEL_MIN_TICKS` (30) .. `TRAVEL_MAX_TICKS` (600)). When the destination is
-  known and unwalkable, `options._step_option_for_place` and
-  `_travel_control_options` retry `find_path(..., stop_adjacent=True)`, so a
-  walk routes to a free neighbour instead of failing.
-- **Tools craft what they are short of.** `_craft_chain` crafts a kind,
+  stop; `walk.tick_budget(model, target)` is only a backstop (`path_length *
+  TICKS_PER_STEP (2) + TICK_ALLOWANCE (20)`, clamped to `MIN_TICKS` (30) ..
+  `MAX_TICKS` (600); the old `TRAVEL_*` names in `planner.py` are aliases).
+  When the destination is known and unwalkable, `walk.plan_step(...,
+  retry_adjacent=True)` routes to a free neighbour instead of failing, so a
+  step option and `keep_going` both survive it.
+- **Tools craft what they are short of.** `recipes.craft_chain` crafts a kind,
   crafting missing inputs first to `CRAFT_CHAIN_DEPTH` (2: wood -> plank ->
   wall), refusing a station recipe unless `WorldModel.station_near` finds the
   station on or next to the tile. `build` stocks up before its first stint and
@@ -319,13 +331,13 @@ Facts that live only here; the runs that produced them are in
   the actor's own tile has a berry it collects and eats it, reporting both
   actions; otherwise it names the nearest known bushes that had one.
 - **A failed `craft` names where the raw input comes from.**
-  `items.source_text(kind)` is generic over `EXTRACT_YIELD` / `EXTRACT_TOOLS` /
+  `items.source_text(kind)` (rendered by `recipes.source_lines`) is generic over `EXTRACT_YIELD` / `EXTRACT_TOOLS` /
   `EXTRACT_REQUIRED_TOOLS` and appends each source's habitat sentence from
   `items.HABITAT_TEXT` (written from `world/terrain/objects.py`'s placement
   rules, with the numbers mirrored: `REED_BANK_WIDTH`, `REED_COAST_EXCLUSION`,
   `CLAY_MIN_DISTANCE`/`CLAY_MAX_DISTANCE`, `BUSH_WATER_MIN_DISTANCE`/
   `BUSH_WATER_MAX_DISTANCE`, `TREE_COAST_DISTANCE`, `ORE_EXCLUSION_RADIUS`).
-  `planner.missing_input_lines` adds it plus the nearest `SOURCES_SHOWN` (3)
+  `recipes.missing_input_lines` adds it plus the nearest `SOURCES_SHOWN` (3)
   such objects to a failed `craft` and to `build`'s shortfall, and
   `_water_hint_lines` adds `nearest water you have seen: (x, y) (dN)` for a
   water-bound material. `Tile.floor_type` does not distinguish fresh water from
@@ -371,6 +383,16 @@ Facts that live only here; the runs that produced them are in
   The first interrupted result does *not* carry the conversation report — that
   would block a single-tick tool on the whole conversation; it arrives as a
   note in the next tool result.
+- **One rule per action, for both layers.** `actions.py` holds the
+  preconditions and intents Jev's option layer and the planner's tools both
+  need, as an `Attempt` (the intent to submit, or the sentence saying why not
+  and that no tick was spent). `shout` obeys one cooldown
+  (`SHOUT_COOLDOWN_TICKS`, 8) and one truncation (`MAX_SHOUT_LENGTH`, 120) on
+  both sides — the planner used to ignore the cooldown and cut at 200 — and
+  `sleep` refuses a body below `items.MIN_SLEEP_FATIGUE` on both sides,
+  stating the number, where the planner used to spend a tick on the world's
+  refusal. `converse_intent` and `give_intent` live there too, so the
+  conversation-text truncation happens in exactly one place.
 - **A bad kwarg never fails a turn.** `BudgetedToolset.get_tools` wraps every
   tool's argument validator (`_FriendlyArgsValidator`) so a bad call's retry
   names the tool's actual parameters, and `PLANNER_TOOL_RETRIES` is 3.

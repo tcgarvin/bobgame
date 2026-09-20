@@ -16,7 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .. import world_pb2 as pb
 from . import items
-from .geometry import Coord, chebyshev, direction_name
+from .geometry import DELTA_TO_DIRECTION, Coord, chebyshev, direction_name
 
 VIEW_RADIUS = 8
 
@@ -864,10 +864,6 @@ class WorldModel:
                 return obj
         return None
 
-    def workshop_table_near(self) -> ObjectInfo | None:
-        """A placed workshop table on or next to the actor, if it knows of one."""
-        return self.station_near(items.WORKSHOP_TABLE)
-
     def objects_near(self, radius: int) -> list[ObjectInfo]:
         """Known objects within `radius` of the actor, nearest first."""
         centre = self.position
@@ -1368,8 +1364,6 @@ def _board_from_payload(payload: Mapping[str, Any]) -> dict[str, dict[int, int]]
 
 
 def _delta_name(delta: Coord) -> str:
-    from .geometry import DELTA_TO_DIRECTION
-
     direction = DELTA_TO_DIRECTION.get(delta)
     if direction is None:
         return "?"

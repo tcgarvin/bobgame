@@ -35,9 +35,11 @@ from .enclosure import (
     free_tile_cap,
     would_seal,
 )
-from .options import Option, can_place_ground
+from .briefs import DriverChoice, Option
+from .options import can_place_ground
 from .pathfinding import find_path
-from .stint import DANGER_HEALTH_FLOOR, DriverChoice
+from .walk import stand_candidates
+from .stint import DANGER_HEALTH_FLOOR
 from .worldmodel import WorldModel
 
 logger = structlog.get_logger(__name__)
@@ -472,7 +474,7 @@ class BuildExecutor:
 
         checked = 0
         refused_for_seal = 0
-        for stand in self._stand_candidates(model, target):
+        for stand in stand_candidates(model, target, known_only=True):
             if checked >= MAX_STAND_SCAN:
                 break
             checked += 1
@@ -492,23 +494,6 @@ class BuildExecutor:
             # planner to turn into a door.
             self._sealing.add(target)
         return None
-
-    def _stand_candidates(self, model: WorldModel, target: Coord) -> list[Coord]:
-        """Walkable neighbours of `target`, nearest to the builder first."""
-        neighbours = [
-            (target[0] + dx, target[1] + dy)
-            for dx in (-1, 0, 1)
-            for dy in (-1, 0, 1)
-            if (dx, dy) != (0, 0)
-        ]
-        usable = [
-            tile
-            for tile in neighbours
-            if model.is_known(tile) and model.is_walkable(tile)
-        ]
-        # Standing where we already are costs no ticks at all.
-        usable.sort(key=lambda tile: chebyshev(tile, model.position))
-        return usable
 
     def _would_seal(self, model: WorldModel, stand: Coord, target: Coord) -> bool:
         """Whether placing a blocking piece on `target` would shut the builder in.

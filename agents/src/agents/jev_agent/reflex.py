@@ -19,7 +19,7 @@ from typing import Any, Mapping
 import structlog
 
 from .geometry import Coord
-from .stint import Brief
+from .briefs import Brief
 from .worldmodel import TickDigest, WorldModel
 
 logger = structlog.get_logger(__name__)

@@ -14,7 +14,7 @@ import structlog
 from .bootstrap import ServerSettings, load_resume, run
 from .config import Config, WorldConfig
 from .exceptions import ResumeStartupError
-from .recording import default_run_dir, generate_run_id
+from .recording import default_run_dir, run_id_for
 from .server import DEFAULT_CONFIG, DEFAULT_PORT, DEFAULT_WS_PORT, PROJECT_ROOT
 from .snapshot import SnapshotError
 from .state import Entity, World, WorldObject
@@ -212,7 +212,7 @@ def _resume(args: argparse.Namespace) -> None:
 
     config = Config.model_validate(snapshot.config)
     config_name = snapshot.config_name or DEFAULT_CONFIG
-    run_id = generate_run_id(config_name)
+    run_id = run_id_for(config_name)
     run_dir = _run_dir_for(run_id, args.run_dir)
     parent_run_id = args.parent_run_id or snapshot.run_id
     logger.info(
@@ -298,7 +298,7 @@ def _settings_from_config(
     world, terrain_objects = _load_terrain(parser, config.world, width, height)
     objects.extend(terrain_objects)
 
-    run_id = generate_run_id(config_name)
+    run_id = run_id_for(config_name)
     run_dir = _run_dir_for(run_id, args.run_dir)
     logger.info("recording_run", run_id=run_id, run_dir=str(run_dir))
 

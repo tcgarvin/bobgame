@@ -243,3 +243,17 @@ class TestRunRecorder:
         # Further records are dropped rather than raising.
         recorder.record_tick(TickResult(tick_id=2, move_results=[]))
         recorder.close()
+
+
+def test_run_id_for_prefers_the_exported_run_id(monkeypatch):
+    from world.recording import run_id_for
+
+    monkeypatch.setenv("BOBGAME_RUN_ID", "20260920-160619-hamlet")
+    assert run_id_for("hamlet") == "20260920-160619-hamlet"
+
+
+def test_run_id_for_makes_one_when_none_is_exported(monkeypatch):
+    from world.recording import run_id_for
+
+    monkeypatch.delenv("BOBGAME_RUN_ID", raising=False)
+    assert run_id_for("hamlet").endswith("-hamlet")

@@ -37,11 +37,8 @@ from .conversation import (
     ACTION_HAIL,
     ACTION_JOIN,
     ACTION_OPEN,
-    ApproachDriver,
     ConversationReport,
-    converse_intent,
     free_seat_tiles,
-    give_intent,
 )
 from .journal import (
     DayLog,
@@ -62,6 +59,7 @@ from .reflex import (
     ReflexBrief,
     clamp_trigger_distance,
 )
+from .bridge import AgentBridge
 from .build import (
     BUILD_OUT_OF_ITEMS,
     BuildExecutor,
@@ -84,22 +82,39 @@ from .geometry import (
     direction_name,
     offset,
 )
+from . import walk
+from .walk import WalkDriver
 from .pathfinding import NO_PATH, path_length
-from .options import (
+from .briefs import (
     MAX_BRIEF_HAILS,
     MAX_BRIEF_PLACES,
-    MAX_BRIEF_SHOUTS,
-    MAX_SHOUT_LENGTH,
     OBJECT_ID_PATTERN,
     PLACE_NAME_PATTERN,
-    WOLF_ALERT_RADIUS,
     BriefHail,
     TravelState,
+)
+from .options import (
+    MAX_BRIEF_SHOUTS,
+    MAX_SHOUT_LENGTH,
+    WOLF_ALERT_RADIUS,
     can_place_ground,
     can_place_structure,
 )
+from .actions import converse_intent, give_intent, shout_attempt, sleep_attempt
+from .outcomes import CRAFTED_DETAIL, action_succeeded
 from .pricing import CostLedger, usage_from_messages
-from .stint import Brief, StintDriver, StintReport, never_ends, was_interrupted
+from . import recipes
+from .recipes import (
+    CraftTally,
+    carried,
+    craft_chain,
+    craft_once,
+    missing_input_lines,
+    source_lines as _source_lines,
+    stock_one,
+)
+from .briefs import Brief, StintDriver, was_interrupted
+from .stint import StintReport, never_ends
 from .tracelog import AgentTrace
 from .worldmodel import VIEW_RADIUS, HeardUtterance, WorldModel
 
@@ -130,20 +145,16 @@ FOOD_ALERT_AT = items.FOOD_ALERT_AT
 # Fatigue within this much of `items.MAX_FATIGUE` gets the same treatment.
 FATIGUE_ALERT_MARGIN = 10
 TURN_RETRY_SECONDS = 5.0
-# `craft` repeats the action until the recipe completes; the margin covers a
-# tick whose event the world did not report back.
-CRAFT_ACTION_MARGIN = 2
-# The world's wording for a finished craft, in the action event's details.
-CRAFTED_DETAIL = "crafted "
-# How deep `build` follows a recipe's inputs: wood -> plank -> wood_wall.
-CRAFT_CHAIN_DEPTH = 2
+# `craft`, its chain and the "where does this come from" lines live in
+# `recipes.py`; these names are re-exported for readers that knew them here.
+CRAFT_ACTION_MARGIN = recipes.CRAFT_ACTION_MARGIN
+CRAFTED_DETAIL = CRAFTED_DETAIL
+CRAFT_CHAIN_DEPTH = recipes.CRAFT_CHAIN_DEPTH
 # How many pieces one `build` resupply crafts at most, and how often a build
 # stops to make more. Each craft action is a tick, so an unbounded resupply
 # would eat the tool's whole tick budget before laying a single wall.
 BUILD_CRAFT_LIMIT = 20
 BUILD_RESUPPLY_ROUNDS = 3
-# What `sleep` calls the place when no bed was named.
-GROUND = "the ground"
 # How many item piles `look` and a failed `pickup` list, nearest first.
 PILES_SHOWN = 6
 # How many berry bushes an `eat` with an empty pack lists, nearest first.
@@ -152,7 +163,7 @@ BUSHES_SHOWN = 6
 # more the actor remembers.
 SIGNS_SHOWN = 8
 # How many known objects of a raw material's source type a failed craft names.
-SOURCES_SHOWN = 3
+SOURCES_SHOWN = recipes.SOURCES_SHOWN
 # The world detail for a placed object is "placed <id> at (x, y)".
 SIGN_ID_RE = re.compile(r"\b(sign_\d+)\b")
 
@@ -476,69 +487,6 @@ What Jev sees, and how to write for it:
 SETTLEMENT_NARRATIVE = settlement_narrative()
 
 
-class AgentBridge(Protocol):
-    """What the planner needs from the tick loop."""
-
-    @property
-    def model(self) -> WorldModel:
-        """The shared world model, updated every tick."""
-
-    async def run_stint(
-        self,
-        brief: Brief,
-        driver: StintDriver | None = None,
-        end_check: Callable[[WorldModel], str] = never_ends,
-    ) -> StintReport:
-        """Hand control to Jev (or to `driver`) until the stint has ended.
-
-        `end_check` is an extra code-owned end rule, asked before every tick.
-        """
-
-    async def direct_action(self, intent: pb.Intent, description: str) -> str:
-        """Submit one intent on the next tick and report what happened."""
-
-    async def wait_ticks(self, ticks: int) -> str:
-        """Do nothing for `ticks` ticks."""
-
-    async def await_conversation(self) -> ConversationReport | None:
-        """Block until the conversation just opened or joined has ended."""
-
-    async def await_wake(self, since_tick: int) -> str:
-        """Block until the actor, asleep since `since_tick`, has woken."""
-
-    async def await_active(self) -> None:
-        """Block until the actor is awake and alive."""
-
-    @property
-    def reflex(self) -> ReflexBrief:
-        """The brief code runs when a wolf is close or the actor is bitten."""
-
-    def set_reflex(self, brief: ReflexBrief) -> None:
-        """Register (or replace) the reflex brief."""
-
-    def clear_reflex(self) -> None:
-        """Forget the reflex brief."""
-
-    def set_conversation_purpose(self, purpose: str) -> None:
-        """Remember why the conversation this actor is about to open or start
-        by hailing was started, for the next `open`/`hail` that lands
-        (docs/09 section 10, item 4)."""
-
-    async def await_journal(self) -> None:
-        """Wait, briefly, for a journal rewrite that is still running.
-
-        The journal is rewritten in the background when the actor falls asleep
-        or dies; a turn that started before it finished must read the new file,
-        not the old one (docs/12_sleep_journal.md).
-        """
-
-    def drain_notes(self, *, for_prompt: bool = False) -> list[str]:
-        """Reflex lines and conversation reports not yet shown, emptied as taken."""
-
-    def set_thought(self, thought: str) -> None:
-        """Publish the planner's latest reflection to the viewer."""
-
-
 @dataclass
 class ToolBudget:
     """How many tool calls the current planner turn has made.
@@ -814,61 +762,19 @@ DESTINATION_PLACE = "destination"
 
 # `travel_to`'s own stint end reasons. Code decides both: Jev's `done` score
 # took several ticks to agree that a finished walk was finished, and 30 of 89
-# walks in the 2026-09-19 run ended `ticks_exhausted` instead.
-TRAVEL_ARRIVED = "arrived"
-TRAVEL_ARRIVED_NEXT_TO = "arrived_next_to"
+# walks in the 2026-09-19 run ended `ticks_exhausted` instead. The walk itself
+# — the budget, the arrival test and the wording — lives in `walk.py`, which
+# every other walking caller uses too.
+TRAVEL_ARRIVED = walk.ARRIVED
+TRAVEL_ARRIVED_NEXT_TO = walk.ARRIVED_NEXT_TO
+TRAVEL_TICKS_PER_STEP = walk.TICKS_PER_STEP
+TRAVEL_TICK_ALLOWANCE = walk.TICK_ALLOWANCE
+TRAVEL_MIN_TICKS = walk.MIN_TICKS
+TRAVEL_MAX_TICKS = walk.MAX_TICKS
 
-# `travel_to` has no tick budget of its own any more: it runs until it arrives,
-# gives up (`no_path`), or is stopped by danger or hunger. The budget below is
-# only the backstop that keeps a hopeless walk from running forever. It is two
-# ticks per step of the remembered path (detours, blocked tiles and fights all
-# cost ticks) plus a fixed allowance, and it is never below TRAVEL_MIN_TICKS.
-# In the 2026-09-20 hamlet run one settler spent a 20-call budget and ~220
-# ticks on 16 travel_to calls inside a 10-tile radius, each one re-called the
-# moment its model-chosen max_ticks ran out.
-TRAVEL_TICKS_PER_STEP = 2
-TRAVEL_TICK_ALLOWANCE = 20
-TRAVEL_MIN_TICKS = 30
-TRAVEL_MAX_TICKS = 600
-
-
-def travel_budget(model: WorldModel, target: Coord) -> int:
-    """Backstop tick budget for a walk from `model.position` to `target`.
-
-    Uses the remembered path when there is one, and the straight-line distance
-    when the map is not known well enough to find one.
-    """
-    steps = path_length(model, model.position, target)
-    if steps == NO_PATH:
-        steps = chebyshev(model.position, target)
-    budget = steps * TRAVEL_TICKS_PER_STEP + TRAVEL_TICK_ALLOWANCE
-    return min(TRAVEL_MAX_TICKS, max(TRAVEL_MIN_TICKS, budget))
-
-
-def travel_arrival(model: WorldModel, target: Coord) -> str:
-    """`arrived`, `arrived_next_to`, or `""` while the walk is still going.
-
-    Standing on the destination is arrival. Standing next to it counts only
-    when the tile itself cannot be stood on (water, a wall, a bush, another
-    settler): walking onto it is then impossible and next to it is as close
-    as the body gets.
-    """
-    position = model.position
-    if position == target:
-        return TRAVEL_ARRIVED
-    if chebyshev(position, target) <= 1 and not model.is_walkable(target):
-        return TRAVEL_ARRIVED_NEXT_TO
-    return ""
-
-
-def travel_arrival_text(arrival: str, position: Coord, target: Coord) -> str:
-    """What a finished (or never-started) walk says about where the body is."""
-    if arrival == TRAVEL_ARRIVED:
-        return f"you are standing on {target}"
-    return (
-        f"{target} cannot be stood on; you are next to it at {position}, "
-        "which is as close as a walk gets"
-    )
+travel_budget = walk.tick_budget
+travel_arrival = walk.arrival
+travel_arrival_text = walk.arrival_text
 
 
 def _validated_shouts(shouts: Sequence[str]) -> tuple[str, ...]:
@@ -1179,57 +1085,6 @@ def _pile_lines(model: WorldModel, limit: int) -> list[str]:
     return lines
 
 
-def _source_lines(
-    model: WorldModel, kind: str, limit: int = SOURCES_SHOWN
-) -> list[str]:
-    """Where a raw material comes from, and the nearest such objects known.
-
-    Generic over the extraction map in `items.py`: a material nothing yields
-    (a crafted one, say) produces no lines at all.
-    """
-    where = items.source_text(kind)
-    if not where:
-        return []
-    lines = [where]
-    position = model.self_info.position
-    for obj in model.objects_by_type(items.source_object_types(kind))[:limit]:
-        lines.append(
-            f"  {obj.object_id} at {obj.position} "
-            f"(d{chebyshev(obj.position, position)})"
-        )
-    if len(lines) == 1:
-        lines.append("  you know of none yet")
-        lines.extend(_water_hint_lines(model, kind))
-    return lines
-
-
-def _water_hint_lines(model: WorldModel, kind: str) -> list[str]:
-    """For a water-bound material nothing known yields, where the water is.
-
-    The habitat sentence says the stuff grows by fresh water; this says which
-    water this settler has actually seen. The observation does not label water
-    fresh or salt, so the line says "water" and nothing more.
-    """
-    if not items.is_water_bound(kind):
-        return []
-    water = model.nearest_water()
-    if water is None:
-        return []
-    distance = chebyshev(water, model.self_info.position)
-    return [f"  nearest water you have seen: {water} (d{distance})"]
-
-
-def missing_input_lines(model: WorldModel, recipe: items.Recipe) -> list[str]:
-    """For every input the pack is short of, where that input comes from."""
-    inventory = model.self_info.inventory
-    lines: list[str] = []
-    for name, amount in sorted(recipe.inputs.items()):
-        if inventory.get(name, 0) >= amount:
-            continue
-        lines.extend(_source_lines(model, name))
-    return lines
-
-
 def _sign_lines(model: WorldModel, limit: int) -> list[str]:
     """Every sign in view plus the nearest few known, with what each reads."""
     signs = model.signs_known()
@@ -1363,23 +1218,8 @@ async def _stock_for_build(
     tally = CraftTally()
     wanted = min(shortfall, BUILD_CRAFT_LIMIT)
     if wanted > 0:
-        await _craft_chain(ctx, plan.kind, wanted, tally)
+        await craft_chain(ctx.deps.bridge, plan.kind, wanted, tally)
     return tally
-
-
-async def _stock_one_to_place(ctx: RunContext[PlannerDeps], kind: str) -> list[str]:
-    """Craft one `kind` for `place` to put down, and say what happened.
-
-    The lines are what the model is shown: what the chain made, and, when the
-    pack is still empty afterwards, why it stopped and where the raw material
-    it lacked comes from.
-    """
-    tally = CraftTally()
-    await _craft_chain(ctx, kind, 1, tally)
-    lines = [tally.text()] if tally.text() else []
-    if _carried(ctx, kind) <= 0:
-        lines.append(tally.stopped or f"you carry no {kind} and made none")
-    return lines
 
 
 @dataclass
@@ -1410,10 +1250,12 @@ async def _build_phase(
 
     started = bridge.model.tick
     made.absorb(
-        await _stock_for_build(ctx, plan, len(plan.tiles) - _carried(ctx, plan.kind))
+        await _stock_for_build(
+            ctx, plan, len(plan.tiles) - carried(ctx.deps.bridge, plan.kind)
+        )
     )
     spend(started)
-    if _carried(ctx, plan.kind) <= 0:
+    if carried(ctx.deps.bridge, plan.kind) <= 0:
         refusal = [missing_pieces_text(plan, bridge.model.self_info.inventory)]
         if made.stopped:
             refusal.append(f"nothing crafted: {made.stopped}")
@@ -1773,16 +1615,6 @@ def place_failure_lines(model: WorldModel, kind: str, direction: pb.Direction) -
     return f"{_tile_occupants_text(model, target)}; {_free_direction_text(model, kind)}"
 
 
-def action_succeeded(outcome: str) -> bool:
-    """Whether a direct-action result line reports a successful world action.
-
-    `direct_action` renders the world's own event as `<what> -> <type> ok: ...`
-    or `<what> -> <type> failed: ...`, and `-> submitted` when no event came
-    back at all.
-    """
-    return " ok:" in outcome
-
-
 # `tick._process_say_phase` (world/src/world/tick.py) reports a successful
 # `say` as `"say ok: heard: <comma-separated entity ids>"` (empty when nobody
 # was in earshot); `direct_action` wraps that as `"<description> -> <that>"`.
@@ -2017,7 +1849,7 @@ async def _walk_to_settler(
         if not tiles:
             legs.append(f"every tile next to {entity_id} is taken or blocked")
             break
-        driver = ApproachDriver(tiles, entity_id)
+        driver = WalkDriver(tiles, entity_id)
         brief = Brief(
             instruction=f"Walk to a free tile next to {entity_id}.",
             success_condition=f"you are standing next to {entity_id}",
@@ -2026,7 +1858,7 @@ async def _walk_to_settler(
         report = await bridge.run_stint(brief, driver)
         legs.append(report.to_text())
         ticks_left -= report.ticks_used
-        if ticks_left <= 0 or report.end_reason != ApproachDriver.ARRIVED:
+        if ticks_left <= 0 or report.end_reason != WalkDriver.ARRIVED:
             # Out of budget, no path, or the walk ended for a reason of its
             # own (a reflex, or a conversation that started on the way).
             break
@@ -2056,7 +1888,7 @@ async def _walk_next_to(
     tiles = free_seat_tiles(bridge.model, target)
     if not tiles:
         return f"every tile next to {label} is taken or blocked"
-    driver = ApproachDriver(tiles, f"a free tile next to {label}")
+    driver = WalkDriver(tiles, f"a free tile next to {label}")
     brief = Brief(
         instruction=f"Walk to a free tile next to {label}.",
         success_condition=f"you are standing next to {target}",
@@ -2117,135 +1949,6 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         """Remove your reflex brief; nothing runs for you until you set another."""
         ctx.deps.bridge.clear_reflex()
         return "reflex cleared"
-
-
-async def _craft_recipe(
-    ctx: RunContext[PlannerDeps], recipe: str, known: items.Recipe
-) -> str:
-    """Repeat the craft action for `recipe` until it finishes or an action fails.
-
-    A failure caused by a missing raw input ends with where that input comes
-    from and the nearest such objects the actor knows of: `"craft failed: bed
-    needs 4 plank + 3 fiber"` on its own never told anybody that fiber is cut
-    from reeds, and in a whole six-settler run one settler gathered reeds.
-    """
-    lines: list[str] = []
-    failed = False
-    for _ in range(known.work + CRAFT_ACTION_MARGIN):
-        outcome = await ctx.deps.bridge.direct_action(
-            pb.Intent(craft=pb.CraftIntent(recipe=recipe)), f"craft {recipe}"
-        )
-        lines.append(outcome)
-        if not action_succeeded(outcome):
-            failed = True
-            break
-        if CRAFTED_DETAIL in outcome:
-            break
-    if failed:
-        lines.extend(missing_input_lines(ctx.deps.bridge.model, known))
-    return "\n".join(lines)
-
-
-def _carried(ctx: RunContext[PlannerDeps], kind: str) -> int:
-    """How many of `kind` the body holds right now."""
-    return ctx.deps.bridge.model.self_info.inventory.get(kind, 0)
-
-
-@dataclass
-class CraftTally:
-    """What a chain of crafts produced, and the first thing that stopped it."""
-
-    made: dict[str, int] = field(default_factory=dict)
-    stopped: str = ""
-
-    @property
-    def total(self) -> int:
-        """How many items of all kinds the chain produced."""
-        return sum(self.made.values())
-
-    def record(self, kind: str, count: int) -> None:
-        """Add `count` of `kind` to what this chain has made."""
-        self.made[kind] = self.made.get(kind, 0) + count
-
-    def absorb(self, other: "CraftTally") -> None:
-        """Fold another chain's output in; its stop reason is the latest one."""
-        for kind, count in other.made.items():
-            self.record(kind, count)
-        self.stopped = other.stopped
-
-    def text(self) -> str:
-        """`"crafted 8 plank, 4 wood_wall"`, or `""` when nothing was made."""
-        if not self.made:
-            return ""
-        parts = ", ".join(
-            f"{count} {kind}" for kind, count in sorted(self.made.items())
-        )
-        return f"crafted {parts}"
-
-
-async def _craft_inputs(
-    ctx: RunContext[PlannerDeps],
-    kind: str,
-    recipe: items.Recipe,
-    tally: CraftTally,
-    depth: int,
-) -> bool:
-    """Make sure one craft of `kind` can run right now.
-
-    Missing inputs are crafted in turn while `depth` allows it, which is what
-    turns 2 wood into the plank a wood_wall eats. False means it cannot run,
-    and `tally.stopped` says why.
-    """
-    for name, amount in recipe.inputs.items():
-        if _carried(ctx, name) >= amount:
-            continue
-        if depth <= 0 or name not in items.RECIPES:
-            shortfall = (
-                f"{kind} takes {amount} {name} and you carry {_carried(ctx, name)}"
-            )
-            where = _source_lines(ctx.deps.bridge.model, name)
-            tally.stopped = "\n".join([shortfall, *where]) if where else shortfall
-            return False
-        await _craft_chain(ctx, name, amount - _carried(ctx, name), tally, depth - 1)
-        if _carried(ctx, name) < amount:
-            return False
-    return True
-
-
-async def _craft_chain(
-    ctx: RunContext[PlannerDeps],
-    kind: str,
-    wanted: int,
-    tally: CraftTally,
-    depth: int = CRAFT_CHAIN_DEPTH,
-) -> None:
-    """Craft `wanted` more `kind`, making missing inputs first, into `tally`.
-
-    Each craft costs its recipe's actions in ticks. Nothing walks anywhere: a
-    station recipe is only attempted where the station already is.
-    """
-    recipe = items.RECIPES.get(kind)
-    if recipe is None:
-        tally.stopped = f"{kind} cannot be crafted"
-        return
-    bridge = ctx.deps.bridge
-    if recipe.station and bridge.model.station_near(recipe.station) is None:
-        tally.stopped = (
-            f"{kind} is made at a {recipe.station}, and there is none on or "
-            "next to your tile"
-        )
-        return
-    start = _carried(ctx, kind)
-    while _carried(ctx, kind) - start < wanted:
-        before = _carried(ctx, kind)
-        if not await _craft_inputs(ctx, kind, recipe, tally, depth):
-            return
-        outcome = await _craft_recipe(ctx, kind, recipe)
-        made = _carried(ctx, kind) - before
-        if made <= 0:
-            tally.stopped = f"crafting {kind} made none: {outcome.splitlines()[-1]}"
-            return
-        tally.record(kind, made)
 
 
 def _refuse_wrong_note_target(
@@ -2393,7 +2096,7 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         known = items.RECIPES.get(recipe)
         if known is None:
             return f"no such recipe {recipe!r}; known: {sorted(items.RECIPES)}"
-        return await _craft_recipe(ctx, recipe, known)
+        return await craft_once(ctx.deps.bridge, recipe, known)
 
     @tools.tool
     async def sleep(ctx: RunContext[PlannerDeps], bed: str = "") -> str:
@@ -2404,12 +2107,11 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
                 (the default) to sleep on the ground where you stand.
         """
         bridge = ctx.deps.bridge
+        attempt = sleep_attempt(bridge.model, bed)
+        if not attempt.allowed:
+            return attempt.refusal
         since_tick = bridge.model.tick
-        where = bed or GROUND
-        outcome = await bridge.direct_action(
-            pb.Intent(sleep=pb.SleepIntent(object_id=bed)),
-            f"sleep on {where}",
-        )
+        outcome = await bridge.direct_action(attempt.intent, attempt.description)
         if not action_succeeded(outcome):
             return outcome
         slept = await bridge.await_wake(since_tick)
@@ -2472,9 +2174,9 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
                 f"{sorted(items.GROUND_LAYER_KINDS)} go on your own tile"
             )
         lines: list[str] = []
-        if _carried(ctx, kind) <= 0 and kind in items.RECIPES:
-            lines.extend(await _stock_one_to_place(ctx, kind))
-            if _carried(ctx, kind) <= 0:
+        if carried(ctx.deps.bridge, kind) <= 0 and kind in items.RECIPES:
+            lines.extend(await stock_one(ctx.deps.bridge, kind))
+            if carried(ctx.deps.bridge, kind) <= 0:
                 return "\n".join(lines)
         outcome = await ctx.deps.bridge.direct_action(
             pb.Intent(place=pb.PlaceIntent(kind=kind, direction=value)),
@@ -2527,7 +2229,7 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
                     f"a sign takes {needed} wood; you carry {have}, and you "
                     f"have no sign to place"
                 )
-            lines.append(await _craft_recipe(ctx, items.SIGN, recipe))
+            lines.append(await craft_once(ctx.deps.bridge, items.SIGN, recipe))
             if bridge.model.self_info.inventory.get(items.SIGN, 0) <= 0:
                 return "\n".join(lines)
         value = _direction_value(direction)
@@ -2618,9 +2320,11 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         with no reply possible, so it is not good for working anything out.
         Say where and why: "Wolf at (1540, 970), two of us fighting, come!".
         """
+        attempt = shout_attempt(ctx.deps.bridge.model, text)
+        if not attempt.allowed:
+            return attempt.refusal
         outcome = await ctx.deps.bridge.direct_action(
-            pb.Intent(say=pb.SayIntent(text=text[:200], channel=items.SHOUT_CHANNEL)),
-            f"shout {text[:60]!r}",
+            attempt.intent, attempt.description
         )
         return _speak_result(outcome, "shouted", items.SHOUT_RADIUS)
 

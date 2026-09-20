@@ -29,7 +29,7 @@ from pydantic_ai.models.function import (
 from pydantic_ai.models.test import TestModel
 
 from agents import world_pb2 as pb
-from agents.jev_agent import items, planner as planner_module
+from agents.jev_agent import actions as actions_module, items, planner as planner_module
 from agents.jev_agent.build import BuildExecutor
 from agents.jev_agent.items import RECIPES
 from agents.jev_agent.planner import (
@@ -353,6 +353,35 @@ async def test_shout_uses_the_shout_channel(
         await agent.run("go", deps=deps)
     ((intent, _description),) = bridge.actions
     assert intent.say.channel == "shout"
+
+
+async def test_shout_obeys_the_same_cooldown_jev_does(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    """One cooldown for both layers: the planner used to ignore it entirely."""
+    bridge.model.update(
+        make_observation(
+            bridge.model.tick + 1,
+            make_entity("ada", bridge.model.position),
+            events=[utterance_event("ada", "here!", (10, 10), channel="shout")],
+        )
+    )
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("shout", {"text": "again!"})):
+        result = await agent.run("go", deps=deps)
+
+    assert not bridge.actions
+    assert "No tick spent." in result.output
+
+
+async def test_a_shout_is_cut_to_the_one_shout_length(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("shout", {"text": "x" * 500})):
+        await agent.run("go", deps=deps)
+    ((intent, _description),) = bridge.actions
+    assert len(intent.say.text) == actions_module.MAX_SHOUT_LENGTH
 
 
 def test_the_prompt_gives_the_goal_the_physics_numbers_and_the_budget() -> None:
@@ -1473,9 +1502,25 @@ async def test_a_hand_recipe_still_takes_exactly_one_craft_action(
     assert len(bridge.actions) == 1
 
 
+def _make_tired(model: WorldModel) -> WorldModel:
+    """Push the body's fatigue to where the world will accept a `sleep`.
+
+    Below `items.MIN_SLEEP_FATIGUE` the world refuses one, and the `sleep` tool
+    now says so itself rather than spending a tick finding out.
+    """
+    model.update(
+        make_observation(
+            model.tick,
+            make_entity("ada", model.position, fatigue=items.MIN_SLEEP_FATIGUE),
+        )
+    )
+    return model
+
+
 async def test_sleep_submits_the_intent_and_returns_the_wake(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
+    _make_tired(bridge.model)
     for reason in ("rested", "damaged", "hungry", "bed removed", "asked"):
         bridge.actions.clear()
         # `sleep` spends the budget, so each pass needs a fresh turn.
@@ -1499,6 +1544,7 @@ async def test_sleep_submits_the_intent_and_returns_the_wake(
 async def test_sleep_on_the_ground_names_no_bed(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
+    _make_tired(bridge.model)
     bridge.direct_result = "sleep on the ground -> sleep ok: asleep on the ground"
     bridge.wake_result = "slept on the ground from tick 5 to tick 9 (4 ticks)"
     agent = build_planner_agent("test")
@@ -1514,6 +1560,7 @@ async def test_sleep_on_the_ground_names_no_bed(
 async def test_a_refused_sleep_does_not_wait_for_a_wake(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
+    _make_tired(bridge.model)
     bridge.direct_result = "sleep on bed_1 -> sleep failed: bed_1 is taken"
     agent = build_planner_agent("test")
     with agent.override(model=_call_tool("sleep", {"bed": "bed_1"})):
@@ -1521,6 +1568,20 @@ async def test_a_refused_sleep_does_not_wait_for_a_wake(
 
     assert not bridge.wake_calls
     assert "is taken" in result.output
+
+
+async def test_sleep_refuses_a_body_that_is_not_tired_enough(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    """The world refuses it anyway; the tool says so without spending a tick."""
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool("sleep", {"bed": ""})):
+        result = await agent.run("go", deps=deps)
+
+    assert not bridge.actions
+    assert not bridge.wake_calls
+    assert "not tired enough" in result.output
+    assert str(items.MIN_SLEEP_FATIGUE) in result.output
 
 
 async def test_wake_says_so_when_you_are_not_asleep(
@@ -1859,6 +1920,7 @@ async def test_a_wrong_kwarg_gets_a_retry_naming_the_tools_parameters(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
     """docs/09 section 10, item 3: a bad kwarg name must self-correct."""
+    _make_tired(bridge.model)
     bridge.direct_result = "sleep on bed_1 -> sleep ok: asleep on bed_1"
     bridge.wake_result = "slept on bed_1 from tick 5 to tick 9 (4 ticks)"
     seen_retry_texts: list[str] = []
@@ -1888,6 +1950,7 @@ async def test_a_wrong_kwarg_gets_a_retry_naming_the_tools_parameters(
 async def test_the_sleep_tool_spends_the_whole_budget(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
+    _make_tired(bridge.model)
     deps.budget.reset(planner_module.MAX_TOOL_CALLS_PER_TURN, tick=0)
     bridge.direct_result = "sleep on the ground -> sleep ok: asleep on the ground"
     bridge.wake_result = "slept on the ground from tick 5 to tick 9 (4 ticks)"

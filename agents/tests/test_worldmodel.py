@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from agents import world_pb2 as pb
+from agents.jev_agent import items
 from agents.jev_agent.worldmodel import WorldModel
 
 from helpers import (
@@ -307,7 +308,7 @@ def test_a_workshop_table_is_found_only_when_it_is_within_reach() -> None:
             objects=[make_object("ws1", "workshop_table", (11, 11))],
         )
     )
-    assert near.workshop_table_near() is not None
+    assert near.station_near(items.WORKSHOP_TABLE) is not None
 
     far = WorldModel("ada")
     far.update(
@@ -317,7 +318,7 @@ def test_a_workshop_table_is_found_only_when_it_is_within_reach() -> None:
             objects=[make_object("ws1", "workshop_table", (13, 10))],
         )
     )
-    assert far.workshop_table_near() is None
+    assert far.station_near(items.WORKSHOP_TABLE) is None
 
 
 # -- message board unread tracking (docs/09 section 6) -----------------------

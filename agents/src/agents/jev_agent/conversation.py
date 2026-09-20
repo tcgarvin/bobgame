@@ -33,19 +33,11 @@ from pydantic_ai import Agent
 
 from .. import world_pb2 as pb
 from . import items
-from .geometry import (
-    ORDERED_DIRECTIONS,
-    Coord,
-    chebyshev,
-    direction_between,
-    direction_name,
-    offset,
-)
+from .geometry import Coord
 from .journal import append_scratch_line, read_journal
 from .llm import planner_model_settings, resolve_model_name
-from .stint import DriverChoice
-from .options import Option
-from .pathfinding import find_path
+from .actions import converse_intent, give_intent
+from .walk import WalkDriver, stand_candidates
 from .pricing import CostLedger, usage_from_messages
 from .tracelog import AgentTrace
 from .worldmodel import ConversationInfo, TickDigest, TranscriptLine, WorldModel
@@ -422,97 +414,15 @@ def free_seat_tiles(model: WorldModel, anchor: Coord) -> list[Coord]:
     """Walkable, unoccupied tiles next to `anchor`, nearest to the actor first.
 
     The anchor itself is excluded: the world requires a participant to stand
-    beside it, not on it.
+    beside it, not on it. One line over `walk.stand_candidates`, kept for the
+    name the conversation code reads by.
     """
-    tiles = [
-        offset(anchor, direction)
-        for direction in ORDERED_DIRECTIONS
-        if model.is_walkable(offset(anchor, direction))
-    ]
-    tiles.sort(key=lambda tile: (chebyshev(tile, model.position), tile))
-    return tiles
+    return stand_candidates(model, anchor)
 
 
-class ApproachDriver:
-    """A `StintDriver` that walks the actor onto one of a set of target tiles.
-
-    Used by the `join_conversation` tool: choosing a free seat next to an
-    anchor is arithmetic, so code does the walking and Jev is not involved.
-    """
-
-    name = "approach"
-
-    # Stint end reasons this driver produces.
-    ARRIVED = "arrived"
-    NO_PATH = "no_path"
-
-    def __init__(self, targets: Sequence[Coord], label: str) -> None:
-        self.targets = list(targets)
-        self.label = label
-        self._path: list[Coord] = []
-
-    def stop_reason(self, model: WorldModel) -> str:
-        """Arrived, blocked, or `""` to keep walking."""
-        if model.position in self.targets:
-            return self.ARRIVED
-        self._path = self._best_path(model)
-        if not self._path:
-            return self.NO_PATH
-        return ""
-
-    def choose(self, model: WorldModel) -> DriverChoice:
-        """Take the next step along the path found by `stop_reason`."""
-        direction = direction_between(model.position, self._path[0])
-        return DriverChoice(
-            option=Option(
-                key=f"approach_step:{direction_name(direction)}",
-                description=f"walk toward {self.label}",
-                intent=pb.Intent(move=pb.MoveIntent(direction=direction)),
-            ),
-            note=f"{len(self._path)} steps to {self.label}",
-        )
-
-    def summary(self) -> str:
-        """One line of progress for the stint report."""
-        return f"APPROACH {self.label}: {len(self._path)} steps left"
-
-    def _best_path(self, model: WorldModel) -> list[Coord]:
-        best: list[Coord] = []
-        for target in self.targets:
-            path = find_path(model, model.position, target)
-            if path and (not best or len(path) < len(best)):
-                best = path
-        return best
-
-
-def converse_intent(
-    action: str,
-    *,
-    conversation_id: str = "",
-    text: str = "",
-    direction: pb.Direction = pb.DIRECTION_UNSPECIFIED,
-    target_entity_id: str = "",
-) -> pb.Intent:
-    """A `ConverseIntent` wrapped in an Intent, with the text truncated.
-
-    `target_entity_id` is the settler a `hail` addresses.
-    """
-    return pb.Intent(
-        converse=pb.ConverseIntent(
-            action=action,
-            conversation_id=conversation_id,
-            text=text[: items.CONVERSATION_TEXT_LIMIT],
-            direction=direction,
-            target_entity_id=target_entity_id,
-        )
-    )
-
-
-def give_intent(entity_id: str, kind: str, amount: int) -> pb.Intent:
-    """A `GiveIntent` wrapped in an Intent."""
-    return pb.Intent(
-        give=pb.GiveIntent(target_entity_id=entity_id, kind=kind, amount=max(1, amount))
-    )
+# The walk to a free seat is the shared one; the old name is what the planner
+# and the tests call it.
+ApproachDriver = WalkDriver
 
 
 def joined_conversation(digest: TickDigest) -> tuple[str, str]:

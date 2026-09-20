@@ -14,14 +14,11 @@ planner tool, where a coordinate and a reason are available.
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .. import world_pb2 as pb
 from . import items
 from .geometry import (
-    direction_between,
     NO_DIRECTION,
     ORDERED_DIRECTIONS,
     Coord,
@@ -30,9 +27,30 @@ from .geometry import (
     offset,
     same_or_adjacent,
 )
+from . import actions
+from .actions import converse_intent, shout_attempt, sleep_attempt
+from .briefs import (
+    EMPTY_PLACES,
+    HAIL_REFUSAL_LIMIT,
+    MAX_BRIEF_HAILS,
+    MAX_BRIEF_PLACES,
+    OBJECT_ID_PATTERN,
+    PLACE_NAME_PATTERN,
+    BriefHail,
+    Option,
+    TravelState,
+)
 from .enclosure import blocks_movement, would_seal
-from .pathfinding import find_path, legal_directions
+from .pathfinding import legal_directions
+from .recipes import (
+    CRAFT_ONCE_KINDS,
+    CRAFT_PRIORITY,
+    craft_description,
+    craftable_now,
+)
+from .walk import greedy_step, plan_step
 from .worldmodel import (
+    BLOCKING_OBJECT_TYPES,
     EXTRACTABLE_TYPES,
     VIEW_RADIUS,
     EntityInfo,
@@ -73,56 +91,15 @@ PLACEABLE_KINDS: frozenset[str] = items.PLACEABLE_KINDS
 # one: it would plant blank posts. Placing signs is the planner's `place_sign`.
 JEV_PLACEABLE_KINDS: frozenset[str] = PLACEABLE_KINDS - frozenset({items.SIGN})
 
-# Craft options are offered in this order and then truncated, so the things a
-# settler usually needs first survive the cap.
-CRAFT_PRIORITY: tuple[str, ...] = (
-    items.AXE,
-    items.PICKAXE,
-    items.SWORD,
-    items.IRON_SWORD,
-    items.COPPER_AXE,
-    items.COPPER_PICKAXE,
-    items.IRON_AXE,
-    items.IRON_PICKAXE,
-    items.CHARCOAL,
-    items.COPPER_INGOT,
-    items.IRON_INGOT,
-    items.PLANK,
-    items.WORKSHOP_TABLE,
-    items.FURNACE,
-    items.ANVIL,
-    items.ROPE,
-    items.WOOD_WALL,
-    items.DOOR,
-    items.BED,
-    items.ROAD,
-    items.WOOD_FLOOR,
-    items.STONE_WALL,
-    items.STONE_FLOOR,
-    items.CHEST,
-    items.MESSAGE_BOARD,
-    items.SIGN,
-    items.TABLE,
-    items.CHAIR,
-)
-
-# One of each of these in the pack is plenty; a second is never urgent enough
-# to spend an option slot on.
-CRAFT_ONCE_KINDS: frozenset[str] = (
-    items.WIELDABLE_KINDS
-    | items.STATION_KINDS
-    | frozenset({items.CHEST, items.MESSAGE_BOARD})
-)
-
 # How far away a wolf counts as "here" for the planner's alert.
 WOLF_ALERT_RADIUS = 8
 
 # Shouts. The planner writes the phrases into the brief; Jev only picks among
 # them. The cooldown keeps twelve settlers from filling every ear, and a heard
 # shout stays worth walking toward for a limited time.
-SHOUT_COOLDOWN_TICKS = 8
+SHOUT_COOLDOWN_TICKS = actions.SHOUT_COOLDOWN_TICKS
 MAX_BRIEF_SHOUTS = 4
-MAX_SHOUT_LENGTH = 120
+MAX_SHOUT_LENGTH = actions.MAX_SHOUT_LENGTH
 SHOUT_KEY_PREFIX = "shout:"
 HEARD_SHOUT_MAX_AGE_TICKS = 20
 HEARD_SHOUT_KEY_PREFIX = f"{STEP_KEY_PREFIX}shout:"
@@ -136,29 +113,6 @@ JOIN_CONVERSATION_OPTION_LIMIT = 2
 # conversation with the two of you, without either of you having asked first.
 # The planner grants them one at a time, in the brief; Jev never invents one.
 HAIL_KEY_PREFIX = "hail:"
-MAX_BRIEF_HAILS = 3
-# How many times the world may refuse one brief hail before the stint stops
-# offering it: two refusals are enough to show the reason is not going away.
-HAIL_REFUSAL_LIMIT = 2
-
-
-@dataclass(frozen=True)
-class BriefHail:
-    """One settler the planner told Jev it may address, and what to say."""
-
-    settler: str
-    line: str
-    # What the actor wants out of the conversation the hail starts, shown only
-    # to it once seated (docs/09 section 10, item 4). Empty when the planner
-    # gave none.
-    purpose: str = ""
-
-    def as_payload(self) -> dict[str, str]:
-        """The pair (and purpose, when given) as the brief payload and trace."""
-        payload = {"settler": self.settler, "line": self.line}
-        if self.purpose:
-            payload["purpose"] = self.purpose
-        return payload
 
 
 # Object groups worth walking across the map for, each with its own quota, in
@@ -204,36 +158,6 @@ OPTION_SECTIONS: tuple[str, ...] = (
     "quota_steps",
 )
 
-# World object ids look like `bush_17247`; this is how one is spotted in the
-# free text of a brief so the named object always gets a walk option.
-OBJECT_ID_PATTERN = re.compile(r"\b[a-z][a-z_]*_\d+\b")
-
-# Place names the planner may attach to a brief (docs/05, "named places").
-PLACE_NAME_PATTERN = re.compile(r"^[a-z0-9_]{1,24}$")
-MAX_BRIEF_PLACES = 6
-
-EMPTY_PLACES: Mapping[str, Coord] = {}
-
-
-@dataclass(frozen=True)
-class TravelState:
-    """A code-owned journey: a destination and how to finish it."""
-
-    target: Coord
-    label: str
-    stop_adjacent: bool = False
-
-
-@dataclass(frozen=True)
-class Option:
-    """One choosable action, with the intent it becomes."""
-
-    key: str
-    description: str
-    intent: pb.Intent
-    travel_target: TravelState | None = None
-    clears_travel: bool = False
-
 
 def _move(direction: pb.Direction) -> pb.Intent:
     return pb.Intent(move=pb.MoveIntent(direction=direction))
@@ -255,8 +179,6 @@ def _object_label(obj: ObjectInfo, origin: Coord) -> str:
 
 def travel_state_for(obj: ObjectInfo) -> TravelState:
     """The journey that walks the actor to (or up against) `obj`."""
-    from .worldmodel import BLOCKING_OBJECT_TYPES
-
     return TravelState(
         target=obj.position,
         label=f"{obj.object_id} ({obj.object_type})",
@@ -386,22 +308,22 @@ def _shout_options(model: WorldModel, shouts: Sequence[str]) -> list[Option]:
 
     When to shout is Jev's call under the brief; code only enforces a cooldown.
     """
-    last_shout = model.last_own_shout_tick()
-    if last_shout >= 0 and model.tick - last_shout < SHOUT_COOLDOWN_TICKS:
-        return []
-    return [
-        Option(
-            key=f"{SHOUT_KEY_PREFIX}{index}",
-            description=(
-                f'shout "{phrase}" - every settler within {items.SHOUT_RADIUS} '
-                "tiles hears it and where it came from"
-            ),
-            intent=pb.Intent(
-                say=pb.SayIntent(text=phrase, channel=items.SHOUT_CHANNEL)
-            ),
+    options: list[Option] = []
+    for index, phrase in enumerate(shouts[:MAX_BRIEF_SHOUTS]):
+        attempt = shout_attempt(model, phrase)
+        if not attempt.allowed:
+            return []
+        options.append(
+            Option(
+                key=f"{SHOUT_KEY_PREFIX}{index}",
+                description=(
+                    f'shout "{phrase}" - every settler within {items.SHOUT_RADIUS} '
+                    "tiles hears it and where it came from"
+                ),
+                intent=attempt.intent,
+            )
         )
-        for index, phrase in enumerate(shouts[:MAX_BRIEF_SHOUTS])
-    ]
+    return options
 
 
 def _heard_shout_options(
@@ -422,8 +344,8 @@ def _heard_shout_options(
         )
         if already_going:
             continue
-        path = find_path(model, position, target, stop_adjacent=True)
-        if not path:
+        step = plan_step(model, position, target, stop_adjacent=True)
+        if not step.found:
             continue
         age = model.tick - shout.tick
         return [
@@ -433,7 +355,7 @@ def _heard_shout_options(
                     f'go to where {shout.speaker_id} shouted "{shout.text}" '
                     f"{age} ticks ago, {distance} tiles away"
                 ),
-                intent=_move(direction_between(position, path[0])),
+                intent=_move(step.direction),
                 travel_target=TravelState(
                     target=target,
                     label=label,
@@ -472,11 +394,8 @@ def _conversation_options(
                         f"with {seated}; in it you speak when your turn comes "
                         f"round, and {conversation.free_seats} seats are free"
                     ),
-                    intent=pb.Intent(
-                        converse=pb.ConverseIntent(
-                            action="join",
-                            conversation_id=conversation.conversation_id,
-                        )
+                    intent=converse_intent(
+                        "join", conversation_id=conversation.conversation_id
                     ),
                     clears_travel=True,
                 )
@@ -485,8 +404,8 @@ def _conversation_options(
         if distance == 0:
             # Standing on the anchor is not a seat; a move option gets off it.
             continue
-        path = find_path(model, position, conversation.anchor, stop_adjacent=True)
-        if not path:
+        step = plan_step(model, position, conversation.anchor, stop_adjacent=True)
+        if not step.found:
             continue
         options.append(
             Option(
@@ -496,7 +415,7 @@ def _conversation_options(
                     f"with {seated}, {distance} tiles away, and take one of its "
                     f"{conversation.free_seats} free seats"
                 ),
-                intent=_move(direction_between(position, path[0])),
+                intent=_move(step.direction),
                 travel_target=TravelState(
                     target=conversation.anchor,
                     label=f"the conversation {conversation.conversation_id}",
@@ -543,19 +462,17 @@ def _hail_options(
                         "conversation with the two of you starts and "
                         f"{hail.settler} answers first"
                     ),
-                    intent=pb.Intent(
-                        converse=pb.ConverseIntent(
-                            action=items.ACTION_HAIL,
-                            target_entity_id=hail.settler,
-                            text=hail.line,
-                        )
+                    intent=converse_intent(
+                        items.ACTION_HAIL,
+                        target_entity_id=hail.settler,
+                        text=hail.line,
                     ),
                     clears_travel=True,
                 )
             )
             continue
-        path = find_path(model, position, target.position, stop_adjacent=True)
-        if not path:
+        step = plan_step(model, position, target.position, stop_adjacent=True)
+        if not step.found:
             continue
         options.append(
             Option(
@@ -564,7 +481,7 @@ def _hail_options(
                     f"walk to {hail.settler}, {distance} tiles away, to say "
                     f'"{hail.line}" and start a conversation with them'
                 ),
-                intent=_move(direction_between(position, path[0])),
+                intent=_move(step.direction),
                 travel_target=TravelState(
                     target=target.position,
                     label=f"{hail.settler}, to say your line to them",
@@ -616,7 +533,7 @@ def _sleep_options(model: WorldModel) -> list[Option]:
             )
         ]
     # The world refuses a sleep below this fatigue, so it is not an option.
-    if info.fatigue < items.MIN_SLEEP_FATIGUE:
+    if not sleep_attempt(model).allowed:
         return []
     options: list[Option] = []
     for obj in model.objects_near(1):
@@ -658,24 +575,25 @@ def _travel_control_options(
 ) -> list[Option]:
     if travel is None:
         return []
-    path = find_path(
-        model, model.position, travel.target, stop_adjacent=travel.stop_adjacent
+    # Somebody may have stepped onto the destination mid-walk, or it was never
+    # a tile one can stand on: finish beside it rather than lose the option.
+    step = plan_step(
+        model,
+        model.position,
+        travel.target,
+        stop_adjacent=travel.stop_adjacent,
+        retry_adjacent=True,
     )
-    if not path and not travel.stop_adjacent and not model.is_walkable(travel.target):
-        # Somebody stepped onto the destination mid-walk, or it was never a
-        # tile one can stand on: finish beside it rather than lose the option.
-        path = find_path(model, model.position, travel.target, stop_adjacent=True)
     options: list[Option] = []
-    if path:
-        direction = direction_between(model.position, path[0])
+    if step.found:
         options.append(
             Option(
                 key=KEEP_GOING,
                 description=(
                     f"keep going toward {travel.label} (next step "
-                    f"{direction_name(direction)}, {len(path)} steps left)"
+                    f"{direction_name(step.direction)}, {step.steps_left} steps left)"
                 ),
-                intent=_move(direction),
+                intent=_move(step.direction),
             )
         )
     options.append(
@@ -785,61 +703,13 @@ def _extract_option(obj: ObjectInfo, position: Coord, wielded: str) -> Option | 
     )
 
 
-def craftable_now(model: WorldModel, inventory: Mapping[str, int]) -> list[str]:
-    """Recipe names that would succeed on this tick, in priority order.
-
-    A recipe is craftable when the inputs are in the pack and, for a station
-    recipe, a placed station of that type is on or next to the actor's tile.
-    """
-    ready: list[str] = []
-    for name, recipe in RECIPES.items():
-        if recipe.station and model.station_near(recipe.station) is None:
-            continue
-        if any(
-            inventory.get(kind, 0) < amount for kind, amount in recipe.inputs.items()
-        ):
-            continue
-        if name in CRAFT_ONCE_KINDS and inventory.get(name, 0) > 0:
-            continue
-        if name in WIELDABLE_KINDS and model.self_info.wielded == name:
-            continue
-        ready.append(name)
-    ready.sort(key=_craft_rank)
-    return ready
-
-
-def _craft_rank(recipe: str) -> tuple[int, str]:
-    if recipe in CRAFT_PRIORITY:
-        return (CRAFT_PRIORITY.index(recipe), recipe)
-    return (len(CRAFT_PRIORITY), recipe)
-
-
-def _craft_description(model: WorldModel, recipe_name: str) -> str:
-    """One craft option's text: cost, yield, station, and work still to do."""
-    recipe = RECIPES[recipe_name]
-    yields = "" if recipe.output_count == 1 else f", {recipe.output_count} of them"
-    text = f"craft {recipe_name} using {recipe.cost_text()}{yields}"
-    if not recipe.station:
-        return text
-    text += f" at the {recipe.station} within reach"
-    if recipe.work <= 1:
-        return text
-    station = model.station_near(recipe.station)
-    done = 0
-    if station is not None:
-        started, actions = station.craft_progress(model.entity_id)
-        if started == recipe_name:
-            done = actions
-    return f"{text}; {recipe.work} craft actions, {done} done so far"
-
-
 def _crafting_options(model: WorldModel, inventory: Mapping[str, int]) -> list[Option]:
     options: list[Option] = []
     for recipe_name in craftable_now(model, inventory)[:CRAFT_OPTION_LIMIT]:
         options.append(
             Option(
                 key=f"craft:{recipe_name}",
-                description=_craft_description(model, recipe_name),
+                description=craft_description(model, recipe_name),
                 intent=pb.Intent(craft=pb.CraftIntent(recipe=recipe_name)),
             )
         )
@@ -956,8 +826,8 @@ def _step_option_for_object(
     if distance <= 1:
         return None
     state = travel_state_for(obj)
-    path = find_path(model, position, state.target, stop_adjacent=state.stop_adjacent)
-    if not path:
+    step = plan_step(model, position, state.target, stop_adjacent=state.stop_adjacent)
+    if not step.found:
         return None
     dx = obj.position[0] - position[0]
     dy = obj.position[1] - position[1]
@@ -967,7 +837,7 @@ def _step_option_for_object(
             f"one step toward {obj.object_id} ({obj.object_type}) at "
             f"dx {dx} dy {dy}, {distance} tiles away"
         ),
-        intent=_move(direction_between(position, path[0])),
+        intent=_move(step.direction),
         travel_target=state,
     )
 
@@ -979,8 +849,8 @@ def _step_option_for_entity(
     distance = chebyshev(entity.position, position)
     if distance <= 1:
         return None
-    path = find_path(model, position, entity.position, stop_adjacent=True)
-    if not path:
+    step = plan_step(model, position, entity.position, stop_adjacent=True)
+    if not step.found:
         return None
     dx = entity.position[0] - position[0]
     dy = entity.position[1] - position[1]
@@ -990,31 +860,13 @@ def _step_option_for_entity(
             f"one step toward {entity.entity_id} ({entity.entity_type}) at "
             f"dx {dx} dy {dy}, {distance} tiles away"
         ),
-        intent=_move(direction_between(position, path[0])),
+        intent=_move(step.direction),
         travel_target=TravelState(
             target=entity.position,
             label=f"{entity.entity_id} ({entity.entity_type})",
             stop_adjacent=True,
         ),
     )
-
-
-def _greedy_step(model: WorldModel, position: Coord, target: Coord) -> pb.Direction:
-    """The legal step that gets closest to `target`, or `NO_DIRECTION`.
-
-    Used only when A* has failed: the actor may be standing at the edge of what
-    it remembers, and walking hopefully into unknown ground is what turns a
-    coordinate the planner named into a place the actor can reach.
-    """
-    current = chebyshev(position, target)
-    best = NO_DIRECTION
-    best_gap = current
-    for direction in legal_directions(model, position):
-        gap = chebyshev(offset(position, direction), target)
-        if gap < best_gap:
-            best_gap = gap
-            best = direction
-    return best
 
 
 def _step_option_for_place(
@@ -1027,20 +879,12 @@ def _step_option_for_place(
     dx = target[0] - position[0]
     dy = target[1] - position[1]
     where = f"at dx {dx} dy {dy}, {distance} tiles away"
-    stop_adjacent = False
-    path = find_path(model, position, target)
-    if not path and model.is_known(target) and not model.is_walkable(target):
-        # The target tile cannot be stood on - a tree, a wall, a rock, another
-        # settler - so the journey is to the tile beside it. Without this, 32
-        # of the 41 `no_path` walks in the 2026-09-20 run gave up 4 tiles short
-        # of a destination with free neighbours all around it.
-        stop_adjacent = True
-        path = find_path(model, position, target, stop_adjacent=True)
-    state = TravelState(target=target, label=name, stop_adjacent=stop_adjacent)
-    if path:
-        direction = direction_between(position, path[0])
+    step = plan_step(model, position, target, retry_adjacent=model.is_known(target))
+    state = TravelState(target=target, label=name, stop_adjacent=step.stop_adjacent)
+    if step.found:
+        direction = step.direction
         description = f"one step toward {name} {where}"
-        if stop_adjacent:
+        if step.stop_adjacent:
             description += "; you cannot stand on it, so the walk ends beside it"
     else:
         # A* has failed. Walking hopefully is only walking toward a tile the
@@ -1050,7 +894,7 @@ def _step_option_for_place(
         # starved. Saying nothing here is what makes `lost` and `no_path` fire.
         if model.is_known(target):
             return None
-        direction = _greedy_step(model, position, target)
+        direction = greedy_step(model, position, target)
         if direction == NO_DIRECTION:
             return None
         # Said with confidence on purpose: a named place beyond the view is
