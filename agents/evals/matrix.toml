@@ -1,0 +1,165 @@
+# The models the eval suite is run against, for the Jev-versus-chat-models
+# comparison. `jev` is first on purpose: it is the baseline every other row's
+# "disagreements" section is measured against.
+#
+# Each entry: a short `name` (what `--only` and `--skip` match, and what the
+# report's rows are labelled with), a `backend` (`jev` or `openrouter`), the
+# `model` id, an optional `provider` slug to pin routing to, and an optional
+# `extra` table merged into the OpenRouter request body.
+#
+# Reasoning is off by default (see `openrouter_client.py`); a model whose
+# endpoint will not disable it gets the lowest effort it allows instead.
+
+[[model]]
+name = "jev"
+backend = "jev"
+model = "jev-latest"
+enabled = true
+
+[[model]]
+name = "gpt-5-nano"
+backend = "openrouter"
+model = "openai/gpt-5-nano"
+extra = { reasoning = { effort = "minimal" } }
+enabled = true
+
+[[model]]
+name = "qwen3.7-flash"
+backend = "openrouter"
+model = "qwen/qwen3.7-flash"
+extra = { reasoning = { enabled = false } }
+enabled = true
+
+[[model]]
+name = "mistral-nemo"
+backend = "openrouter"
+model = "mistralai/mistral-nemo"
+provider = "deepinfra"
+enabled = true
+
+[[model]]
+name = "llama-3.1-8b"
+backend = "openrouter"
+model = "meta-llama/llama-3.1-8b-instruct"
+provider = "groq"
+enabled = true
+
+# gpt-oss cannot turn reasoning off at all, so it gets the lowest effort.
+[[model]]
+name = "gpt-oss-20b"
+backend = "openrouter"
+model = "openai/gpt-oss-20b"
+provider = "groq"
+extra = { reasoning = { effort = "low" } }
+enabled = true
+
+[[model]]
+name = "gemini-2.5-flash-lite"
+backend = "openrouter"
+model = "google/gemini-2.5-flash-lite"
+extra = { reasoning = { enabled = false } }
+enabled = true
+
+[[model]]
+name = "gpt-4.1-nano"
+backend = "openrouter"
+model = "openai/gpt-4.1-nano"
+enabled = true
+
+[[model]]
+name = "gpt-oss-120b"
+backend = "openrouter"
+model = "openai/gpt-oss-120b"
+provider = "cerebras"
+extra = { reasoning = { effort = "low" } }
+enabled = true
+
+[[model]]
+name = "gpt-4.1-mini"
+backend = "openrouter"
+model = "openai/gpt-4.1-mini"
+enabled = true
+
+[[model]]
+name = "gemini-2.5-flash"
+backend = "openrouter"
+model = "google/gemini-2.5-flash"
+extra = { reasoning = { enabled = false } }
+enabled = true
+
+# Elicitation variants (docs/13, "Approach D"): the same models asked for their
+# judgement numbers a fairer way. `elicitation = "vote"` samples five times at
+# temperature 1 and counts the answers; `elicitation = "logprob"` reads each
+# noul off a one-token yes/no's logprobs, and fails loudly on an endpoint that
+# does not return them. Both cost more per decide than the default single JSON
+# reply - vote 5 calls, logprob 5 - so they are off until a slice is run
+# deliberately with `--only`.
+
+[[model]]
+name = "gpt-5-nano-vote"
+backend = "openrouter"
+model = "openai/gpt-5-nano"
+elicitation = "vote"
+extra = { reasoning = { effort = "minimal" } }
+enabled = true
+
+# OpenAI refuses `logprobs` on its reasoning models outright ("logprobs are not
+# supported with reasoning models", 400), so this row errors today. It is kept
+# so the refusal is on the record rather than rediscovered.
+[[model]]
+name = "gpt-5-nano-logprob"
+backend = "openrouter"
+model = "openai/gpt-5-nano"
+elicitation = "logprob"
+extra = { reasoning = { effort = "minimal" } }
+enabled = false
+
+[[model]]
+name = "gemini-2.5-flash-lite-vote"
+backend = "openrouter"
+model = "google/gemini-2.5-flash-lite"
+elicitation = "vote"
+extra = { reasoning = { enabled = false } }
+enabled = true
+
+# Gemini answers `logprobs: true` with no token logprobs at all, so this row
+# raises rather than reporting zeros. Same story for gpt-oss-20b on Groq.
+[[model]]
+name = "gemini-2.5-flash-lite-logprob"
+backend = "openrouter"
+model = "google/gemini-2.5-flash-lite"
+elicitation = "logprob"
+extra = { reasoning = { enabled = false } }
+enabled = false
+
+[[model]]
+name = "gpt-4.1-nano-vote"
+backend = "openrouter"
+model = "openai/gpt-4.1-nano"
+elicitation = "vote"
+enabled = true
+
+[[model]]
+name = "gpt-4.1-nano-logprob"
+backend = "openrouter"
+model = "openai/gpt-4.1-nano"
+elicitation = "logprob"
+enabled = true
+
+# qwen3.7-flash is the model nearest Jev on price and action accuracy, and its
+# Alibaba endpoint returns logprobs, so it gets both fairer elicitations.
+[[model]]
+name = "qwen3.7-flash-vote"
+backend = "openrouter"
+model = "qwen/qwen3.7-flash"
+elicitation = "vote"
+extra = { reasoning = { enabled = false } }
+enabled = true
+
+[[model]]
+name = "qwen3.7-flash-logprob"
+backend = "openrouter"
+model = "qwen/qwen3.7-flash"
+elicitation = "logprob"
+extra = { reasoning = { enabled = false } }
+enabled = true

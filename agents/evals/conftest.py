@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator, Iterator
+import uuid
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,22 +19,49 @@ from typing import Any, Generator, Mapping
 
 import pytest
 
-from agents.jev_agent.jevclient import DEFAULT_MODEL, JevDecision, TypeSafeJevClient
+from agents.jev_agent.jevclient import JevDecision
 
-API_KEY_VARIABLE = "TYPESAFE_API_KEY"
-MODEL_VARIABLE = "JEV_EVAL_MODEL"
+from .backends import (
+    REPEAT_VARIABLE,
+    RUN_ID_VARIABLE,
+    BackendSpec,
+    ClosableJevClient,
+    build_client,
+    row_fields,
+    spec_from_env,
+)
+
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
-# The stint's own budget is under a second; an eval is not racing a tick, and a
-# timeout here would read as a model regression when it is only a slow network.
-EVAL_TIMEOUT_SECONDS = 30.0
-
 _RECORDER_KEY = pytest.StashKey["ResultsRecorder"]()
+_SPEC_KEY = pytest.StashKey[BackendSpec]()
 
 
-def eval_model() -> str:
-    """The model under evaluation: `JEV_EVAL_MODEL`, else the agent's default."""
-    return os.environ.get(MODEL_VARIABLE, DEFAULT_MODEL)
+def eval_spec(config: pytest.Config) -> BackendSpec:
+    """The backend under evaluation, parsed once per session.
+
+    Parsed in `pytest_configure` so a malformed `JEV_EVAL_BACKEND` fails the
+    session with one clear message rather than every test with the same one.
+    """
+    return config.stash[_SPEC_KEY]
+
+
+def eval_repeat() -> int:
+    """Which repeat of the suite this is (`JEV_EVAL_REPEAT`, default 0)."""
+    value = os.environ.get(REPEAT_VARIABLE, "").strip()
+    if not value:
+        return 0
+    return int(value)
+
+
+def eval_run_id() -> str:
+    """This session's run id: `JEV_EVAL_RUN_ID` when set, else a fresh one.
+
+    The matrix runner sets it so every row of one matrix shares an id; a bare
+    `pytest evals` run makes its own, so two runs of the same model on the
+    same day are still told apart.
+    """
+    return os.environ.get(RUN_ID_VARIABLE, "") or uuid.uuid4().hex[:12]
 
 
 @dataclass
@@ -46,8 +74,14 @@ class ResultsRecorder:
     """
 
     model: str
+    backend: str
+    run_id: str
+    repeat: int
     path: Path
     rows: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Set by the `jev` fixture to the live client's own columns, read at record
+    # time because the client only learns what its endpoint refuses mid-call.
+    row_extras: Callable[[], dict[str, Any]] = dict
 
     def record(
         self,
@@ -61,6 +95,10 @@ class ResultsRecorder:
         self.rows[node_id] = {
             "scenario": scenario,
             "model": self.model,
+            "backend": self.backend,
+            "run_id": self.run_id,
+            "repeat": self.repeat,
+            "provider": decision.provider,
             "action": decision.action,
             "confidence": round(decision.confidence, 4),
             "top": [[key, round(value, 4)] for key, value in decision.top(5)],
@@ -70,8 +108,11 @@ class ResultsRecorder:
             "danger": round(decision.danger, 4),
             "latency_ms": decision.latency_ms,
             "input_tokens": decision.input_tokens,
+            "output_tokens": decision.output_tokens,
+            "cost_usd": decision.cost_usd,
             "thresholds": dict(thresholds),
             "passed": None,
+            **self.row_extras(),
         }
 
     def set_verdict(self, node_id: str, passed: bool) -> None:
@@ -90,15 +131,21 @@ class ResultsRecorder:
                 handle.write(json.dumps(row, sort_keys=True) + "\n")
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Resolve the backend once, so a bad `JEV_EVAL_BACKEND` fails loudly."""
+    config.stash[_SPEC_KEY] = spec_from_env()
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
     """Mark this directory's tests live, and skip them all without an API key."""
     here = Path(__file__).resolve().parent
-    missing_key = not os.environ.get(API_KEY_VARIABLE)
+    key_variable = eval_spec(config).api_key_variable
+    missing_key = not os.environ.get(key_variable)
     skip = pytest.mark.skip(
         reason=(
-            f"{API_KEY_VARIABLE} is not set; the Jev evals make real API calls "
+            f"{key_variable} is not set; the evals make real API calls "
             "(run with: set -a; . ../.env; set +a)"
         )
     )
@@ -126,12 +173,15 @@ def pytest_runtest_makereport(
 
 @pytest.fixture(scope="session")
 def recorder(request: pytest.FixtureRequest) -> Iterator[ResultsRecorder]:
-    """The session's results file: `results/<UTC timestamp>-<model>.jsonl`."""
-    model = eval_model()
+    """The session's results file: `results/<UTC timestamp>-<backend>.jsonl`."""
+    spec = eval_spec(request.config)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    safe_model = model.replace("/", "_")
     recorder = ResultsRecorder(
-        model=model, path=RESULTS_DIR / f"{stamp}-{safe_model}.jsonl"
+        model=spec.model,
+        backend=spec.label,
+        run_id=eval_run_id(),
+        repeat=eval_repeat(),
+        path=RESULTS_DIR / f"{stamp}-{spec.slug}.jsonl",
     )
     request.config.stash[_RECORDER_KEY] = recorder
     yield recorder
@@ -139,13 +189,16 @@ def recorder(request: pytest.FixtureRequest) -> Iterator[ResultsRecorder]:
 
 
 @pytest.fixture
-async def jev() -> AsyncIterator[TypeSafeJevClient]:
-    """A real TypeSafe client for the model under evaluation.
+async def jev(
+    request: pytest.FixtureRequest, recorder: ResultsRecorder
+) -> AsyncIterator[ClosableJevClient]:
+    """A live client for the backend under evaluation: Jev, or OpenRouter.
 
     Function-scoped: a session-scoped async fixture would outlive the event loop
     pytest-asyncio gives each test.
     """
-    client = TypeSafeJevClient(model=eval_model(), timeout=EVAL_TIMEOUT_SECONDS)
+    client = build_client(eval_spec(request.config))
+    recorder.row_extras = lambda: row_fields(client)
     try:
         yield client
     finally:

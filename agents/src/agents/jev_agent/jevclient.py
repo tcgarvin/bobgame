@@ -37,6 +37,12 @@ logger = structlog.get_logger(__name__)
 DEFAULT_MODEL = "jev-latest"
 DEFAULT_TIMEOUT_SECONDS = 2.5
 
+# The price Jev is billed at (docs/11_cost_accounting.md). `pricing.py` keeps
+# the per-million form this constant mirrors; it is restated here so a decision
+# can carry its own cost without importing the pricing module (which imports
+# this one).
+JEV_USD_PER_BILLION_INPUT_TOKENS = 42.0
+
 ACTION_QUESTION = (
     "You are controlling a settler in a survival world. Given the state, which "
     "single action should the settler take this tick to make progress on the "
@@ -75,6 +81,13 @@ class JevDecision:
     danger: float = 0.0
     input_tokens: int = 0
     latency_ms: int = 0
+    # Filled by every backend so the eval suite can compare Jev with ordinary
+    # chat models on cost as well as accuracy (docs/11_cost_accounting.md).
+    # TypeSafe reports input tokens only, so its cost is computed locally; an
+    # OpenRouter backend reads the dollar figure off the response.
+    cost_usd: float = 0.0
+    provider: str = ""
+    output_tokens: int = 0
 
     @property
     def eject(self) -> float:
@@ -135,6 +148,7 @@ class TypeSafeJevClient:
         )
         latency_ms = int((time.monotonic() - started) * 1000)
 
+        input_tokens = response.usage.input_tokens or 0
         action = response.answers["action"]
         if not isinstance(action, ChoiceAnswer):
             raise TypeError(f"expected a ChoiceAnswer for 'action', got {type(action)}")
@@ -146,8 +160,10 @@ class TypeSafeJevClient:
             stuck=_noul(response.answers.get("stuck")),
             lost=_noul(response.answers.get("lost")),
             danger=_noul(response.answers.get("danger")),
-            input_tokens=response.usage.input_tokens or 0,
+            input_tokens=input_tokens,
             latency_ms=latency_ms,
+            cost_usd=input_tokens * JEV_USD_PER_BILLION_INPUT_TOKENS / 1e9,
+            provider="typesafe",
         )
 
     async def aclose(self) -> None:
