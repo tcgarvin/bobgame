@@ -32,7 +32,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Container, Iterator, Mapping
 
 TOOL_CALL_RE = re.compile(r"planner_tool_call .*?tool=(\S+)")
 TURN_RE = re.compile(r"planner_turn_started")
@@ -792,13 +792,54 @@ class GiveEvent:
     amount: int
 
 
+WOLF_ENTITY_TYPE = "wolf"
+
+
+def is_wolf(
+    entity_id: str, entity_types: Mapping[str, str], wolf_ids: Container[str]
+) -> bool:
+    """Whether this entity is a wolf, by recorded type, spawn record or name.
+
+    Runs recorded before `entity_updates` carried `entity_type` fall back to
+    the spawn records and, failing those, to the `wolf_*` id convention.
+    """
+    known = entity_types.get(entity_id, "")
+    if known:
+        return known == WOLF_ENTITY_TYPE
+    return entity_id in wolf_ids or entity_id.startswith("wolf")
+
+
+def death_cause(
+    killer_id: str,
+    food: int,
+    entity_types: Mapping[str, str],
+    wolf_ids: Container[str],
+) -> str:
+    """What killed a settler: a wolf, another settler by name, or no one.
+
+    The world leaves `killer_id` empty for a death nobody dealt, which in
+    practice is starvation; it is only called that when the record shows the
+    settler's food at zero, and `unknown` otherwise.
+    """
+    if not killer_id:
+        return "starvation" if food == 0 else "unknown"
+    if is_wolf(killer_id, entity_types, wolf_ids):
+        return WOLF_ENTITY_TYPE
+    return killer_id
+
+
 @dataclass
 class WorldFacts:
     ticks: int = 0
     first_tick: int = 0
     last_tick: int = 0
+    # Settler deaths only, by the settler who died and by what killed it
+    # (`wolf` for any wolf, `starvation` for an empty killer on an empty
+    # stomach, `unknown` otherwise). Wolves dying are kills, not deaths, and
+    # are counted in `wolf_kills` by the settler who landed the blow.
     deaths: Counter[str] = field(default_factory=Counter)
     killers: Counter[str] = field(default_factory=Counter)
+    wolf_kills: Counter[str] = field(default_factory=Counter)
     wolves_spawned: int = 0
     wolves_despawned: Counter[str] = field(default_factory=Counter)
     crafts: Counter[str] = field(default_factory=Counter)
@@ -860,6 +901,7 @@ class WorldFacts:
             "last_tick": self.last_tick,
             "deaths": dict(self.deaths),
             "killers": dict(self.killers),
+            "wolf_kills": dict(self.wolf_kills),
             "wolves_spawned": self.wolves_spawned,
             "wolves_despawned": dict(self.wolves_despawned),
             "crafts": dict(self.crafts),
@@ -911,6 +953,11 @@ def scan_world_ticks(
     # used to tell whether a death this tick struck a sleeper (death clears
     # `asleep` on the same tick, so the current tick's own state can't say).
     last_asleep: dict[str, bool] = {}
+    # Entity type and food per entity, from the latest `entity_updates` seen.
+    # Both are needed to read a death record: wolves dying are kills, not
+    # deaths, and an unattributed death is starvation only on an empty stomach.
+    entity_types: dict[str, str] = {}
+    food_now: dict[str, int] = {}
     night_ticks_by_day: defaultdict[int, list[tuple[int, int]]] = defaultdict(list)
 
     for record in iter_jsonl(path):
@@ -930,6 +977,14 @@ def scan_world_ticks(
             for eu in entity_updates
             if eu.get("entity_id")
         }
+        for eu in entity_updates:
+            entity_id = eu.get("entity_id", "")
+            if not entity_id:
+                continue
+            if eu.get("entity_type"):
+                entity_types[entity_id] = str(eu["entity_type"])
+            if "food" in eu:
+                food_now[entity_id] = int(eu["food"])
         if clock is not None:
             facts.sleep_data_available = True
             if clock.get("night"):
@@ -982,11 +1037,19 @@ def scan_world_ticks(
 
         for death in record.get("deaths", ()):
             entity = death.get("entity_id", "")
-            killer = death.get("killer_id", "") or "unknown"
+            killer = death.get("killer_id", "")
+            if is_wolf(entity, entity_types, wolf_ids):
+                # A wolf dying is a settler's kill. The despawn a moment later
+                # already produces the `wolf_killed` moment, so no death one.
+                facts.wolf_kills[killer or "unknown"] += 1
+                continue
             facts.deaths[entity] += 1
-            facts.killers[killer] += 1
+            label = death_cause(
+                killer, food_now.get(entity, -1), entity_types, wolf_ids
+            )
+            facts.killers[label] += 1
             moments.append(
-                Moment(tick, "death", entity, f"{entity} killed by {killer}")
+                Moment(tick, "death", entity, f"{entity} killed by {killer or label}")
             )
             if last_asleep.get(entity, False) and not seen_first_asleep_death:
                 seen_first_asleep_death = True
@@ -995,7 +1058,8 @@ def scan_world_ticks(
                         tick,
                         "milestone",
                         entity,
-                        f"first death while asleep: {entity} killed by {killer}",
+                        f"first death while asleep: {entity} "
+                        f"killed by {killer or label}",
                     )
                 )
 
@@ -1771,7 +1835,14 @@ def print_report(
             f"== world: ticks {facts.first_tick}..{facts.last_tick} "
             f"({facts.ticks} recorded) =="
         )
-        print(f"deaths: {sum(facts.deaths.values())} by={dict(facts.killers)}")
+        print(
+            f"deaths: {sum(facts.deaths.values())} settlers "
+            f"by={dict(facts.killers)}"
+        )
+        print(
+            f"wolf kills: {sum(facts.wolf_kills.values())} "
+            f"by={dict(facts.wolf_kills)}"
+        )
         print(
             f"wolves: spawned={facts.wolves_spawned} "
             f"despawned={dict(facts.wolves_despawned)}"

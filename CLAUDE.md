@@ -95,6 +95,25 @@ which `runner/configs/hamlet.toml` passes. The planner's goal paragraph now
 names the shelter: a settlement that lasts, where every one of you has a
 shelter of your own to sleep in, and where food, safety and rest are things you
 can count on tomorrow. `settlement` and `settlement_peaceful` are unchanged.
+**Hamlet-run fixes (2026-09-20)**: the first six-settler run showed planner
+turns lasting 100-500 ticks with no sight of the body (four settlers starved
+mid-turn), `eat` failing `insufficient_items` 14 times, 30 of 89 `travel_to`
+calls ending `ticks_exhausted` (8 of them already standing on the target), and
+walls going up slowly because `build` refused a pack that held the materials
+but not the pieces. Fixed: every tool result's clock line now carries `food
+X/100, health Y/20, fatigue Z/100`, and `!!` lines (physics only) fire at food
+25, at food 0 and within 10 of collapse, in tool results and in the turn
+prompt; `travel_to` returns at once and spends no tick when the body is
+already there, ends the stint code-side the tick it arrives (`arrived`,
+`arrived_next_to` for a destination nobody can stand on) instead of waiting
+for Jev's `done`; `eat` with an empty pack picks and eats the berry under the
+body's feet, or names the nearest bushes that had one; `build` crafts what it
+is short of before it starts and whenever it runs dry — recipe chains
+included (wood → plank → wall), never walking to a station, up to 20 pieces
+and three refills per call; and `tools/analyze_run.py` no longer counts a
+wolf's death as a settler's, reporting `deaths: N settlers by={wolf,
+starvation, unknown, <settler>}` and `wolf kills: N by={<settler>}`
+separately.
 **In progress**: milestone 7, run recording & replay — every run is recorded to `runs/<run_id>/` as gzip JSONL (not Parquet) and a replay server serves it to the viewer with seeking, playback and deep links. Contract: [docs/07_replay.md](docs/07_replay.md).
 **Not done**: milestone 8 (LLM agents) is superseded by `agents.jev_agent`.
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)

@@ -87,6 +87,7 @@ from .stint import (
     Stint,
     StintDriver,
     StintReport,
+    never_ends,
 )
 from .pricing import CostLedger, LedgerJevClient, pricing_payload
 from .tracelog import AgentTrace, resolve_log_root
@@ -189,6 +190,9 @@ class _StintRequest:
     brief: Brief
     future: asyncio.Future[StintReport]
     driver: StintDriver | None = None
+    # An extra end rule the caller owns, asked before every tick's action;
+    # `travel_to` uses it to end the stint the tick the body arrives.
+    end_check: Callable[[WorldModel], str] = never_ends
 
 
 @dataclass
@@ -389,16 +393,23 @@ class JevAgent:
         self.planner.day_log.add(self._model.tick, KIND_NOTE, text)
 
     async def run_stint(
-        self, brief: Brief, driver: StintDriver | None = None
+        self,
+        brief: Brief,
+        driver: StintDriver | None = None,
+        end_check: Callable[[WorldModel], str] = never_ends,
     ) -> StintReport:
         """Queue a stint and wait for the tick loop to finish running it.
 
         With a `driver`, code chooses the action every tick and Jev is not
         called at all; that is how the planner's `build` tool works.
+        `end_check` is asked before every tick and ends the stint with the
+        reason it returns.
         """
         future: asyncio.Future[StintReport] = asyncio.get_running_loop().create_future()
         await self._stint_requests.put(
-            _StintRequest(brief=brief, future=future, driver=driver)
+            _StintRequest(
+                brief=brief, future=future, driver=driver, end_check=end_check
+            )
         )
         return await future
 
@@ -1110,6 +1121,7 @@ class JevAgent:
             self.jev,
             trace=self.trace,
             driver=request.driver,
+            end_check=request.end_check,
         )
         self._active_stint = stint
         self.mode = MODE_STINT

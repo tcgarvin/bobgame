@@ -78,11 +78,19 @@ class StintHarness:
         brief: Brief,
         trace: AgentTrace,
         driver: object | None = None,
+        end_check: object | None = None,
     ) -> None:
         self.model = WorldModel("ada")
         self.jev = jev
         self.trace = trace
-        self.stint = Stint(brief, self.model, jev, trace=trace, driver=driver)  # type: ignore[arg-type]
+        self.stint = Stint(
+            brief,
+            self.model,
+            jev,
+            trace=trace,
+            driver=driver,  # type: ignore[arg-type]
+            **({} if end_check is None else {"end_check": end_check}),  # type: ignore[arg-type]
+        )
 
     async def tick(self, observation) -> object:  # type: ignore[no-untyped-def]
         """Feed one observation through the model and the stint."""
@@ -761,3 +769,22 @@ async def test_two_refusals_drop_the_hail_and_name_the_reason(
     assert "hail:mira" not in jev.last_options
     report = harness.stint.build_report().to_text()
     assert "hail to mira refused: mira is already in conv_2" in report
+
+
+async def test_an_end_check_ends_the_stint_with_its_own_reason(
+    trace: AgentTrace,
+) -> None:
+    """`travel_to` ends its walk this way, the tick the body arrives."""
+    jev = FakeJevClient(script=[decision("move_E"), decision("move_E")])
+    harness = StintHarness(
+        jev,
+        make_brief(),
+        trace,
+        end_check=lambda model: "arrived" if model.position == (11, 10) else "",
+    )
+    await harness.tick(make_observation(1, make_entity("ada", (10, 10))))
+    assert not harness.stint.finished
+    intent = await harness.tick(make_observation(2, make_entity("ada", (11, 10))))
+    assert intent.HasField("wait")
+    assert harness.stint.end_reason == "arrived"
+    assert harness.stint.ticks_used == 1

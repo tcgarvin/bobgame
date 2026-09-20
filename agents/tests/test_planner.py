@@ -38,11 +38,13 @@ from agents.jev_agent.planner import (
     Planner,
     _direction_value as direction_value,
     PlannerDeps,
+    body_alerts,
     build_planner_agent,
     describe_world,
     parse_tile_list,
     read_memory,
     threat_alert,
+    travel_arrival,
     trim_history,
     _validated_hails as validated_hails,
 )
@@ -63,7 +65,7 @@ from agents.jev_agent.journal import (
 )
 from agents.jev_agent.options import BriefHail
 from agents.jev_agent.reflex import EMPTY_REFLEX, NO_REFLEX_LINE, ReflexBrief
-from agents.jev_agent.stint import Brief, StintReport
+from agents.jev_agent.stint import Brief, StintReport, never_ends
 from agents.jev_agent.tracelog import AgentTrace
 from agents.jev_agent.worldmodel import TranscriptLine, WorldModel
 
@@ -73,6 +75,7 @@ from helpers import (
     make_entity,
     make_object,
     make_observation,
+    make_tiles,
     utterance_event,
 )
 
@@ -101,20 +104,28 @@ class RecordingBridge:
         # Called while a turn waits for the journal, to stand in for a rewrite
         # finishing between turns.
         self.on_journal_wait: Callable[[], None] = lambda: None
+        # The extra end rules `travel_to` hands down, one per stint.
+        self.end_checks: list[Callable[[WorldModel], str]] = []
+        # The end reason every recorded stint reports back.
+        self.stint_end_reason = "eject"
 
     @property
     def model(self) -> WorldModel:
         return self._model
 
     async def run_stint(
-        self, brief: Brief, driver: object | None = None
+        self,
+        brief: Brief,
+        driver: object | None = None,
+        end_check: Callable[[WorldModel], str] = never_ends,
     ) -> StintReport:
         self.briefs.append(brief)
         self.drivers.append(driver)
+        self.end_checks.append(end_check)
         return StintReport(
             brief=brief,
             ticks_used=3,
-            end_reason="eject",
+            end_reason=self.stint_end_reason,
             start_position=(10, 10),
             end_position=(12, 10),
             start_stats="hp 20/20, food 80/100",
@@ -919,9 +930,8 @@ async def test_tool_results_carry_the_clock_and_the_alert(
     _bitten(world_model, tick=9, health=17)
     with agent.override(model=TestModel(call_tools=["recall"])):
         result = await agent.run("go", deps=deps)
-    assert (
-        "[tick 9 \u00b7 day 0 9/300 day; this turn has cost 4 ticks so far]"
-        in result.output
+    assert "[tick 9 \u00b7 day 0 9/300 day; this turn has cost 4 ticks so far" in (
+        result.output
     )
     assert "!! UNDER ATTACK" in result.output
 
@@ -2021,3 +2031,343 @@ def test_the_prompt_states_the_hail_physics() -> None:
 def test_the_converser_prompt_says_a_hailed_seat_can_happen() -> None:
     condensed = " ".join(CONVERSER_NARRATIVE.split())
     assert "someone walked up and addressed you" in condensed
+
+
+# -- body status, arrival, eating and building (2026-09-20 hamlet-run fixes) --
+
+
+def _returned_text(result: object) -> list[str]:
+    """Every tool return in a finished run, as text."""
+    return [
+        str(part.content)
+        for message in result.all_messages()  # type: ignore[attr-defined]
+        for part in message.parts
+        if isinstance(part, ToolReturnPart)
+    ]
+
+
+async def test_every_tool_result_carries_food_health_and_fatigue(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.model.update(
+        make_observation(
+            6, make_entity("ada", (10, 10), food=34, health=12, fatigue=41)
+        )
+    )
+    agent = build_planner_agent("test")
+    deps.budget.reset(20, tick=5)
+    with agent.override(model=one_tool_call("recall", {})):
+        result = await agent.run("go", deps=deps)
+    assert "food 34/100, health 12/20, fatigue 41/100]" in _returned_text(result)[0]
+
+
+def test_low_food_raises_an_alert_with_the_physics(world_model: WorldModel) -> None:
+    world_model.update(make_observation(6, make_entity("ada", (10, 10), food=20)))
+    alerts = body_alerts(world_model)
+    assert len(alerts) == 1
+    assert alerts[0].startswith("!! FOOD LOW: food 20/100, falling 1 every 4 ticks")
+    assert "at 0 you lose 1 health every 4 ticks" in alerts[0]
+    assert "One berry restores 20 food." in alerts[0]
+
+
+def test_no_alert_while_food_is_comfortable(world_model: WorldModel) -> None:
+    world_model.update(make_observation(6, make_entity("ada", (10, 10), food=26)))
+    assert body_alerts(world_model) == []
+
+
+def test_starving_and_nearly_collapsing_both_get_a_line(
+    world_model: WorldModel,
+) -> None:
+    world_model.update(
+        make_observation(6, make_entity("ada", (10, 10), food=0, health=7, fatigue=92))
+    )
+    alerts = body_alerts(world_model)
+    assert len(alerts) == 2
+    assert alerts[0].startswith("!! STARVING: food 0/100")
+    assert "lose 1 health every 4 ticks until you eat" in alerts[0]
+    assert alerts[1].startswith("!! FATIGUE 92/100:")
+    assert "at 100 you collapse where you stand and sleep until fatigue 70" in (
+        alerts[1]
+    )
+
+
+def test_a_sleeping_body_gets_no_alerts(world_model: WorldModel) -> None:
+    world_model.update(
+        make_observation(6, make_entity("ada", (10, 10), food=0, asleep=True))
+    )
+    assert body_alerts(world_model) == []
+
+
+async def test_the_turn_prompt_carries_the_body_alerts(
+    deps: PlannerDeps, bridge: RecordingBridge, tmp_path: Path
+) -> None:
+    bridge.model.update(make_observation(6, make_entity("ada", (10, 10), food=4)))
+    planner = Planner(
+        bridge, "ada", model_name="test", trace=AgentTrace("ada", tmp_path)
+    )
+    prompt = await planner.build_prompt()
+    assert "!! FOOD LOW: food 4/100" in prompt
+
+
+# -- travel_to ---------------------------------------------------------------
+
+
+def test_travel_arrival_reads_the_tile_under_and_beside_you(
+    world_model: WorldModel,
+) -> None:
+    assert travel_arrival(world_model, (10, 10)) == "arrived"
+    assert travel_arrival(world_model, (12, 12)) == ""
+    # A tile nobody can stand on counts as reached from beside it.
+    world_model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            tiles=make_tiles((10, 10), blocked=[(11, 10)]),
+        )
+    )
+    assert travel_arrival(world_model, (11, 10)) == "arrived_next_to"
+    assert travel_arrival(world_model, (12, 10)) == ""
+
+
+async def test_travel_to_spends_no_tick_when_you_are_already_there(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=one_tool_call("travel_to", {"x": 10, "y": 10, "max_ticks": 30})
+    ):
+        result = await agent.run("go", deps=deps)
+    assert not bridge.briefs, "no stint is started for a walk already finished"
+    text = _returned_text(result)[0]
+    assert "no walk needed: you are standing on (10, 10). No tick spent." in text
+
+
+async def test_travel_to_stops_beside_a_destination_nobody_can_stand_on(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            tiles=make_tiles((10, 10), blocked=[(11, 10)]),
+        )
+    )
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=one_tool_call("travel_to", {"x": 11, "y": 10, "max_ticks": 30})
+    ):
+        result = await agent.run("go", deps=deps)
+    assert not bridge.briefs
+    assert "(11, 10) cannot be stood on; you are next to it at (10, 10)" in (
+        _returned_text(result)[0]
+    )
+
+
+async def test_travel_to_hands_the_stint_an_arrival_end_rule(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=one_tool_call("travel_to", {"x": 14, "y": 10, "max_ticks": 30})
+    ):
+        await agent.run("go", deps=deps)
+    end_check = bridge.end_checks[0]
+    assert end_check(bridge.model) == "", "still walking where it started"
+    bridge.model.update(make_observation(7, make_entity("ada", (14, 10))))
+    assert end_check(bridge.model) == "arrived"
+
+
+async def test_an_arrived_walk_says_where_the_body_ended_up(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.stint_end_reason = "arrived"
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=one_tool_call("travel_to", {"x": 12, "y": 10, "max_ticks": 30})
+    ):
+        result = await agent.run("go", deps=deps)
+    assert "you are standing on (12, 10)" in _returned_text(result)[0]
+
+
+# -- eat ---------------------------------------------------------------------
+
+
+async def test_eat_with_a_berry_in_the_pack_just_eats_it(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    carrying(bridge.model, {"berry": 2})
+    agent = build_planner_agent("test")
+    with agent.override(model=one_tool_call("eat", {})):
+        await agent.run("go", deps=deps)
+    assert [description for _, description in bridge.actions] == ["eat berry"]
+
+
+async def test_eat_with_an_empty_pack_picks_the_berry_under_your_feet(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            objects=[make_object("bush_7", "bush", (10, 10), {"berry_count": "1"})],
+        )
+    )
+    bridge.direct_results = [
+        "pick a berry off bush_7 -> collect ok: collected berry",
+        "eat berry -> eat ok: food 80 -> 100",
+    ]
+    agent = build_planner_agent("test")
+    with agent.override(model=one_tool_call("eat", {})):
+        result = await agent.run("go", deps=deps)
+    assert [description for _, description in bridge.actions] == [
+        "pick a berry off bush_7",
+        "eat berry",
+    ]
+    text = _returned_text(result)[0]
+    assert "collected berry" in text and "food 80 -> 100" in text
+
+
+async def test_eat_with_nothing_to_eat_names_the_nearest_berry_bushes(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object("bush_7", "bush", (14, 10), {"berry_count": "1"}),
+                make_object("bush_8", "bush", (12, 10), {"berry_count": "0"}),
+            ],
+        )
+    )
+    agent = build_planner_agent("test")
+    with agent.override(model=one_tool_call("eat", {})):
+        result = await agent.run("go", deps=deps)
+    assert not bridge.actions, "nothing is submitted, so no tick is spent"
+    text = _returned_text(result)[0]
+    assert "you carry no berry, and there is none to pick where you stand" in text
+    assert "bush bush_7 at (14, 10) (d4): berry (in view)" in text
+    assert "bush_8" not in text
+
+
+# -- build crafts what it is short of ----------------------------------------
+
+
+class CraftingBridge(RecordingBridge):
+    """A bridge whose `craft` actions really change the pack, as the world does."""
+
+    def __init__(self, world_model: WorldModel, inventory: dict[str, int]) -> None:
+        super().__init__(world_model)
+        self.inventory = dict(inventory)
+        self._observe()
+
+    def _observe(self) -> None:
+        self.model.update(
+            make_observation(
+                self.model.tick + 1,
+                make_entity("ada", (10, 10), inventory=self.inventory),
+                objects=self.objects,
+            )
+        )
+
+    objects: list[pb.WorldObject] = []
+
+    async def direct_action(self, intent: pb.Intent, description: str) -> str:
+        self.actions.append((intent, description))
+        if not intent.HasField("craft"):
+            return f"{description} -> ok"
+        recipe = RECIPES[intent.craft.recipe]
+        for kind, amount in recipe.inputs.items():
+            if self.inventory.get(kind, 0) < amount:
+                self._observe()
+                return f"{description} -> craft failed: not enough {kind}"
+            self.inventory[kind] -= amount
+        self.inventory[intent.craft.recipe] = (
+            self.inventory.get(intent.craft.recipe, 0) + recipe.output_count
+        )
+        self._observe()
+        return f"{description} -> craft ok: crafted {intent.craft.recipe}"
+
+
+def _build_call(kind: str) -> FunctionModel:
+    return one_tool_call(
+        "build",
+        {
+            "kind": kind,
+            "shape": "line",
+            "x1": 10,
+            "y1": 12,
+            "x2": 12,
+            "y2": 12,
+            "max_ticks": 60,
+        },
+    )
+
+
+async def test_build_crafts_the_pieces_and_their_planks_before_it_starts(
+    world_model: WorldModel, tmp_path: Path
+) -> None:
+    bridge = CraftingBridge(world_model, {"wood": 6})
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(model=_build_call("wood_wall")):
+        result = await agent.run("go", deps=deps)
+    assert bridge.inventory["wood_wall"] == 3
+    assert bridge.briefs, "the build ran once it had pieces"
+    assert "for this build, crafted 6 plank, 3 wood_wall" in _returned_text(result)[0]
+
+
+async def test_build_says_what_it_could_not_craft_and_starts_nothing(
+    world_model: WorldModel, tmp_path: Path
+) -> None:
+    bridge = CraftingBridge(world_model, {"stone": 4})
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(model=_build_call("wood_wall")):
+        result = await agent.run("go", deps=deps)
+    assert not bridge.briefs
+    text = _returned_text(result)[0]
+    assert "you carry no wood_wall" in text
+    assert "nothing crafted: plank takes 1 wood and you carry 0" in text
+
+
+async def test_build_will_not_craft_a_station_recipe_away_from_its_station(
+    world_model: WorldModel, tmp_path: Path
+) -> None:
+    bridge = CraftingBridge(world_model, {"stone": 9, "clay": 9})
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(model=_build_call("stone_wall")):
+        result = await agent.run("go", deps=deps)
+    assert not bridge.briefs
+    assert "stone_wall is made at a workshop_table, and there is none on or " in (
+        _returned_text(result)[0]
+    )
+
+
+async def test_build_crafts_a_station_recipe_beside_its_station(
+    world_model: WorldModel, tmp_path: Path
+) -> None:
+    bridge = CraftingBridge(world_model, {"stone": 9, "clay": 9})
+    bridge.objects = [make_object("table_1", "workshop_table", (11, 10))]
+    bridge._observe()
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(model=_build_call("stone_wall")):
+        await agent.run("go", deps=deps)
+    assert bridge.inventory["stone_wall"] == 3
+    assert bridge.briefs
+
+
+async def test_a_build_that_runs_dry_crafts_again_and_gives_up_in_the_end(
+    world_model: WorldModel, tmp_path: Path
+) -> None:
+    bridge = CraftingBridge(world_model, {"wood": 40})
+    # Every stint reports the same empty pack, so the tool refills and retries
+    # until its resupply rounds run out rather than looping forever.
+    bridge.stint_end_reason = "build_out_of_items"
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(model=_build_call("wood_wall")):
+        await agent.run("go", deps=deps)
+    assert len(bridge.briefs) == planner_module.BUILD_RESUPPLY_ROUNDS

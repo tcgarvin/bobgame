@@ -77,7 +77,7 @@ STINT_KIND_ORDINARY = "stint"
 STINT_KIND_REFLEX = "reflex"
 
 
-def _never_ends(model: "WorldModel") -> str:
+def never_ends(model: "WorldModel") -> str:
     """The default extra end rule: no stint ends because of it."""
     return ""
 
@@ -306,7 +306,7 @@ class Stint:
         *,
         trace: AgentTrace,
         driver: StintDriver | None = None,
-        end_check: "Callable[[WorldModel], str]" = _never_ends,
+        end_check: "Callable[[WorldModel], str]" = never_ends,
         kind: str = STINT_KIND_ORDINARY,
         start_fields: Mapping[str, Any] | None = None,
     ) -> None:

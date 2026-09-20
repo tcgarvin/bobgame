@@ -74,7 +74,7 @@ cmd_status() {
     echo "memory_available_mb: $(free -m | awk '/^Mem:/ {print $7}')"
     if [ -s "$run_dir/world/ticks.jsonl.gz" ]; then
         (cd "$ROOT" && python tools/analyze_run.py "$run_dir" 2>&1 \
-            | grep -E "^== world|^deaths|^wolves|^crafts|^placements|^building|^notes")
+            | grep -E "^== world|^deaths|^wolf kills|^wolves|^crafts|^placements|^building|^notes")
         local agents_up
         agents_up=$(pgrep -fc "agents.jev_agent" || true)
         echo "agent_processes: $agents_up"

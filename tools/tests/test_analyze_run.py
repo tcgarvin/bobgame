@@ -268,7 +268,8 @@ def test_world_facts(run_dir: Path) -> None:
     assert world["wolves_spawned"] == 1
     assert world["wolves_despawned"] == {"killed": 1}
     assert world["deaths"] == {"bram": 1}
-    assert world["killers"] == {"wolf_2": 1}
+    # Wolf ids collapse to "wolf": which wolf bit you is never interesting.
+    assert world["killers"] == {"wolf": 1}
     assert world["crafts"] == {"sword": 1}  # the failed craft is not counted
     assert world["placements"] == {"chest": 1}
     assert world["notes_written"] == 1
@@ -1613,3 +1614,124 @@ def test_brief_hails_and_jev_hail_choices_are_counted(tmp_path: Path) -> None:
     assert summary["brief_hails"] == 1
     assert summary["jev_hails"] == 1
     assert summary["actions"]["hail"] == 1
+
+
+# -- settler deaths and wolf kills are different things (2026-09-20) ---------
+
+
+def _update(entity_id: str, entity_type: str, food: int = 50) -> dict:
+    return {
+        "entity_id": entity_id,
+        "entity_type": entity_type,
+        "position": {"x": 0, "y": 0},
+        "food": food,
+        "asleep": False,
+    }
+
+
+def test_a_wolf_dying_is_a_kill_not_a_death(tmp_path: Path) -> None:
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(
+                1,
+                entity_updates=[
+                    _update("esme", "player"),
+                    _update("wolf_1", "wolf"),
+                    _update("wolf_2", "wolf"),
+                ],
+                deaths=[
+                    {"entity_id": "wolf_1", "killer_id": "esme"},
+                    {"entity_id": "wolf_2", "killer_id": "esme"},
+                ],
+            )
+        ],
+    )
+
+    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.deaths == {}
+    assert facts.killers == {}
+    assert facts.wolf_kills == {"esme": 2}
+    assert [m for m in moments if m.kind == "death"] == []
+
+
+def test_a_settler_killed_by_a_wolf_is_counted_under_wolf(tmp_path: Path) -> None:
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(
+                1,
+                entity_updates=[_update("ada", "player"), _update("wolf_9", "wolf")],
+                deaths=[{"entity_id": "ada", "killer_id": "wolf_9"}],
+            )
+        ],
+    )
+
+    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.deaths == {"ada": 1}
+    assert facts.killers == {"wolf": 1}
+    assert facts.wolf_kills == {}
+    assert [m.text for m in moments if m.kind == "death"] == ["ada killed by wolf_9"]
+
+
+def test_an_unattributed_death_is_starvation_only_on_an_empty_stomach(
+    tmp_path: Path,
+) -> None:
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(
+                1,
+                entity_updates=[
+                    _update("ada", "player", food=0),
+                    _update("bram", "player", food=40),
+                ],
+                deaths=[
+                    {"entity_id": "ada", "killer_id": ""},
+                    {"entity_id": "bram", "killer_id": ""},
+                ],
+            )
+        ],
+    )
+
+    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.deaths == {"ada": 1, "bram": 1}
+    assert facts.killers == {"starvation": 1, "unknown": 1}
+    texts = sorted(m.text for m in moments if m.kind == "death")
+    assert texts == ["ada killed by starvation", "bram killed by unknown"]
+
+
+def test_a_wolf_is_recognised_from_its_spawn_record_without_entity_types(
+    tmp_path: Path,
+) -> None:
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(
+                1,
+                entities_spawned=[{"entity_id": "w7", "entity_type": "wolf"}],
+                deaths=[{"entity_id": "w7", "killer_id": "dov"}],
+            )
+        ],
+    )
+
+    facts, _moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.deaths == {}
+    assert facts.wolf_kills == {"dov": 1}
+
+
+def test_the_world_section_separates_deaths_from_wolf_kills(
+    run_dir: Path, capsys
+) -> None:
+    analyze_run.main([str(run_dir)])
+    printed = capsys.readouterr().out
+    assert "deaths: 1 settlers by={'wolf': 1}" in printed
+    assert "wolf kills: 0 by={}" in printed

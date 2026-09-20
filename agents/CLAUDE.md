@@ -428,6 +428,47 @@ refuse the other's kind of object before submitting anything, and
 parameters; `sleep`'s parameter is `bed` (was `bed_object_id`), and the
 planner agent's tool retries rose from 2 to 3 (`PLANNER_TOOL_RETRIES`).
 
+### Hamlet-run fixes (2026-09-20)
+
+Four things the first six-settler run showed, all in `planner.py`:
+
+- **The body on every tool result.** `turn_clock_line` now ends
+  `food F/M, health H/M, fatigue F/M`, and `body_alerts(model)` returns the
+  `!!` lines - physics only, no advice - for food at or below `FOOD_ALERT_AT`
+  (25), food 0 (the starvation rate and what a berry restores, from
+  `items.py`) and fatigue within `FATIGUE_ALERT_MARGIN` (10) of
+  `items.MAX_FATIGUE`. `BudgetedToolset.call_tool` appends them under the
+  threat alert, and `Planner.build_prompt` puts the same lines above the
+  `look`. A dead or sleeping body gets none.
+- **`travel_to` arrives.** `travel_arrival(model, target)` returns `arrived`
+  when standing on the target, `arrived_next_to` when standing beside a target
+  that `is_walkable` refuses, else `""`. The tool checks it before doing
+  anything (returning "no walk needed: ... No tick spent.") and hands it to
+  the stint as an `end_check`, so the walk ends the tick it arrives instead of
+  waiting for two Jev `done` ticks. `Stint` already had `end_check` (the
+  reflex uses it); `never_ends` is now public and `AgentBridge.run_stint` /
+  `JevAgent.run_stint` / `_StintRequest` carry it through.
+- **`eat` with an empty pack.** With no `kind` in the pack it submits nothing
+  (no tick): if a bush on the actor's own tile has a berry it collects and
+  then eats it, reporting both actions; otherwise it lists the nearest known
+  bushes with a berry (`_berry_bush_lines`, in the style of `_pile_lines`).
+- **`build` crafts what it is short of.** `_craft_chain` crafts a kind,
+  crafting missing inputs first to `CRAFT_CHAIN_DEPTH` (2: wood -> plank ->
+  wall), refusing a station recipe unless `WorldModel.station_near` finds the
+  station on or next to the tile, and recording everything in a `CraftTally`.
+  `_run_build` stocks up before the first stint and again on every
+  `BUILD_OUT_OF_ITEMS`, at most `BUILD_CRAFT_LIMIT` (20) pieces and
+  `BUILD_RESUPPLY_ROUNDS` (3) rounds, taking the crafting ticks out of the
+  tool's own `max_ticks`. The result opens with "for this build, crafted ...";
+  a build that still cannot start keeps `missing_pieces_text` plus why the
+  crafting stopped.
+
+`tools/analyze_run.py` was fixed in the same pass: `WorldFacts.deaths` and
+`killers` are settlers only (wolf ids collapsed to `wolf`, an empty killer
+`starvation` only when the tick's `entity_updates` show food 0, else
+`unknown`), and a wolf's death is a kill in `WorldFacts.wolf_kills`, keyed by
+the settler who landed it.
+
 ### The eject question, split in three (docs/05)
 
 Jev is asked `done` ("is the success condition met right now"), `stuck` ("has
