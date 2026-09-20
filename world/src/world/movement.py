@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import structlog
 
 from .state import World
-from .types import DIAGONAL_COMPONENTS, DIRECTION_DELTAS, Direction, Position
+from .types import DIAGONAL_COMPONENTS, Direction, Position
 
 logger = structlog.get_logger()
 

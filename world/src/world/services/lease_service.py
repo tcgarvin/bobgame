@@ -5,6 +5,7 @@ import structlog
 
 from .. import world_pb2 as pb
 from .. import world_pb2_grpc
+from ..exceptions import EntityNotFoundError
 from ..lease import LeaseManager
 from ..state import World
 
@@ -33,7 +34,7 @@ class LeaseServiceServicer(world_pb2_grpc.LeaseServiceServicer):
         # Verify entity exists
         try:
             self.world.get_entity(entity_id)
-        except Exception:
+        except EntityNotFoundError:
             return pb.LeaseResponse(success=False, reason="entity not found")
 
         result = self.lease_manager.acquire(entity_id, controller_id)

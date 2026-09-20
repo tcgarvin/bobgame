@@ -14,7 +14,7 @@ from .events import (
 from .exceptions import EntityNotFoundError
 from .items import attack_damage
 from .sleep import is_tired
-from .state import WOLF_ENTITY_TYPE, Entity, World
+from .state import WOLF_ENTITY_TYPE, World
 from .types import AttackIntent, is_adjacent
 
 logger = structlog.get_logger()
@@ -177,9 +177,3 @@ def process_attack_phase(
             continue
         killer = next(a for a, t, _ in strikes if t == target_id)
         kill_entity(world, target_id, killer, events)
-
-
-def entity_is_alive(world: World, entity_id: str) -> bool:
-    """True when the entity exists and is alive."""
-    entity: Entity | None = world.all_entities().get(entity_id)
-    return entity is not None and entity.alive

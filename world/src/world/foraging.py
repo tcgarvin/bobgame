@@ -1,11 +1,10 @@
 """Foraging action processing (collect, eat, extract, regeneration)."""
 
-from dataclasses import dataclass
 from typing import Mapping
 
 import structlog
 
-from .events import ObjectChange, ObjectRemovedEvent, TickEvents
+from .events import ObjectRemovedEvent, TickEvents, commit_object
 from .exceptions import EntityNotFoundError, ObjectNotFoundError
 from .items import (
     BUILDING_KINDS,
@@ -31,217 +30,97 @@ logger = structlog.get_logger()
 WORKABLE_OBJECT_TYPES = EXTRACTABLE_TYPES | BUILDING_KINDS
 
 
-@dataclass
-class CollectResult:
-    """Result of a collect action.
-
-    Berry bushes have binary state: either has a berry or doesn't.
-    A successful collect always yields exactly 1 berry.
-    """
-
-    entity_id: str
-    success: bool
-    object_id: str | None = None
-    item_type: str | None = None
-    failure_reason: str | None = None
-
-
-@dataclass
-class EatResult:
-    """Result of an eat action."""
-
-    entity_id: str
-    success: bool
-    item_type: str | None = None
-    amount: int = 0
-    failure_reason: str | None = None
-
-
 def process_collect_phase(
     world: World,
-    intents: dict[str, CollectIntent],
-) -> tuple[list[CollectResult], list[ObjectChange]]:
-    """
-    Process collect intents for a tick.
+    intents: Mapping[str, CollectIntent],
+    events: TickEvents,
+) -> None:
+    """Pick the single berry off a bush each collector is standing on.
 
-    Returns:
-        Tuple of (results, object_changes)
+    A bush holds at most one berry, so at most one collector per bush and per
+    tick succeeds; the smallest entity id wins, as everywhere else.
     """
-    results: list[CollectResult] = []
-    object_changes: list[ObjectChange] = []
-
-    # Group intents by target object
-    object_collectors: dict[str, list[CollectIntent]] = {}
+    # Target object per entity, in submission order, so the failures below are
+    # reported before any bush is resolved.
+    object_collectors: dict[str, list[str]] = {}
 
     for entity_id, intent in intents.items():
         try:
             entity = world.get_entity(entity_id)
         except EntityNotFoundError:
-            results.append(
-                CollectResult(
-                    entity_id=entity_id,
-                    success=False,
-                    failure_reason="entity_not_found",
-                )
-            )
+            events.acted(entity_id, "collect", False, "entity_not_found")
             continue
 
-        # Find target object
         if intent.object_id:
             try:
                 obj = world.get_object(intent.object_id)
-                if obj.position != entity.position:
-                    results.append(
-                        CollectResult(
-                            entity_id=entity_id,
-                            success=False,
-                            object_id=intent.object_id,
-                            failure_reason="object_not_at_position",
-                        )
-                    )
-                    continue
-                target_object_id = intent.object_id
             except ObjectNotFoundError:
-                results.append(
-                    CollectResult(
-                        entity_id=entity_id,
-                        success=False,
-                        failure_reason="object_not_found",
-                    )
-                )
+                events.acted(entity_id, "collect", False, "object_not_found")
                 continue
+            if obj.position != entity.position:
+                events.acted(entity_id, "collect", False, "object_not_at_position")
+                continue
+            target_object_id = intent.object_id
         else:
-            # Find any collectible object at position
-            objects = world.get_objects_at(entity.position)
-            bush_objects = [o for o in objects if o.object_type == "bush"]
-            if not bush_objects:
-                results.append(
-                    CollectResult(
-                        entity_id=entity_id,
-                        success=False,
-                        failure_reason="no_collectible_object",
-                    )
-                )
+            bushes = [
+                o
+                for o in world.get_objects_at(entity.position)
+                if o.object_type == "bush"
+            ]
+            if not bushes:
+                events.acted(entity_id, "collect", False, "no_collectible_object")
                 continue
-            target_object_id = bush_objects[0].object_id
+            target_object_id = bushes[0].object_id
 
-        object_collectors.setdefault(target_object_id, []).append(intent)
+        object_collectors.setdefault(target_object_id, []).append(entity_id)
 
-    # Resolve conflicts per object (lexicographic entity_id wins)
-    # With binary berry state, only the first collector (sorted by entity_id) succeeds
     for object_id, collectors in object_collectors.items():
         obj = world.get_object(object_id)
         has_berry = obj.get_state("berry_count", "0") == "1"
 
-        # Sort by entity_id for deterministic winner
-        collectors.sort(key=lambda i: i.entity_id)
-
         berry_taken = False
-        for intent in collectors:
+        for entity_id in sorted(collectors):
             if not has_berry or berry_taken:
-                results.append(
-                    CollectResult(
-                        entity_id=intent.entity_id,
-                        success=False,
-                        object_id=object_id,
-                        failure_reason="no_berries",
-                    )
-                )
+                events.acted(entity_id, "collect", False, "no_berries")
                 continue
 
-            # Collect the single berry
             berry_taken = True
-
-            # Update entity inventory
-            entity = world.get_entity(intent.entity_id)
-            new_inventory = entity.inventory.add("berry", 1)
-            world.set_entity(entity.with_inventory(new_inventory))
-
-            results.append(
-                CollectResult(
-                    entity_id=intent.entity_id,
-                    success=True,
-                    object_id=object_id,
-                    item_type="berry",
-                )
+            entity = world.get_entity(entity_id)
+            world.set_entity(entity.with_inventory(entity.inventory.add("berry", 1)))
+            events.acted(
+                entity_id, "collect", True, f"collected berry from {object_id}"
             )
+            logger.debug("collect_success", entity_id=entity_id, object_id=object_id)
 
-            object_changes.append(
-                ObjectChange(
-                    object_id=object_id,
-                    field="berry_count",
-                    old_value="1",
-                    new_value="0",
-                )
-            )
-
-            logger.debug(
-                "collect_success",
-                entity_id=intent.entity_id,
-                object_id=object_id,
-            )
-
-        # Update object state if berry was taken
         if berry_taken:
-            world.update_object(obj.with_state("berry_count", "0"))
-
-    return results, object_changes
+            commit_object(world, obj, obj.with_state("berry_count", "0"), events)
 
 
 def process_eat_phase(
     world: World,
     intents: Mapping[str, EatIntent],
-) -> list[EatResult]:
-    """Process eat intents for a tick, restoring food."""
-    results: list[EatResult] = []
-
+    events: TickEvents,
+) -> None:
+    """Eat items out of the eater's own pack, restoring food."""
     for entity_id in sorted(intents):
         intent = intents[entity_id]
         try:
             entity = world.get_entity(entity_id)
         except EntityNotFoundError:
-            results.append(
-                EatResult(
-                    entity_id=entity_id,
-                    success=False,
-                    item_type=intent.item_type,
-                    failure_reason="entity_not_found",
-                )
-            )
+            events.acted(entity_id, "eat", False, "entity_not_found")
             continue
 
         if intent.amount < 1:
-            results.append(
-                EatResult(
-                    entity_id=entity_id,
-                    success=False,
-                    item_type=intent.item_type,
-                    failure_reason="invalid_amount",
-                )
-            )
+            events.acted(entity_id, "eat", False, "invalid_amount")
             continue
 
         restored = food_restored(intent.item_type, intent.amount)
         if restored <= 0:
-            results.append(
-                EatResult(
-                    entity_id=entity_id,
-                    success=False,
-                    item_type=intent.item_type,
-                    failure_reason="not_edible",
-                )
-            )
+            events.acted(entity_id, "eat", False, "not_edible")
             continue
 
         if not entity.inventory.has(intent.item_type, intent.amount):
-            results.append(
-                EatResult(
-                    entity_id=entity_id,
-                    success=False,
-                    item_type=intent.item_type,
-                    failure_reason="insufficient_items",
-                )
-            )
+            events.acted(entity_id, "eat", False, "insufficient_items")
             continue
 
         updated = entity.with_inventory(
@@ -254,15 +133,7 @@ def process_eat_phase(
             updated = updated.with_wielded("")
         world.set_entity(updated)
 
-        results.append(
-            EatResult(
-                entity_id=entity_id,
-                success=True,
-                item_type=intent.item_type,
-                amount=intent.amount,
-            )
-        )
-
+        events.acted(entity_id, "eat", True, f"ate {intent.amount} {intent.item_type}")
         logger.debug(
             "eat_success",
             entity_id=entity_id,
@@ -270,8 +141,6 @@ def process_eat_phase(
             amount=intent.amount,
             food=updated.food,
         )
-
-    return results
 
 
 def object_remaining(obj_type: str, raw_remaining: str) -> int:
@@ -403,16 +272,10 @@ def _dismantle_object(
             events.acted(latecomer, "extract", False, f"no object {object_id}")
         return
 
-    updated = obj.with_state("progress", str(progress))
-    world.update_object(updated)
-    events.object_changes.append(
-        ObjectChange(
-            object_id=object_id,
-            field="progress",
-            old_value=old_progress,
-            new_value=updated.get_state("progress"),
-        )
-    )
+    # `obj` may carry no `progress` key at all; spell out the default it reads
+    # as, so an untouched default is not reported as a change.
+    before = obj.with_state("progress", old_progress)
+    commit_object(world, before, obj.with_state("progress", str(progress)), events)
 
 
 def _extract_from_object(
@@ -466,71 +329,36 @@ def _extract_from_object(
         logger.debug("object_depleted", object_id=object_id)
         return
 
-    updated = obj.with_state("progress", str(progress)).with_state(
+    # Spell out the defaults the keys read as, so an untouched default is not
+    # reported as a change (the object may carry neither key).
+    before = obj.with_state("progress", old_progress).with_state(
+        "remaining", old_remaining_raw
+    )
+    after = before.with_state("progress", str(progress)).with_state(
         "remaining", str(remaining)
     )
-    world.update_object(updated)
-    if updated.get_state("progress") != old_progress:
-        events.object_changes.append(
-            ObjectChange(
-                object_id=object_id,
-                field="progress",
-                old_value=old_progress,
-                new_value=updated.get_state("progress"),
-            )
-        )
-    if updated.get_state("remaining") != old_remaining_raw:
-        events.object_changes.append(
-            ObjectChange(
-                object_id=object_id,
-                field="remaining",
-                old_value=old_remaining_raw,
-                new_value=updated.get_state("remaining"),
-            )
-        )
+    commit_object(world, before, after, events)
 
 
 def process_regeneration(
     world: World,
+    events: TickEvents,
     regen_rate: int = 10,
-) -> list[ObjectChange]:
+) -> None:
+    """Grow a berry back on every empty bush, every `regen_rate` ticks.
+
+    A berry bush's state is binary: it has a berry (1) or it does not (0).
     """
-    Process bush regeneration.
-
-    Berry bushes have binary state: either has a berry (1) or doesn't (0).
-    At regeneration ticks, empty bushes grow a new berry.
-
-    Args:
-        world: World state
-        regen_rate: Ticks between regeneration (e.g., 10 = regrow every 10 ticks)
-
-    Returns:
-        List of object changes
-    """
-    changes: list[ObjectChange] = []
-
     if world.tick % regen_rate != 0:
-        return changes
+        return
 
     for obj in list(world.all_objects().values()):
         if obj.object_type != "bush":
             continue
-
-        has_berry = obj.get_state("berry_count", "0") == "1"
-
-        if not has_berry:
-            world.update_object(obj.with_state("berry_count", "1"))
-            changes.append(
-                ObjectChange(
-                    object_id=obj.object_id,
-                    field="berry_count",
-                    old_value="0",
-                    new_value="1",
-                )
-            )
-            logger.debug(
-                "bush_regenerated",
-                object_id=obj.object_id,
-            )
-
-    return changes
+        # Spell out the default, so a bush with no `berry_count` key yet
+        # reports the same change as one storing "0".
+        before = obj.with_state("berry_count", obj.get_state("berry_count", "0"))
+        if before.get_state("berry_count") == "1":
+            continue
+        commit_object(world, before, before.with_state("berry_count", "1"), events)
+        logger.debug("bush_regenerated", object_id=obj.object_id)

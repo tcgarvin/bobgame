@@ -16,6 +16,7 @@ import numpy as np
 import structlog
 from numpy.typing import NDArray
 
+from .terrain_types import DEFAULT_FLOOR_TYPE, FloorType
 from .state import DEFAULT_ENTITY_TYPE, World, WorldObject
 from .types import Position
 
@@ -71,12 +72,12 @@ MIN_LAND_FRACTION = 0.6
 # drowning in trees cannot outscore a balanced one.
 SUPPLY_RATIO_CAP = 2.5
 
-# Floor values as stored in the floor array (mirrors state._FLOOR_VALUE_PROPERTIES).
-FLOOR_DEEP_WATER = 0
-FLOOR_SHALLOW_WATER = 1
-FLOOR_SAND = 2
-FLOOR_GRASS = 3
-FLOOR_DIRT = 4
+# Floor codes as stored in the floor array, from `terrain_types.py`.
+FLOOR_DEEP_WATER = FloorType.DEEP_WATER.code
+FLOOR_SHALLOW_WATER = FloorType.SHALLOW_WATER.code
+FLOOR_SAND = FloorType.SAND.code
+FLOOR_GRASS = FloorType.GRASS.code
+FLOOR_DIRT = FloorType.DIRT.code
 
 SITE_FLOOR_VALUES = (FLOOR_GRASS, FLOOR_DIRT)
 WATER_FLOOR_VALUES = (FLOOR_DEEP_WATER, FLOOR_SHALLOW_WATER)
@@ -88,14 +89,8 @@ ROCK_TYPES = frozenset({"rock_small", "rock_medium", "rock_large", "boulder"})
 # Local to this module: the mechanics track owns the authoritative rules.
 BLOCKING_OBJECT_TYPES = frozenset({"tree"} | ROCK_TYPES)
 
-_FLOOR_TYPE_TO_VALUE: dict[str, int] = {
-    "deep_water": 0,
-    "shallow_water": 1,
-    "sand": 2,
-    "grass": 3,
-    "dirt": 4,
-    "mountain": 5,
-    "stone": 6,
+_FLOOR_TYPE_TO_VALUE: Mapping[str, int] = {
+    floor_type.value: floor_type.code for floor_type in FloorType
 }
 
 # Above this many tiles we refuse to rebuild a floor array tile by tile.
@@ -112,7 +107,7 @@ def floor_array_of(world: World) -> NDArray[np.uint8]:
     Worlds built from terrain generation already carry one; small synthetic
     worlds are rebuilt tile by tile.
     """
-    array = world._floor_array  # noqa: SLF001 - no public accessor exists yet
+    array = world.floor_array
     if array is not None:
         return array
 
@@ -127,7 +122,9 @@ def floor_array_of(world: World) -> NDArray[np.uint8]:
     for y in range(world.height):
         for x in range(world.width):
             tile = world.get_tile(Position(x=x, y=y))
-            rebuilt[y, x] = _FLOOR_TYPE_TO_VALUE.get(tile.floor_type, 6)
+            rebuilt[y, x] = _FLOOR_TYPE_TO_VALUE.get(
+                tile.floor_type, DEFAULT_FLOOR_TYPE.code
+            )
     return rebuilt
 
 

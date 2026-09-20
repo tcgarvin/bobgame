@@ -5,13 +5,17 @@ Also hosts the inventory-versus-world actions that operate on them
 `give`, which moves items straight from one inventory to another.
 """
 
-import json
 from typing import Any, Mapping
 
 import structlog
 
 from .conversations import share_conversation
-from .events import ObjectAddedEvent, ObjectChange, ObjectRemovedEvent, TickEvents
+from .events import (
+    ObjectAddedEvent,
+    ObjectRemovedEvent,
+    TickEvents,
+    commit_object,
+)
 from .exceptions import (
     EntityNotFoundError,
     InvalidObjectStateError,
@@ -32,6 +36,12 @@ from .items import (
     SIGN_TEXT_KEY,
     SIGN_TEXT_MAX,
     SIGN_TICK_KEY,
+)
+from .objstate import (
+    encode_json,
+    read_json_list,
+    read_json_object,
+    with_updates,
 )
 from .state import WOLF_ENTITY_TYPE, World, WorldObject
 from .types import (
@@ -70,19 +80,7 @@ def read_contents(obj: WorldObject) -> dict[str, int]:
     Raises:
         InvalidObjectStateError: If the value is not a JSON object of counts.
     """
-    raw = obj.get_state(CONTENTS_KEY, "")
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise InvalidObjectStateError(
-            f"Object {obj.object_id} has unparsable contents: {exc}"
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise InvalidObjectStateError(
-            f"Object {obj.object_id} contents is not a JSON object"
-        )
+    parsed = read_json_object(obj, CONTENTS_KEY, "a JSON object")
     contents: dict[str, int] = {}
     for kind, count in parsed.items():
         if not isinstance(kind, str) or not isinstance(count, int):
@@ -96,10 +94,7 @@ def read_contents(obj: WorldObject) -> dict[str, int]:
 
 def encode_contents(contents: Mapping[str, int]) -> str:
     """Serialise a {kind: count} mapping to the stored JSON form."""
-    return json.dumps(
-        {k: v for k, v in sorted(contents.items()) if v > 0},
-        separators=(",", ":"),
-    )
+    return encode_json({k: v for k, v in sorted(contents.items()) if v > 0})
 
 
 def with_contents(obj: WorldObject, contents: Mapping[str, int]) -> WorldObject:
@@ -113,17 +108,7 @@ def read_notes(obj: WorldObject) -> list[Note | None]:
     Raises:
         InvalidObjectStateError: If the value is not a JSON list.
     """
-    raw = obj.get_state(NOTES_KEY, "")
-    if not raw:
-        return [None] * BOARD_SLOTS
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise InvalidObjectStateError(
-            f"Object {obj.object_id} has unparsable notes: {exc}"
-        ) from exc
-    if not isinstance(parsed, list):
-        raise InvalidObjectStateError(f"Object {obj.object_id} notes is not a list")
+    parsed = read_json_list(obj, NOTES_KEY, "a list")
     notes: list[Note | None] = [None] * BOARD_SLOTS
     for index, entry in enumerate(parsed[:BOARD_SLOTS]):
         if entry is None:
@@ -138,7 +123,7 @@ def read_notes(obj: WorldObject) -> list[Note | None]:
 
 def encode_notes(notes: list[Note | None]) -> str:
     """Serialise 20 note slots to the stored JSON form."""
-    return json.dumps(notes, separators=(",", ":"))
+    return encode_json(notes)
 
 
 def empty_notes_json() -> str:
@@ -184,20 +169,9 @@ def add_items_to_ground(
         return pile
 
     contents = read_contents(pile)
-    old_value = pile.get_state(CONTENTS_KEY, "")
     for kind, count in additions.items():
         contents[kind] = contents.get(kind, 0) + count
-    updated = with_contents(pile, contents)
-    world.update_object(updated)
-    events.object_changes.append(
-        ObjectChange(
-            object_id=updated.object_id,
-            field=CONTENTS_KEY,
-            old_value=old_value,
-            new_value=updated.get_state(CONTENTS_KEY, ""),
-        )
-    )
-    return updated
+    return commit_object(world, pile, with_contents(pile, contents), events)
 
 
 def _store_contents(
@@ -205,26 +179,19 @@ def _store_contents(
     obj: WorldObject,
     contents: Mapping[str, int],
     events: TickEvents,
-    remove_when_empty: bool,
 ) -> None:
-    """Write contents back to an object, removing an emptied item pile."""
-    old_value = obj.get_state(CONTENTS_KEY, "")
-    if remove_when_empty and not any(v > 0 for v in contents.values()):
+    """Write contents back to an object, removing an emptied item pile.
+
+    An emptied pile is litter and goes; a chest that has been emptied stays
+    standing. That is a fact about the object type, not about the caller.
+    """
+    if obj.object_type == ITEM_PILE and not any(v > 0 for v in contents.values()):
         world.remove_object(obj.object_id)
         events.objects_removed.append(
             ObjectRemovedEvent(object_id=obj.object_id, position=obj.position)
         )
         return
-    updated = with_contents(obj, contents)
-    world.update_object(updated)
-    events.object_changes.append(
-        ObjectChange(
-            object_id=updated.object_id,
-            field=CONTENTS_KEY,
-            old_value=old_value,
-            new_value=updated.get_state(CONTENTS_KEY, ""),
-        )
-    )
+    commit_object(world, obj, with_contents(obj, contents), events)
 
 
 # --- Phases ---------------------------------------------------------------
@@ -250,13 +217,7 @@ def _take_from_container(
     contents[kind] = available - taken
     entity = world.get_entity(entity_id)
     world.set_entity(entity.with_inventory(entity.inventory.add(kind, taken)))
-    _store_contents(
-        world,
-        obj,
-        contents,
-        events,
-        remove_when_empty=obj.object_type == ITEM_PILE,
-    )
+    _store_contents(world, obj, contents, events)
     events.acted(
         entity_id,
         action_type,
@@ -383,7 +344,7 @@ def process_deposit_phase(
 
         contents = read_contents(chest)
         contents[intent.kind] = contents.get(intent.kind, 0) + intent.amount
-        _store_contents(world, chest, contents, events, remove_when_empty=False)
+        _store_contents(world, chest, contents, events)
         events.acted(
             entity_id,
             "deposit",
@@ -608,21 +569,7 @@ def _write_sign(
         updates = {SIGN_TEXT_KEY: "", SIGN_AUTHOR_KEY: "", SIGN_TICK_KEY: ""}
         detail = f"cleared {sign.object_id}"
 
-    updated = sign
-    for key, new_value in updates.items():
-        old_value = updated.get_state(key, "")
-        if old_value == new_value:
-            continue
-        updated = updated.with_state(key, new_value)
-        events.object_changes.append(
-            ObjectChange(
-                object_id=updated.object_id,
-                field=key,
-                old_value=old_value,
-                new_value=new_value,
-            )
-        )
-    world.update_object(updated)
+    commit_object(world, sign, with_updates(sign, updates), events)
     events.acted(entity_id, "write_note", True, detail)
 
 
@@ -675,7 +622,6 @@ def process_write_note_phase(
             continue
 
         notes = read_notes(board)
-        old_value = board.get_state(NOTES_KEY, "")
         if intent.title == "" and intent.text == "":
             notes[intent.slot] = None
             detail = f"cleared slot {intent.slot} on {board.object_id}"
@@ -688,15 +634,8 @@ def process_write_note_phase(
             }
             detail = f"wrote slot {intent.slot} on {board.object_id}"
 
-        updated = board.with_state(NOTES_KEY, encode_notes(notes))
-        world.update_object(updated)
-        events.object_changes.append(
-            ObjectChange(
-                object_id=updated.object_id,
-                field=NOTES_KEY,
-                old_value=old_value,
-                new_value=updated.get_state(NOTES_KEY, ""),
-            )
+        commit_object(
+            world, board, board.with_state(NOTES_KEY, encode_notes(notes)), events
         )
         events.acted(entity_id, "write_note", True, detail)
 

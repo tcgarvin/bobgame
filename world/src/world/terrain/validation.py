@@ -6,7 +6,6 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import ndimage
 
-from ..terrain_types import FloorType
 from .config import TerrainConfig
 from .objects import PlacedObject
 

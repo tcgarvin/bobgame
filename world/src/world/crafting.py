@@ -9,7 +9,7 @@ from typing import Mapping
 
 import structlog
 
-from .events import ObjectChange, TickEvents
+from .events import TickEvents, commit_object
 from .items import (
     ANVIL,
     AXE,
@@ -193,19 +193,8 @@ def _write_progress(
 ) -> None:
     """Store (or clear, when `value` is empty) a settler's progress on a station."""
     key = _progress_key(entity_id)
-    old_value = obj.get_state(key, "")
-    if old_value == value:
-        return
     updated = _without_state(obj, key) if value == "" else obj.with_state(key, value)
-    world.update_object(updated)
-    events.object_changes.append(
-        ObjectChange(
-            object_id=obj.object_id,
-            field=key,
-            old_value=old_value,
-            new_value=value,
-        )
-    )
+    commit_object(world, obj, updated, events)
 
 
 def process_craft_phase(

@@ -2,8 +2,10 @@
 
 Two phases run each tick:
 
-- `process_sleep_phase` turns `SleepIntent` and `WakeIntent` into state changes.
-  It runs after the movement and action phases.
+- `process_wake_phase` then `process_sleep_phase` turn `WakeIntent` and
+  `SleepIntent` into state changes. Both run after the movement and action
+  phases; waking first, so someone who woke this tick cannot lie down within
+  it.
 - `process_fatigue_phase` runs beside the food phase: it accumulates fatigue
   for awake players, recovers it for sleepers, heals bed sleepers, collapses
   the exhausted and wakes sleepers whose reason to sleep has gone.
@@ -110,27 +112,16 @@ def _occupied_beds(world: World) -> set[str]:
 # --- Sleep and wake intents ------------------------------------------------
 
 
-def process_sleep_phase(
-    world: World,
-    sleep_intents: Mapping[str, SleepIntent],
-    wake_intents: Mapping[str, WakeIntent],
-    events: TickEvents,
-) -> None:
-    """Lay sleepers down and wake the ones that asked to get up.
-
-    Wakes are applied first so an entity that woke this tick could in
-    principle lie down again next tick, never within the same one.
-    """
-    _apply_wake_intents(world, wake_intents, events)
-    _apply_sleep_intents(world, sleep_intents, events)
-
-
-def _apply_wake_intents(
+def process_wake_phase(
     world: World,
     intents: Mapping[str, WakeIntent],
     events: TickEvents,
 ) -> None:
     """Wake voluntary sleepers that asked to get up.
+
+    Runs before `process_sleep_phase`, and on the raw intents: the tick's
+    `_living_subset` drops every intent from a sleeper, which is everyone this
+    phase is for.
 
     Missing and dead entities are filtered here rather than by the tick's
     `_living_subset`, which drops every intent from a sleeper. Inside a
@@ -163,7 +154,7 @@ def _apply_wake_intents(
         _wake(world, entity, WAKE_ASKED, events)
 
 
-def _apply_sleep_intents(
+def process_sleep_phase(
     world: World,
     intents: Mapping[str, SleepIntent],
     events: TickEvents,

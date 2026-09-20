@@ -204,7 +204,7 @@ SAY_CHANNELS: frozenset[str] = frozenset(
 # is far enough to call the settlement to a fight; conversation lines carry at
 # `local` range so bystanders can overhear. Used both to filter observations
 # (`services/observation_service.py`) and to tell a speaker who heard them
-# (`tick._process_say_phase`).
+# (`speech.process_say_phase`).
 SAY_RADIUS = 10
 SHOUT_RADIUS = 60
 HEARING_RADIUS_BY_CHANNEL: Mapping[str, int] = {

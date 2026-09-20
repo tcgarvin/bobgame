@@ -32,7 +32,8 @@ from .crafting import RECIPES, Recipe, process_craft_phase
 from .items import ITEM_KINDS, attack_damage
 from .lease import Lease, LeaseManager
 from .movement import MoveClaim, MoveResult, MovementResolver, process_movement_phase
-from .server import WorldServer, run_server
+from .bootstrap import ServerSettings, run_server
+from .server import WorldServer
 from .state import Entity, Tile, World
 from .stats import find_free_tile, process_respawns, process_rest_phase
 from .tick import (
@@ -137,6 +138,7 @@ __all__ = [
     "LeaseManager",
     # Server
     "WorldServer",
+    "ServerSettings",
     "run_server",
     # Conversion
     "direction_to_proto",

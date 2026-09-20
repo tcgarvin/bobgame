@@ -32,6 +32,9 @@ from .chunk_subscriptions import (
     viewport_chunks,
 )
 
+
+# Action types counted in `actions_processed` beside the moves.
+FORAGING = frozenset({"collect", "eat"})
 logger = structlog.get_logger()
 
 
@@ -103,8 +106,10 @@ class ViewerWebSocketService:
         for client in list(self._clients):
             try:
                 await client.close()
-            except Exception:
-                pass
+            except (OSError, websockets.exceptions.WebSocketException) as exc:
+                # A viewer that has already gone is nothing to report at
+                # shutdown, but it is worth seeing in the log.
+                logger.debug("viewer_ws_close_failed", error=str(exc))
         self._clients.clear()
         self._client_states.clear()
 
@@ -308,10 +313,9 @@ class ViewerWebSocketService:
 
         utterances = [utterance_payload(utterance) for utterance in result.utterances]
 
-        total_actions = (
-            len(result.move_results)
-            + len(result.collect_results)
-            + len(result.eat_results)
+        # Moves plus the two foraging actions, as this count has always meant.
+        total_actions = len(result.move_results) + sum(
+            1 for action in result.action_results if action.action_type in FORAGING
         )
 
         event = {

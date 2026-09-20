@@ -4,6 +4,31 @@ Development notes and patterns for the world simulation core.
 
 ## Core Data Model and Movement
 
+### Module Map
+
+- `state/` - `models.py` (the frozen `WorldClock`, `Inventory`, `Tile`,
+  `Entity`, `WorldObject`) and `world.py` (`World`, the one mutable
+  container). `world.state` re-exports every name.
+- `mechanics.py` - **the registry**: one `Mechanic` row per intent, holding the
+  intent model, its `action_type` string, its proto `Intent` oneof field with
+  the function that converts it, and the phase that applies it. `MECHANICS` is
+  declared in phase order and `tick.process_tick` walks it, so
+  `INTENT_ACTION_TYPES`, `intent_from_proto` and the phase order all come from
+  this one table. Adding an intent = one row + one proto field.
+- `events.py` - the per-tick event records, `TickEvents` and `commit_object`,
+  the one way a mechanic changes an existing object's state.
+- `objstate.py` - the typed codec for JSON kept in a `WorldObject.state` key
+  (contents, notes, participants, transcripts).
+- `speech.py` - the `say` mechanic; `conversations.py` owns the only
+  back-and-forth channel.
+- `server.py` (`WorldServer`), `bootstrap.py` (`ServerSettings` + `run_server`,
+  building a world from a config or a save) and `cli.py` (argparse).
+  `python -m world.server` runs `cli.main`.
+- `terrain_types.py` - `FloorType`, **the** source of the numeric floor codes
+  (`FloorType.code`, `FLOOR_TYPE_BY_CODE`). `tests/test_terrain_types.py`
+  parses `viewer/src/terrain/TerrainConfig.ts` and fails on drift.
+- `chunks.py` - the chunk manager and `terrain_chunk(world, cx, cy)`.
+
 ### Data Models: Pydantic Frozen Models
 
 Internal state uses Pydantic v2 with `frozen=True` for immutability:
@@ -118,7 +143,8 @@ services/
 
 ### WorldServer: Central Coordinator
 
-`WorldServer` in `server.py` wires everything together:
+`WorldServer` in `server.py` wires everything together (a run is built from a
+`bootstrap.ServerSettings`, which `cli.py` fills from a config or a save):
 - Creates shared `LeaseManager` and `TickLoop`
 - Registers all service implementations
 - Hooks `on_tick_complete` to broadcast observations
@@ -134,11 +160,12 @@ services/
 
 ### Proto Type Conversion
 
-`conversion.py` provides bidirectional conversion:
+`conversion.py` converts between the internal models and the proto:
 - `direction_to_proto()` / `direction_from_proto()`
 - `position_to_proto()` / `position_from_proto()`
 - `entity_to_proto()` / `entity_from_proto()`
 - `tile_to_proto()` / `tile_from_proto()`
+- `object_to_proto()`, `clock_to_proto()` (one way: nothing reads them back)
 
 **Python keyword handling**: Proto fields named `self` or `from` require special handling:
 ```python
@@ -152,7 +179,10 @@ observation.self.CopyFrom(entity_proto)
 ### Observation Generation
 
 `services/observation_service.py` builds each observer's `Observation` by
-distance, not line of sight: `VIEW_RADIUS` (8) filters visible entities, tiles
+distance, not line of sight. Its `EVENT_KINDS` table has one row per event
+class (source list on the `TickResult`, a visibility predicate, a proto
+builder) and `_build_events` is a loop over it; the table order is the order
+events arrive in. Otherwise: `VIEW_RADIUS` (8) filters visible entities, tiles
 and objects, and every event class (movement, damage, death, respawn, object
 added/changed/removed, utterances, actions) is filtered by the same radius
 against the observer's position. There is no ray casting and no enter/leave
@@ -442,16 +472,18 @@ never tire and never sleep.
 
 Two phases, both in `sleep.py`:
 
-- `process_sleep_phase` (after movement and every action phase) applies
-  `WakeIntent` then `SleepIntent`. One sleeper per bed, smallest entity id
-  wins, as everywhere else.
+- `process_wake_phase` then `process_sleep_phase` (after movement and every
+  action phase; the order is two adjacent rows of `MECHANICS`). One sleeper
+  per bed, smallest entity id wins, as everywhere else. `wake` is the one
+  mechanic with `allowed_while_asleep=True`, which is also what lets a sleeper
+  submit it at all.
 - `process_fatigue_phase` (beside `process_food_phase`) accumulates fatigue
   for the awake, recovers it for sleepers at the bed/ground x night/day rate,
   heals bed sleepers, collapses anyone at max fatigue and wakes sleepers whose
   reason to sleep has gone.
 
-Sleep is a *state*: `TickContext.submit_intent` refuses every intent but
-`wake` from a sleeper with reason `asleep`, and `tick._living_subset` repeats
+Sleep is a *state*: `TickContext.submit_intent` refuses every intent that is
+not `mechanics.sleeper_may_submit` from a sleeper with reason `asleep`, and `tick._living_subset` repeats
 the guard for intents the world injects itself. Waking on damage reads
 `TickEvents.damage_events` in the fatigue phase rather than hooking
 `combat.apply_damage`, which keeps combat unaware of sleep and makes
@@ -515,8 +547,8 @@ count an unused turn as a pass after `CONVERSATION_TURN_TICKS`, and close on a
 full round of passes, the utterance cap, dropping below two after having had
 two, or the lonely timeout.
 
-Every state write goes through `_commit`, which emits one `ObjectChange` per
-changed key, so the existing object machinery carries conversations to agent
+Every state write goes through `events.commit_object`, which emits one
+`ObjectChange` per changed key, so the existing object machinery carries conversations to agent
 observations, the viewer WebSocket, the recorder and the replay server with no
 new code on those paths.
 

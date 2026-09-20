@@ -13,7 +13,7 @@ from world.events import (
     RespawnEvent,
     UtteranceEvent,
 )
-from world.foraging import ObjectChange
+from world.events import ObjectChange
 from world.lease import LeaseManager
 from world.movement import MoveResult
 from world.services.observation_service import (

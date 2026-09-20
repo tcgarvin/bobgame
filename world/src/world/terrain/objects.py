@@ -126,7 +126,7 @@ def _unit_noise(
 
 
 def _floor_mask(floor: NDArray[np.uint8], *types: FloorType) -> NDArray[np.bool_]:
-    return np.isin(floor, [_floor_value(floor_type) for floor_type in types])
+    return np.isin(floor, [floor_type.code for floor_type in types])
 
 
 def _draw(
@@ -579,20 +579,6 @@ def place_objects(
 
     placed = trees + bushes + rocks + reeds + clay + veins
     return fit_ore_to_settlement(fields, outcrop, occupied, placed, rng, seed, config)
-
-
-def _floor_value(floor_type: FloorType) -> int:
-    """Convert FloorType to uint8 value."""
-    mapping = {
-        FloorType.DEEP_WATER: 0,
-        FloorType.SHALLOW_WATER: 1,
-        FloorType.SAND: 2,
-        FloorType.GRASS: 3,
-        FloorType.DIRT: 4,
-        FloorType.MOUNTAIN: 5,
-        FloorType.STONE: 6,
-    }
-    return mapping[floor_type]
 
 
 ORE_TYPES = (ObjectType.COPPER_VEIN, ObjectType.IRON_VEIN)

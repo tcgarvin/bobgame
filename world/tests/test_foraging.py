@@ -3,18 +3,44 @@
 Berry bushes have binary state: either has a berry (1) or doesn't (0).
 """
 
-import pytest
-
+from world.events import TickEvents
 from world.foraging import (
-    CollectResult,
-    EatResult,
-    ObjectChange,
     process_collect_phase,
     process_eat_phase,
     process_regeneration,
 )
 from world.state import Entity, Inventory, World, WorldObject
 from world.types import CollectIntent, EatIntent, Position
+
+
+def _collect(world: World, intents: dict[str, CollectIntent]) -> TickEvents:
+    """Run the collect phase and return everything it recorded."""
+    events = TickEvents()
+    process_collect_phase(world, intents, events)
+    return events
+
+
+def _eat(world: World, intents: dict[str, EatIntent]) -> TickEvents:
+    """Run the eat phase and return everything it recorded."""
+    events = TickEvents()
+    process_eat_phase(world, intents, events)
+    return events
+
+
+def _regenerate(world: World, regen_rate: int = 10) -> TickEvents:
+    """Run bush regeneration and return everything it recorded."""
+    events = TickEvents()
+    process_regeneration(world, events, regen_rate=regen_rate)
+    return events
+
+
+def _bush(object_id: str, position: Position, berry: str) -> WorldObject:
+    return WorldObject(
+        object_id=object_id,
+        position=position,
+        object_type="bush",
+        state=(("berry_count", berry),),
+    )
 
 
 class TestCollectPhase:
@@ -24,157 +50,108 @@ class TestCollectPhase:
         """Entity collects the berry from a bush."""
         world = World(width=10, height=10)
         pos = Position(x=5, y=5)
-
-        entity = Entity(entity_id="bob", position=pos)
-        world.add_entity(entity)
-
-        bush = WorldObject(
-            object_id="bush1",
-            position=pos,
-            object_type="bush",
-            state=(("berry_count", "1"),),
-        )
-        world.add_object(bush)
+        world.add_entity(Entity(entity_id="bob", position=pos))
+        world.add_object(_bush("bush1", pos, "1"))
 
         intents = {
             "bob": CollectIntent(entity_id="bob", object_id="bush1", item_type="berry")
         }
+        events = _collect(world, intents)
 
-        results, object_changes = process_collect_phase(world, intents)
+        assert len(events.action_results) == 1
+        action = events.action_results[0]
+        assert action.entity_id == "bob"
+        assert action.action_type == "collect"
+        assert action.success
+        assert action.details == "collected berry from bush1"
 
-        assert len(results) == 1
-        assert results[0].entity_id == "bob"
-        assert results[0].success
-        assert results[0].item_type == "berry"
+        assert world.get_entity("bob").inventory.count("berry") == 1
 
-        # Check entity inventory was updated in world
-        updated_entity = world.get_entity("bob")
-        assert updated_entity.inventory.count("berry") == 1
-
-        # Check bush is now empty
-        assert len(object_changes) == 1
-        assert object_changes[0].object_id == "bush1"
-        assert object_changes[0].new_value == "0"
+        assert len(events.object_changes) == 1
+        assert events.object_changes[0].object_id == "bush1"
+        assert events.object_changes[0].new_value == "0"
 
     def test_collect_from_empty_bush(self) -> None:
         """Cannot collect from empty bush."""
         world = World(width=10, height=10)
         pos = Position(x=5, y=5)
+        world.add_entity(Entity(entity_id="bob", position=pos))
+        world.add_object(_bush("bush1", pos, "0"))
 
-        entity = Entity(entity_id="bob", position=pos)
-        world.add_entity(entity)
-
-        bush = WorldObject(
-            object_id="bush1",
-            position=pos,
-            object_type="bush",
-            state=(("berry_count", "0"),),
+        events = _collect(
+            world,
+            {
+                "bob": CollectIntent(
+                    entity_id="bob", object_id="bush1", item_type="berry"
+                )
+            },
         )
-        world.add_object(bush)
 
-        intents = {
-            "bob": CollectIntent(entity_id="bob", object_id="bush1", item_type="berry")
-        }
-
-        results, object_changes = process_collect_phase(world, intents)
-
-        assert len(results) == 1
-        assert not results[0].success
-        assert results[0].failure_reason == "no_berries"
-        assert len(object_changes) == 0
+        assert len(events.action_results) == 1
+        assert not events.action_results[0].success
+        assert events.action_results[0].details == "no_berries"
+        assert events.object_changes == []
 
     def test_collect_not_at_bush(self) -> None:
         """Cannot collect if not at the same position as bush."""
         world = World(width=10, height=10)
+        world.add_entity(Entity(entity_id="bob", position=Position(x=1, y=1)))
+        world.add_object(_bush("bush1", Position(x=5, y=5), "1"))
 
-        entity = Entity(entity_id="bob", position=Position(x=1, y=1))
-        world.add_entity(entity)
-
-        bush = WorldObject(
-            object_id="bush1",
-            position=Position(x=5, y=5),
-            object_type="bush",
-            state=(("berry_count", "1"),),
+        events = _collect(
+            world,
+            {
+                "bob": CollectIntent(
+                    entity_id="bob", object_id="bush1", item_type="berry"
+                )
+            },
         )
-        world.add_object(bush)
 
-        intents = {
-            "bob": CollectIntent(entity_id="bob", object_id="bush1", item_type="berry")
-        }
-
-        results, object_changes = process_collect_phase(world, intents)
-
-        assert len(results) == 1
-        assert not results[0].success
-        assert results[0].failure_reason == "object_not_at_position"
+        assert len(events.action_results) == 1
+        assert not events.action_results[0].success
+        assert events.action_results[0].details == "object_not_at_position"
 
     def test_collect_nonexistent_object(self) -> None:
         """Cannot collect from nonexistent object."""
         world = World(width=10, height=10)
+        world.add_entity(Entity(entity_id="bob", position=Position(x=5, y=5)))
 
-        entity = Entity(entity_id="bob", position=Position(x=5, y=5))
-        world.add_entity(entity)
+        events = _collect(
+            world,
+            {
+                "bob": CollectIntent(
+                    entity_id="bob", object_id="nonexistent", item_type="berry"
+                )
+            },
+        )
 
-        intents = {
-            "bob": CollectIntent(
-                entity_id="bob", object_id="nonexistent", item_type="berry"
-            )
-        }
-
-        results, object_changes = process_collect_phase(world, intents)
-
-        assert len(results) == 1
-        assert not results[0].success
-        assert results[0].failure_reason == "object_not_found"
+        assert len(events.action_results) == 1
+        assert not events.action_results[0].success
+        assert events.action_results[0].details == "object_not_found"
 
     def test_collect_multiple_entities_different_bushes(self) -> None:
         """Multiple entities collecting from different bushes simultaneously."""
         world = World(width=10, height=10)
+        world.add_entity(Entity(entity_id="alice", position=Position(x=2, y=2)))
+        world.add_entity(Entity(entity_id="zack", position=Position(x=7, y=7)))
+        world.add_object(_bush("bush1", Position(x=2, y=2), "1"))
+        world.add_object(_bush("bush2", Position(x=7, y=7), "1"))
 
-        # Two entities at different positions with their own bushes
-        entity_a = Entity(entity_id="alice", position=Position(x=2, y=2))
-        entity_z = Entity(entity_id="zack", position=Position(x=7, y=7))
-        world.add_entity(entity_a)
-        world.add_entity(entity_z)
-
-        bush1 = WorldObject(
-            object_id="bush1",
-            position=Position(x=2, y=2),
-            object_type="bush",
-            state=(("berry_count", "1"),),
+        events = _collect(
+            world,
+            {
+                "alice": CollectIntent(
+                    entity_id="alice", object_id="bush1", item_type="berry"
+                ),
+                "zack": CollectIntent(
+                    entity_id="zack", object_id="bush2", item_type="berry"
+                ),
+            },
         )
-        bush2 = WorldObject(
-            object_id="bush2",
-            position=Position(x=7, y=7),
-            object_type="bush",
-            state=(("berry_count", "1"),),
-        )
-        world.add_object(bush1)
-        world.add_object(bush2)
 
-        intents = {
-            "alice": CollectIntent(
-                entity_id="alice", object_id="bush1", item_type="berry"
-            ),
-            "zack": CollectIntent(
-                entity_id="zack", object_id="bush2", item_type="berry"
-            ),
-        }
-
-        results, object_changes = process_collect_phase(world, intents)
-
-        # Both should succeed (different bushes)
-        alice_result = next(r for r in results if r.entity_id == "alice")
-        zack_result = next(r for r in results if r.entity_id == "zack")
-
-        assert alice_result.success
-        assert zack_result.success
-
-        alice_entity = world.get_entity("alice")
-        zack_entity = world.get_entity("zack")
-        assert alice_entity.inventory.count("berry") == 1
-        assert zack_entity.inventory.count("berry") == 1
-
+        assert all(action.success for action in events.action_results)
+        assert world.get_entity("alice").inventory.count("berry") == 1
+        assert world.get_entity("zack").inventory.count("berry") == 1
         assert world.get_object("bush1").get_state("berry_count") == "0"
         assert world.get_object("bush2").get_state("berry_count") == "0"
 
@@ -182,39 +159,26 @@ class TestCollectPhase:
         """Entity trying to collect from bush at different position fails."""
         world = World(width=10, height=10)
         bush_pos = Position(x=5, y=5)
+        world.add_entity(Entity(entity_id="alice", position=bush_pos))
+        world.add_entity(Entity(entity_id="zack", position=Position(x=5, y=6)))
+        world.add_object(_bush("bush1", bush_pos, "1"))
 
-        # Alice at the bush, Zack nearby but not at the bush
-        entity_a = Entity(entity_id="alice", position=bush_pos)
-        entity_z = Entity(entity_id="zack", position=Position(x=5, y=6))
-        world.add_entity(entity_a)
-        world.add_entity(entity_z)
-
-        bush = WorldObject(
-            object_id="bush1",
-            position=bush_pos,
-            object_type="bush",
-            state=(("berry_count", "1"),),
+        events = _collect(
+            world,
+            {
+                "alice": CollectIntent(
+                    entity_id="alice", object_id="bush1", item_type="berry"
+                ),
+                "zack": CollectIntent(
+                    entity_id="zack", object_id="bush1", item_type="berry"
+                ),
+            },
         )
-        world.add_object(bush)
 
-        intents = {
-            "alice": CollectIntent(
-                entity_id="alice", object_id="bush1", item_type="berry"
-            ),
-            "zack": CollectIntent(
-                entity_id="zack", object_id="bush1", item_type="berry"
-            ),
-        }
-
-        results, object_changes = process_collect_phase(world, intents)
-
-        # Alice succeeds (at the bush), Zack fails (not at bush position)
-        alice_result = next(r for r in results if r.entity_id == "alice")
-        zack_result = next(r for r in results if r.entity_id == "zack")
-
-        assert alice_result.success
-        assert not zack_result.success
-        assert zack_result.failure_reason == "object_not_at_position"
+        by_entity = {action.entity_id: action for action in events.action_results}
+        assert by_entity["alice"].success
+        assert not by_entity["zack"].success
+        assert by_entity["zack"].details == "object_not_at_position"
 
         assert world.get_entity("alice").inventory.count("berry") == 1
         assert world.get_entity("zack").inventory.count("berry") == 0
@@ -223,28 +187,17 @@ class TestCollectPhase:
         """Can collect without specifying object_id if bush is at position."""
         world = World(width=10, height=10)
         pos = Position(x=5, y=5)
+        world.add_entity(Entity(entity_id="bob", position=pos))
+        world.add_object(_bush("bush1", pos, "1"))
 
-        entity = Entity(entity_id="bob", position=pos)
-        world.add_entity(entity)
-
-        bush = WorldObject(
-            object_id="bush1",
-            position=pos,
-            object_type="bush",
-            state=(("berry_count", "1"),),
+        events = _collect(
+            world,
+            {"bob": CollectIntent(entity_id="bob", object_id="", item_type="berry")},
         )
-        world.add_object(bush)
 
-        # No object_id specified (empty string)
-        intents = {
-            "bob": CollectIntent(entity_id="bob", object_id="", item_type="berry")
-        }
-
-        results, object_changes = process_collect_phase(world, intents)
-
-        assert len(results) == 1
-        assert results[0].success
-        assert results[0].object_id == "bush1"
+        assert len(events.action_results) == 1
+        assert events.action_results[0].success
+        assert events.action_results[0].details == "collected berry from bush1"
 
 
 class TestEatPhase:
@@ -253,82 +206,77 @@ class TestEatPhase:
     def test_eat_success(self) -> None:
         """Entity eats berries from inventory."""
         world = World(width=10, height=10)
-
-        entity = Entity(
-            entity_id="bob",
-            position=Position(x=5, y=5),
-            inventory=Inventory().add("berry", 5),
+        world.add_entity(
+            Entity(
+                entity_id="bob",
+                position=Position(x=5, y=5),
+                inventory=Inventory().add("berry", 5),
+            )
         )
-        world.add_entity(entity)
 
-        intents = {"bob": EatIntent(entity_id="bob", item_type="berry", amount=2)}
+        events = _eat(
+            world, {"bob": EatIntent(entity_id="bob", item_type="berry", amount=2)}
+        )
 
-        results = process_eat_phase(world, intents)
+        assert len(events.action_results) == 1
+        action = events.action_results[0]
+        assert action.entity_id == "bob"
+        assert action.action_type == "eat"
+        assert action.success
+        assert action.details == "ate 2 berry"
 
-        assert len(results) == 1
-        assert results[0].entity_id == "bob"
-        assert results[0].success
-        assert results[0].amount == 2
-
-        updated_entity = world.get_entity("bob")
-        assert updated_entity.inventory.count("berry") == 3
+        assert world.get_entity("bob").inventory.count("berry") == 3
 
     def test_eat_all_items(self) -> None:
         """Eating all items leaves inventory empty."""
         world = World(width=10, height=10)
-
-        entity = Entity(
-            entity_id="bob",
-            position=Position(x=5, y=5),
-            inventory=Inventory().add("berry", 3),
+        world.add_entity(
+            Entity(
+                entity_id="bob",
+                position=Position(x=5, y=5),
+                inventory=Inventory().add("berry", 3),
+            )
         )
-        world.add_entity(entity)
 
-        intents = {"bob": EatIntent(entity_id="bob", item_type="berry", amount=3)}
+        events = _eat(
+            world, {"bob": EatIntent(entity_id="bob", item_type="berry", amount=3)}
+        )
 
-        results = process_eat_phase(world, intents)
-
-        assert results[0].success
-        updated_entity = world.get_entity("bob")
-        assert updated_entity.inventory.count("berry") == 0
+        assert events.action_results[0].success
+        assert world.get_entity("bob").inventory.count("berry") == 0
 
     def test_eat_insufficient_items(self) -> None:
         """Cannot eat more than you have."""
         world = World(width=10, height=10)
-
-        entity = Entity(
-            entity_id="bob",
-            position=Position(x=5, y=5),
-            inventory=Inventory().add("berry", 2),
+        world.add_entity(
+            Entity(
+                entity_id="bob",
+                position=Position(x=5, y=5),
+                inventory=Inventory().add("berry", 2),
+            )
         )
-        world.add_entity(entity)
 
-        intents = {"bob": EatIntent(entity_id="bob", item_type="berry", amount=5)}
+        events = _eat(
+            world, {"bob": EatIntent(entity_id="bob", item_type="berry", amount=5)}
+        )
 
-        results = process_eat_phase(world, intents)
-
-        assert len(results) == 1
-        assert not results[0].success
-        assert results[0].failure_reason == "insufficient_items"
-
-        # Inventory unchanged
-        entity = world.get_entity("bob")
-        assert entity.inventory.count("berry") == 2
+        assert len(events.action_results) == 1
+        assert not events.action_results[0].success
+        assert events.action_results[0].details == "insufficient_items"
+        assert world.get_entity("bob").inventory.count("berry") == 2
 
     def test_eat_no_items(self) -> None:
         """Cannot eat items you don't have."""
         world = World(width=10, height=10)
+        world.add_entity(Entity(entity_id="bob", position=Position(x=5, y=5)))
 
-        entity = Entity(entity_id="bob", position=Position(x=5, y=5))
-        world.add_entity(entity)
+        events = _eat(
+            world, {"bob": EatIntent(entity_id="bob", item_type="berry", amount=1)}
+        )
 
-        intents = {"bob": EatIntent(entity_id="bob", item_type="berry", amount=1)}
-
-        results = process_eat_phase(world, intents)
-
-        assert len(results) == 1
-        assert not results[0].success
-        assert results[0].failure_reason == "insufficient_items"
+        assert len(events.action_results) == 1
+        assert not events.action_results[0].success
+        assert events.action_results[0].details == "insufficient_items"
 
 
 class TestRegeneration:
@@ -341,117 +289,71 @@ class TestRegeneration:
     def test_regeneration_adds_berry(self) -> None:
         """Empty bushes regenerate a berry."""
         world = World(width=10, height=10, tick=10)
+        world.add_object(_bush("bush1", Position(x=5, y=5), "0"))
 
-        bush = WorldObject(
-            object_id="bush1",
-            position=Position(x=5, y=5),
-            object_type="bush",
-            state=(("berry_count", "0"),),
-        )
-        world.add_object(bush)
+        changes = _regenerate(world).object_changes
 
-        object_changes = process_regeneration(world, regen_rate=10)
-
-        assert len(object_changes) == 1
-        assert object_changes[0].object_id == "bush1"
-        assert object_changes[0].new_value == "1"
+        assert len(changes) == 1
+        assert changes[0].object_id == "bush1"
+        assert changes[0].old_value == "0"
+        assert changes[0].new_value == "1"
 
     def test_regeneration_skips_full_bush(self) -> None:
         """Bushes with a berry don't regenerate."""
         world = World(width=10, height=10, tick=10)
+        world.add_object(_bush("bush1", Position(x=5, y=5), "1"))
 
-        bush = WorldObject(
-            object_id="bush1",
-            position=Position(x=5, y=5),
-            object_type="bush",
-            state=(("berry_count", "1"),),
-        )
-        world.add_object(bush)
-
-        object_changes = process_regeneration(world, regen_rate=10)
-
-        # No changes for bush that already has a berry
-        assert len(object_changes) == 0
+        assert _regenerate(world).object_changes == []
 
     def test_regeneration_skips_non_interval_ticks(self) -> None:
         """Regeneration only happens at interval ticks."""
-        # Test tick 5 - not a multiple of 10, should not regenerate
         world = World(width=10, height=10, tick=5)
-        bush = WorldObject(
-            object_id="bush1",
-            position=Position(x=5, y=5),
-            object_type="bush",
-            state=(("berry_count", "0"),),
-        )
-        world.add_object(bush)
+        world.add_object(_bush("bush1", Position(x=5, y=5), "0"))
 
-        changes = process_regeneration(world, regen_rate=10)
-        assert len(changes) == 0
-
-        # Verify bush unchanged
+        assert _regenerate(world).object_changes == []
         assert world.get_object("bush1").get_state("berry_count") == "0"
 
     def test_regeneration_at_zero(self) -> None:
         """Regeneration happens at tick 0 (0 % N == 0)."""
         world = World(width=10, height=10, tick=0)
-        bush = WorldObject(
-            object_id="bush1",
-            position=Position(x=5, y=5),
-            object_type="bush",
-            state=(("berry_count", "0"),),
-        )
-        world.add_object(bush)
+        world.add_object(_bush("bush1", Position(x=5, y=5), "0"))
 
-        changes = process_regeneration(world, regen_rate=10)
-        assert len(changes) == 1
+        assert len(_regenerate(world).object_changes) == 1
         assert world.get_object("bush1").get_state("berry_count") == "1"
+
+    def test_regeneration_of_a_bush_with_no_berry_key(self) -> None:
+        """A bush that never stored `berry_count` regenerates from "0"."""
+        world = World(width=10, height=10, tick=10)
+        world.add_object(
+            WorldObject(
+                object_id="bush1", position=Position(x=5, y=5), object_type="bush"
+            )
+        )
+
+        changes = _regenerate(world).object_changes
+
+        assert len(changes) == 1
+        assert changes[0].old_value == "0"
+        assert changes[0].new_value == "1"
 
     def test_regeneration_multiple_bushes(self) -> None:
         """Multiple empty bushes regenerate together."""
         world = World(width=10, height=10, tick=10)
+        world.add_object(_bush("bush1", Position(x=1, y=1), "0"))
+        world.add_object(_bush("bush2", Position(x=2, y=2), "0"))
 
-        bush1 = WorldObject(
-            object_id="bush1",
-            position=Position(x=1, y=1),
-            object_type="bush",
-            state=(("berry_count", "0"),),
-        )
-        bush2 = WorldObject(
-            object_id="bush2",
-            position=Position(x=2, y=2),
-            object_type="bush",
-            state=(("berry_count", "0"),),
-        )
-        world.add_object(bush1)
-        world.add_object(bush2)
+        changes = _regenerate(world).object_changes
 
-        object_changes = process_regeneration(world, regen_rate=10)
-
-        assert len(object_changes) == 2
-        ids = {c.object_id for c in object_changes}
-        assert ids == {"bush1", "bush2"}
+        assert len(changes) == 2
+        assert {c.object_id for c in changes} == {"bush1", "bush2"}
 
     def test_regeneration_mixed_bushes(self) -> None:
         """Only empty bushes regenerate when mixed."""
         world = World(width=10, height=10, tick=10)
+        world.add_object(_bush("bush1", Position(x=1, y=1), "0"))
+        world.add_object(_bush("bush2", Position(x=2, y=2), "1"))
 
-        empty_bush = WorldObject(
-            object_id="bush1",
-            position=Position(x=1, y=1),
-            object_type="bush",
-            state=(("berry_count", "0"),),
-        )
-        full_bush = WorldObject(
-            object_id="bush2",
-            position=Position(x=2, y=2),
-            object_type="bush",
-            state=(("berry_count", "1"),),
-        )
-        world.add_object(empty_bush)
-        world.add_object(full_bush)
+        changes = _regenerate(world).object_changes
 
-        object_changes = process_regeneration(world, regen_rate=10)
-
-        # Only the empty bush should regenerate
-        assert len(object_changes) == 1
-        assert object_changes[0].object_id == "bush1"
+        assert len(changes) == 1
+        assert changes[0].object_id == "bush1"

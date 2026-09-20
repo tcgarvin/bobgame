@@ -5,7 +5,6 @@ import pytest
 
 from world.terrain_types import FloorType
 from world.terrain.classification import (
-    _floor_value,
     floor_value_to_type,
     classify_terrain,
 )
@@ -17,19 +16,19 @@ class TestFloorValueConversion:
 
     def test_floor_value_mapping(self) -> None:
         """Each FloorType maps to a unique uint8."""
-        values = [_floor_value(ft) for ft in FloorType]
+        values = [ft.code for ft in FloorType]
         assert len(values) == len(set(values)), "Duplicate values in mapping"
 
     def test_floor_value_range(self) -> None:
         """Floor values are in valid uint8 range."""
         for ft in FloorType:
-            value = _floor_value(ft)
+            value = ft.code
             assert 0 <= value <= 255
 
     def test_round_trip_conversion(self) -> None:
-        """floor_value_to_type inverts _floor_value."""
+        """floor_value_to_type inverts FloorType.code."""
         for ft in FloorType:
-            value = _floor_value(ft)
+            value = ft.code
             recovered = floor_value_to_type(value)
             assert recovered == ft
 
@@ -40,13 +39,13 @@ class TestFloorValueConversion:
 
     def test_specific_values(self) -> None:
         """Check specific known values."""
-        assert _floor_value(FloorType.DEEP_WATER) == 0
-        assert _floor_value(FloorType.SHALLOW_WATER) == 1
-        assert _floor_value(FloorType.SAND) == 2
-        assert _floor_value(FloorType.GRASS) == 3
-        assert _floor_value(FloorType.DIRT) == 4
-        assert _floor_value(FloorType.MOUNTAIN) == 5
-        assert _floor_value(FloorType.STONE) == 6
+        assert FloorType.DEEP_WATER.code == 0
+        assert FloorType.SHALLOW_WATER.code == 1
+        assert FloorType.SAND.code == 2
+        assert FloorType.GRASS.code == 3
+        assert FloorType.DIRT.code == 4
+        assert FloorType.MOUNTAIN.code == 5
+        assert FloorType.STONE.code == 6
 
 
 class TestClassifyTerrain:
@@ -94,8 +93,8 @@ class TestClassifyTerrain:
 
         # Left side is ocean
         ocean_floor = floor[:, :10]
-        deep_water_val = _floor_value(FloorType.DEEP_WATER)
-        shallow_water_val = _floor_value(FloorType.SHALLOW_WATER)
+        deep_water_val = FloorType.DEEP_WATER.code
+        shallow_water_val = FloorType.SHALLOW_WATER.code
 
         # All ocean should be some kind of water
         for y in range(20):
@@ -111,7 +110,7 @@ class TestClassifyTerrain:
         simple_inputs["elevation"][10, 15] = 0.1
         floor = classify_terrain(**simple_inputs)
 
-        deep_water_val = _floor_value(FloorType.DEEP_WATER)
+        deep_water_val = FloorType.DEEP_WATER.code
         assert floor[10, 15] == deep_water_val
 
     def test_ford_is_shallow_water(self, simple_inputs: dict) -> None:
@@ -123,7 +122,7 @@ class TestClassifyTerrain:
         simple_inputs["elevation"][10, 15] = 0.2
         floor = classify_terrain(**simple_inputs)
 
-        shallow_water_val = _floor_value(FloorType.SHALLOW_WATER)
+        shallow_water_val = FloorType.SHALLOW_WATER.code
         assert floor[10, 15] == shallow_water_val
 
     def test_low_moisture_is_dirt(self, simple_inputs: dict) -> None:
@@ -140,7 +139,7 @@ class TestClassifyTerrain:
 
         floor = classify_terrain(**simple_inputs)
 
-        dirt_val = _floor_value(FloorType.DIRT)
+        dirt_val = FloorType.DIRT.code
         # At least some of this area should be dirt
         dirt_count = np.sum(floor[5:10, 15:18] == dirt_val)
         assert dirt_count > 0
@@ -149,6 +148,6 @@ class TestClassifyTerrain:
         """All output values are valid FloorType values."""
         floor = classify_terrain(**simple_inputs)
 
-        valid_values = {_floor_value(ft) for ft in FloorType}
+        valid_values = {ft.code for ft in FloorType}
         unique_values = set(np.unique(floor))
         assert unique_values.issubset(valid_values)

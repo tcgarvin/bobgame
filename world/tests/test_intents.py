@@ -391,7 +391,8 @@ class TestTickPipeline:
         assert any(
             r.action_type == "collect" and r.success for r in result.action_results
         )
-        assert result.collect_results[0].success
+        collects = [a for a in result.action_results if a.action_type == "collect"]
+        assert collects[0].success
 
     @pytest.mark.asyncio
     async def test_run_ticks_still_drives_movement(self) -> None:

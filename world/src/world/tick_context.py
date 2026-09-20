@@ -7,63 +7,23 @@ Lives in its own module so `wolves.py` can submit intents without importing
 
 import time
 from dataclasses import dataclass, field
-from typing import Mapping, TypeVar
+from typing import TypeVar
 
 import structlog
 
+from .mechanics import INTENT_ACTION_TYPES, sleeper_may_submit
 from .state import World
 from .types import (
-    AttackIntent,
     CollectIntent,
-    ConverseIntent,
-    CraftIntent,
-    DepositIntent,
     Direction,
-    DropIntent,
     EatIntent,
     EntityIntent,
-    EquipIntent,
-    ExtractIntent,
-    GiveIntent,
     MoveIntent,
-    PickupIntent,
-    PlaceIntent,
-    RestIntent,
-    SayIntent,
-    SleepIntent,
-    WaitIntent,
-    WakeIntent,
-    WithdrawIntent,
-    WriteNoteIntent,
 )
 
 logger = structlog.get_logger()
 
 T = TypeVar("T", bound=EntityIntent)
-
-# Intent model -> the action_type string used in results and logs.
-INTENT_ACTION_TYPES: Mapping[type[EntityIntent], str] = {
-    MoveIntent: "move",
-    CollectIntent: "collect",
-    EatIntent: "eat",
-    AttackIntent: "attack",
-    ExtractIntent: "extract",
-    PickupIntent: "pickup",
-    WithdrawIntent: "withdraw",
-    DropIntent: "drop",
-    DepositIntent: "deposit",
-    CraftIntent: "craft",
-    EquipIntent: "equip",
-    PlaceIntent: "place",
-    WriteNoteIntent: "write_note",
-    RestIntent: "rest",
-    SayIntent: "say",
-    ConverseIntent: "converse",
-    GiveIntent: "give",
-    SleepIntent: "sleep",
-    WakeIntent: "wake",
-    WaitIntent: "wait",
-}
 
 # Rejection reasons returned by submit_intent().
 REASON_ACCEPTED = ""
@@ -146,7 +106,7 @@ class TickContext:
                 )
                 return False, REASON_DEAD
             # A sleeper only gets to wake up (docs/10_metal_and_sleep.md).
-            if entity is not None and entity.asleep and type(intent) is not WakeIntent:
+            if entity is not None and entity.asleep and not sleeper_may_submit(intent):
                 logger.debug(
                     "intent_rejected_asleep", entity_id=entity_id, tick_id=self.tick_id
                 )

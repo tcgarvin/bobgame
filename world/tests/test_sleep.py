@@ -15,6 +15,7 @@ from world.sleep import (
     is_tired,
     process_fatigue_phase,
     process_sleep_phase,
+    process_wake_phase,
 )
 from world.state import Entity, World, WorldObject, night_start_tick
 from world.stats import RESPAWN_DELAY_TICKS, process_health_regen, process_respawns
@@ -54,7 +55,6 @@ def _sleep(world: World, entity_id: str, object_id: str = "") -> TickEvents:
     process_sleep_phase(
         world,
         {entity_id: SleepIntent(entity_id=entity_id, object_id=object_id)},
-        {},
         events,
     )
     return events
@@ -270,7 +270,6 @@ class TestSleepIntent:
                 "zed": SleepIntent(entity_id="zed", object_id="bed_1"),
                 "ada": SleepIntent(entity_id="ada", object_id="bed_1"),
             },
-            {},
             events,
         )
         assert world.get_entity("ada").sleeping_on == "bed_1"
@@ -424,7 +423,7 @@ class TestWaking:
         world = _world()
         _with_settler(world, fatigue=40, asleep=True)
         events = TickEvents()
-        process_sleep_phase(world, {}, {"bob": WakeIntent(entity_id="bob")}, events)
+        process_wake_phase(world, {"bob": WakeIntent(entity_id="bob")}, events)
         assert world.get_entity("bob").asleep is False
         assert _details(events, "wake") == ["woke up: asked"]
 
@@ -432,7 +431,7 @@ class TestWaking:
         world = _world()
         _with_settler(world)
         events = TickEvents()
-        process_sleep_phase(world, {}, {"bob": WakeIntent(entity_id="bob")}, events)
+        process_wake_phase(world, {"bob": WakeIntent(entity_id="bob")}, events)
         assert _details(events, "wake") == ["not asleep"]
 
 
@@ -496,7 +495,7 @@ class TestCollapse:
         world = _world()
         _with_settler(world, fatigue=100, asleep=True, collapsed=True)
         events = TickEvents()
-        process_sleep_phase(world, {}, {"bob": WakeIntent(entity_id="bob")}, events)
+        process_wake_phase(world, {"bob": WakeIntent(entity_id="bob")}, events)
         assert world.get_entity("bob").asleep is True
         assert _details(events, "wake") == ["collapsed"]
 

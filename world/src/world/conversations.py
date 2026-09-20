@@ -11,19 +11,18 @@ replaced through `World.update_object` and every state change is reported as an
 see it through the machinery they already use.
 """
 
-import json
 from typing import Any, Mapping, Sequence
 
 import structlog
 
 from .events import (
     ObjectAddedEvent,
-    ObjectChange,
     ObjectRemovedEvent,
     TickEvents,
     UtteranceEvent,
+    commit_object,
 )
-from .exceptions import InvalidObjectStateError, ObjectNotFoundError
+from .exceptions import ObjectNotFoundError
 from .items import (
     CONVERSATION,
     CONVERSATION_CHANNEL,
@@ -35,6 +34,7 @@ from .items import (
     CONVERSATION_TURN_TICKS,
     HAIL_COOLDOWN_TICKS,
 )
+from .objstate import encode_json, read_int, read_json_list, with_updates
 from .state import WOLF_ENTITY_TYPE, World, WorldObject
 from .types import (
     CONVERSE_HAIL,
@@ -86,15 +86,7 @@ def read_participants(obj: WorldObject) -> list[str]:
     Raises:
         InvalidObjectStateError: If the stored value is not a JSON list of ids.
     """
-    raw = obj.get_state(PARTICIPANTS_KEY, "")
-    if not raw:
-        return []
-    parsed = _load_json(obj, PARTICIPANTS_KEY, raw)
-    if not isinstance(parsed, list) or not all(isinstance(e, str) for e in parsed):
-        raise InvalidObjectStateError(
-            f"Object {obj.object_id} participants is not a list of entity ids"
-        )
-    return list(parsed)
+    return read_json_list(obj, PARTICIPANTS_KEY, "a list of entity ids", item_type=str)
 
 
 def read_transcript(obj: WorldObject) -> list[TranscriptLine]:
@@ -103,51 +95,7 @@ def read_transcript(obj: WorldObject) -> list[TranscriptLine]:
     Raises:
         InvalidObjectStateError: If the stored value is not a JSON list.
     """
-    raw = obj.get_state(TRANSCRIPT_KEY, "")
-    if not raw:
-        return []
-    parsed = _load_json(obj, TRANSCRIPT_KEY, raw)
-    if not isinstance(parsed, list) or not all(isinstance(e, dict) for e in parsed):
-        raise InvalidObjectStateError(
-            f"Object {obj.object_id} transcript is not a list of lines"
-        )
-    return list(parsed)
-
-
-def read_count(obj: WorldObject, key: str) -> int:
-    """Read an integer state value, defaulting to 0 when unset.
-
-    Raises:
-        InvalidObjectStateError: If the stored value is not an integer.
-    """
-    raw = obj.get_state(key, "")
-    if not raw:
-        return 0
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise InvalidObjectStateError(
-            f"Object {obj.object_id} {key} is not an integer: {raw!r}"
-        ) from exc
-
-
-def _load_json(obj: WorldObject, key: str, raw: str) -> Any:
-    """Parse one JSON state value.
-
-    Raises:
-        InvalidObjectStateError: If the value is not valid JSON.
-    """
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise InvalidObjectStateError(
-            f"Object {obj.object_id} has unparsable {key}: {exc}"
-        ) from exc
-
-
-def _encode(value: Any) -> str:
-    """Compact JSON for a stored list."""
-    return json.dumps(value, separators=(",", ":"))
+    return read_json_list(obj, TRANSCRIPT_KEY, "a list of lines", item_type=dict)
 
 
 def truncate_line(text: str) -> str:
@@ -195,36 +143,6 @@ def share_conversation(world: World, a_id: str, b_id: str) -> bool:
 # --- Writing ---------------------------------------------------------------
 
 
-def _commit(
-    world: World, before: WorldObject, after: WorldObject, events: TickEvents
-) -> WorldObject:
-    """Store `after` and report one ObjectChange per changed state key."""
-    if before.state == after.state:
-        return before
-    world.update_object(after)
-    old_state = dict(before.state)
-    for key, new_value in after.state:
-        old_value = old_state.get(key, "")
-        if old_value != new_value:
-            events.object_changes.append(
-                ObjectChange(
-                    object_id=after.object_id,
-                    field=key,
-                    old_value=old_value,
-                    new_value=new_value,
-                )
-            )
-    return after
-
-
-def _with_updates(obj: WorldObject, updates: Mapping[str, str]) -> WorldObject:
-    """Return a copy of `obj` with several state keys replaced."""
-    updated = obj
-    for key, value in updates.items():
-        updated = updated.with_state(key, value)
-    return updated
-
-
 def _stamp_conversation_end(world: World, entity_ids: Sequence[str]) -> None:
     """Start the hail cooldown for settlers whose seat has just ended."""
     for entity_id in entity_ids:
@@ -262,13 +180,13 @@ def _advance_turn(
 ) -> WorldObject:
     """Hand the turn to the next participant, tracking the pass streak."""
     participants = read_participants(obj)
-    passes = read_count(obj, PASSES_KEY) + 1 if passed else 0
+    passes = read_int(obj, PASSES_KEY) + 1 if passed else 0
     updates = {
         SPEAKER_KEY: _next_speaker(participants, obj.get_state(SPEAKER_KEY, "")),
         TURN_STARTED_KEY: str(world.tick),
         PASSES_KEY: str(passes),
     }
-    return _commit(world, obj, _with_updates(obj, updates), events)
+    return commit_object(world, obj, with_updates(obj, updates), events)
 
 
 # --- Intent handling -------------------------------------------------------
@@ -321,14 +239,14 @@ def _open_conversation(
         position=anchor,
         object_type=CONVERSATION,
         state=(
-            (PARTICIPANTS_KEY, _encode([entity_id])),
+            (PARTICIPANTS_KEY, encode_json([entity_id])),
             (SPEAKER_KEY, ""),
             (TURN_STARTED_KEY, tick),
             (OPENED_TICK_KEY, tick),
             (OPENED_BY_KEY, entity_id),
             (UTTERANCES_KEY, "0"),
             (PASSES_KEY, "0"),
-            (TRANSCRIPT_KEY, _encode([opening])),
+            (TRANSCRIPT_KEY, encode_json([opening])),
         ),
     )
     world.add_object(obj)
@@ -436,7 +354,7 @@ def _hail(world: World, intent: ConverseIntent, events: TickEvents) -> None:
         position=anchor,
         object_type=CONVERSATION,
         state=(
-            (PARTICIPANTS_KEY, _encode([entity_id, target_id])),
+            (PARTICIPANTS_KEY, encode_json([entity_id, target_id])),
             # The hailer has already spoken, so the turn is the target's.
             (SPEAKER_KEY, target_id),
             (TURN_STARTED_KEY, tick),
@@ -444,7 +362,7 @@ def _hail(world: World, intent: ConverseIntent, events: TickEvents) -> None:
             (OPENED_BY_KEY, entity_id),
             (UTTERANCES_KEY, "0"),
             (PASSES_KEY, "0"),
-            (TRANSCRIPT_KEY, _encode([opening])),
+            (TRANSCRIPT_KEY, encode_json([opening])),
         ),
     )
     world.add_object(obj)
@@ -497,13 +415,13 @@ def _join_conversation(
         return
 
     participants.append(entity_id)
-    updates = {PARTICIPANTS_KEY: _encode(participants)}
+    updates = {PARTICIPANTS_KEY: encode_json(participants)}
     # The opener speaks first, from the tick the second participant arrives.
     if len(participants) == 2:
         updates[SPEAKER_KEY] = participants[0]
         updates[TURN_STARTED_KEY] = str(world.tick)
         updates[PASSES_KEY] = "0"
-    _commit(world, obj, _with_updates(obj, updates), events)
+    commit_object(world, obj, with_updates(obj, updates), events)
     events.acted(entity_id, ACTION_TYPE, True, f"join {obj.object_id}")
 
 
@@ -526,10 +444,10 @@ def _speak(world: World, intent: ConverseIntent, events: TickEvents) -> None:
     transcript = read_transcript(obj)
     transcript.append({"tick": world.tick, "speaker": entity_id, "text": text})
     updates = {
-        TRANSCRIPT_KEY: _encode(transcript[-CONVERSATION_TRANSCRIPT_KEPT:]),
-        UTTERANCES_KEY: str(read_count(obj, UTTERANCES_KEY) + 1),
+        TRANSCRIPT_KEY: encode_json(transcript[-CONVERSATION_TRANSCRIPT_KEPT:]),
+        UTTERANCES_KEY: str(read_int(obj, UTTERANCES_KEY) + 1),
     }
-    obj = _commit(world, obj, _with_updates(obj, updates), events)
+    obj = commit_object(world, obj, with_updates(obj, updates), events)
     _advance_turn(world, obj, passed=False, events=events)
 
     events.utterances.append(
@@ -579,7 +497,7 @@ def _remove_participants(
         return obj
 
     _stamp_conversation_end(world, [p for p in participants if p in leaving])
-    updates = {PARTICIPANTS_KEY: _encode(remaining)}
+    updates = {PARTICIPANTS_KEY: encode_json(remaining)}
     speaker = obj.get_state(SPEAKER_KEY, "")
     if speaker in leaving:
         # Hand the turn to the next participant that is still seated.
@@ -588,7 +506,7 @@ def _remove_participants(
             successor = _next_speaker(participants, successor)
         updates[SPEAKER_KEY] = successor if successor in remaining else ""
         updates[TURN_STARTED_KEY] = str(world.tick)
-    return _commit(world, obj, _with_updates(obj, updates), events)
+    return commit_object(world, obj, with_updates(obj, updates), events)
 
 
 # --- Lifecycle -------------------------------------------------------------
@@ -616,12 +534,12 @@ def _closing_reason(world: World, obj: WorldObject) -> str:
         return "empty"
     if had_two and len(participants) < 2:
         return "alone"
-    if read_count(obj, UTTERANCES_KEY) >= CONVERSATION_MAX_UTTERANCES:
+    if read_int(obj, UTTERANCES_KEY) >= CONVERSATION_MAX_UTTERANCES:
         return "utterance_cap"
-    if len(participants) >= 2 and read_count(obj, PASSES_KEY) >= len(participants):
+    if len(participants) >= 2 and read_int(obj, PASSES_KEY) >= len(participants):
         return "all_passed"
     if not had_two:
-        opened = read_count(obj, OPENED_TICK_KEY)
+        opened = read_int(obj, OPENED_TICK_KEY)
         if world.tick - opened >= CONVERSATION_LONELY_TICKS:
             return "nobody_joined"
     return ""
@@ -636,8 +554,7 @@ def _advance_lifecycle(world: World, obj: WorldObject, events: TickEvents) -> No
     timed_out = (
         len(participants) >= 2
         and speaker != ""
-        and world.tick - read_count(current, TURN_STARTED_KEY)
-        >= CONVERSATION_TURN_TICKS
+        and world.tick - read_int(current, TURN_STARTED_KEY) >= CONVERSATION_TURN_TICKS
     )
     if timed_out:
         current = _advance_turn(world, current, passed=True, events=events)
@@ -706,7 +623,6 @@ __all__ = [
     "conversation_at",
     "conversation_of",
     "process_conversation_phase",
-    "read_count",
     "read_participants",
     "read_transcript",
     "share_conversation",

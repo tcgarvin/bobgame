@@ -1,6 +1,7 @@
 """Tests for food, starvation and health regeneration."""
 
 from world.events import TickEvents
+from world.events import TickEvents
 from world.foraging import process_eat_phase
 from world.state import Entity, Inventory, World
 from world.stats import (
@@ -101,18 +102,23 @@ class TestEating:
     def test_berry_restores_food(self) -> None:
         world = _world_with_entity(food=40, inventory=Inventory().add("berry", 2))
 
-        results = process_eat_phase(
-            world, {"bob": EatIntent(entity_id="bob", item_type="berry", amount=1)}
+        events = TickEvents()
+        process_eat_phase(
+            world,
+            {"bob": EatIntent(entity_id="bob", item_type="berry", amount=1)},
+            events,
         )
 
-        assert results[0].success
+        assert events.action_results[0].success
         assert world.get_entity("bob").food == 60
 
     def test_food_capped_at_max(self) -> None:
         world = _world_with_entity(food=95, inventory=Inventory().add("berry", 1))
 
         process_eat_phase(
-            world, {"bob": EatIntent(entity_id="bob", item_type="berry", amount=1)}
+            world,
+            {"bob": EatIntent(entity_id="bob", item_type="berry", amount=1)},
+            TickEvents(),
         )
 
         assert world.get_entity("bob").food == 100
@@ -120,12 +126,15 @@ class TestEating:
     def test_eating_wood_fails(self) -> None:
         world = _world_with_entity(inventory=Inventory().add("wood", 1))
 
-        results = process_eat_phase(
-            world, {"bob": EatIntent(entity_id="bob", item_type="wood", amount=1)}
+        events = TickEvents()
+        process_eat_phase(
+            world,
+            {"bob": EatIntent(entity_id="bob", item_type="wood", amount=1)},
+            events,
         )
 
-        assert not results[0].success
-        assert results[0].failure_reason == "not_edible"
+        assert not events.action_results[0].success
+        assert events.action_results[0].details == "not_edible"
         assert world.get_entity("bob").inventory.count("wood") == 1
 
 

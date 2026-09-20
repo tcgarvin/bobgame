@@ -106,19 +106,6 @@ def clock_to_proto(clock: WorldClock) -> pb.WorldClock:
     )
 
 
-def clock_from_proto(proto_clock: pb.WorldClock) -> WorldClock:
-    """Convert proto WorldClock to the internal WorldClock."""
-    return WorldClock(
-        day=proto_clock.day,
-        tick_of_day=proto_clock.tick_of_day,
-        day_length=proto_clock.day_length,
-        night=proto_clock.night,
-        new_moon_tonight=proto_clock.new_moon_tonight,
-        next_new_moon_day=proto_clock.next_new_moon_day,
-        save_tick=proto_clock.save_tick,
-    )
-
-
 def tile_to_proto(tile: Tile) -> pb.Tile:
     """Convert internal Tile to proto Tile."""
     return pb.Tile(
@@ -146,14 +133,4 @@ def object_to_proto(obj: WorldObject) -> pb.WorldObject:
         position=position_to_proto(obj.position),
         object_type=obj.object_type,
         state=dict(obj.state),
-    )
-
-
-def object_from_proto(proto_obj: pb.WorldObject) -> WorldObject:
-    """Convert proto WorldObject to internal WorldObject."""
-    return WorldObject(
-        object_id=proto_obj.object_id,
-        position=position_from_proto(proto_obj.position),
-        object_type=proto_obj.object_type,
-        state=tuple(proto_obj.state.items()),
     )

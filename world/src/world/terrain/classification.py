@@ -3,7 +3,7 @@
 import numpy as np
 from numpy.typing import NDArray
 
-from ..terrain_types import FloorType
+from ..terrain_types import FLOOR_TYPE_BY_CODE, FloorType
 from .config import ClassificationConfig
 from .noise import smoothstep
 
@@ -42,10 +42,10 @@ def classify_terrain(
         2D array of FloorType enum values as uint8.
     """
     height, width = land_mask.shape
-    floor = np.full((height, width), _floor_value(FloorType.GRASS), dtype=np.uint8)
+    floor = np.full((height, width), FloorType.GRASS.code, dtype=np.uint8)
 
     # Start with all ocean as deep water
-    floor[~land_mask] = _floor_value(FloorType.DEEP_WATER)
+    floor[~land_mask] = FloorType.DEEP_WATER.code
 
     # Shallow water near coast
     shallow = (
@@ -53,20 +53,20 @@ def classify_terrain(
         & (dist_to_land <= config.shallow_water_max_depth)
         & (shallow_noise > config.shallow_water_noise_threshold)
     )
-    floor[shallow] = _floor_value(FloorType.SHALLOW_WATER)
+    floor[shallow] = FloorType.SHALLOW_WATER.code
 
     # Rivers are deep water
-    floor[river_mask] = _floor_value(FloorType.DEEP_WATER)
+    floor[river_mask] = FloorType.DEEP_WATER.code
 
     # Fords are shallow water (walkable)
-    floor[ford_mask] = _floor_value(FloorType.SHALLOW_WATER)
+    floor[ford_mask] = FloorType.SHALLOW_WATER.code
 
     # Beaches: variable width based on noise
     beach_width = np.floor(
         config.beach_max_width * smoothstep(0.2, 0.8, beach_noise)
     ).astype(np.int32)
 
-    floor[land_mask & (dist_to_water <= beach_width)] = _floor_value(FloorType.SAND)
+    floor[land_mask & (dist_to_water <= beach_width)] = FloorType.SAND.code
 
     # Mountains: inland, high elevation or ridged noise
     land_elevations = elevation[land_mask]
@@ -100,44 +100,17 @@ def classify_terrain(
     slope_thresh = 0.1  # Slope threshold for dirt
     dirt = (
         land_mask
-        & (floor == _floor_value(FloorType.GRASS))
+        & (floor == FloorType.GRASS.code)
         & ((moisture < config.moisture_dirt_threshold) | (slope > slope_thresh))
     )
-    floor[dirt] = _floor_value(FloorType.DIRT)
+    floor[dirt] = FloorType.DIRT.code
 
     return floor
 
 
-def _floor_value(floor_type: FloorType) -> int:
-    """Convert FloorType to uint8 value.
-
-    Uses enum index for compact storage.
-    """
-    # Map enum to sequential integers for storage
-    mapping = {
-        FloorType.DEEP_WATER: 0,
-        FloorType.SHALLOW_WATER: 1,
-        FloorType.SAND: 2,
-        FloorType.GRASS: 3,
-        FloorType.DIRT: 4,
-        FloorType.MOUNTAIN: 5,
-        FloorType.STONE: 6,
-    }
-    return mapping[floor_type]
-
-
 def floor_value_to_type(value: int) -> FloorType:
-    """Convert uint8 value back to FloorType."""
-    mapping = {
-        0: FloorType.DEEP_WATER,
-        1: FloorType.SHALLOW_WATER,
-        2: FloorType.SAND,
-        3: FloorType.GRASS,
-        4: FloorType.DIRT,
-        5: FloorType.MOUNTAIN,
-        6: FloorType.STONE,
-    }
-    return mapping.get(value, FloorType.GRASS)
+    """Convert a uint8 floor code back to its FloorType, grass when unknown."""
+    return FLOOR_TYPE_BY_CODE.get(value, FloorType.GRASS)
 
 
 def _apply_mountain_cap(
@@ -167,7 +140,7 @@ def _apply_mountain_cap(
     candidate_count = int(np.sum(mountain_candidate))
 
     if candidate_count <= max_mountains:
-        floor[mountain_candidate] = _floor_value(FloorType.MOUNTAIN)
+        floor[mountain_candidate] = FloorType.MOUNTAIN.code
         return floor
     if max_mountains == 0:
         return floor
@@ -176,7 +149,5 @@ def _apply_mountain_cap(
     cutoff = np.partition(scores, candidate_count - max_mountains)[
         candidate_count - max_mountains
     ]
-    floor[mountain_candidate & (mountain_score >= cutoff)] = _floor_value(
-        FloorType.MOUNTAIN
-    )
+    floor[mountain_candidate & (mountain_score >= cutoff)] = FloorType.MOUNTAIN.code
     return floor

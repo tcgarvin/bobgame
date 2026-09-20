@@ -8,7 +8,6 @@ from numpy.typing import NDArray
 from scipy import ndimage
 
 from ..state import World, WorldObject
-from ..terrain_types import FloorType
 from ..types import Position
 from .classification import classify_terrain
 from .coastal import (

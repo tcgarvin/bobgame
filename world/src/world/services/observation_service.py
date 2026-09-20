@@ -3,7 +3,7 @@
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Iterator
+from typing import Any, Callable, Iterator
 
 import grpc
 import structlog
@@ -17,14 +17,15 @@ from ..conversion import (
     tile_to_proto,
 )
 from ..events import ActionResult
+from ..exceptions import EntityNotFoundError, ObjectNotFoundError
 from ..lease import LeaseManager
 from ..state import World
+from ..movement import MoveResult
 from ..tick import TickContext, TickLoop, TickResult
 from ..types import (
     AUDIBLE_CHANNELS,
     HEARING_RADIUS_BY_CHANNEL,
     SAY_RADIUS,
-    SHOUT_RADIUS,
     Position,
 )
 
@@ -32,16 +33,160 @@ logger = structlog.get_logger()
 
 # View radius in tiles (Chebyshev) for tiles, objects and entities.
 VIEW_RADIUS = 8
-# Earshot for `local` utterances. `HEARING_RADIUS_BY_CHANNEL` and
-# `SHOUT_RADIUS` now live in `types.py`, the single source of truth shared
-# with `tick._process_say_phase` (the hearer list on the speaker's own
-# result); kept here under its old name for anything still importing it.
+# Earshot for `local` utterances. Every channel's radius lives in `types.py`
+# (`HEARING_RADIUS_BY_CHANNEL`), the single source of truth shared with
+# `speech.process_say_phase`; kept here under its old name for anything still
+# importing it.
 HEARING_RADIUS = SAY_RADIUS
 
 
 def _within(a: Position, b: Position, radius: int) -> bool:
     """Chebyshev distance test."""
     return abs(a.x - b.x) <= radius and abs(a.y - b.y) <= radius
+
+
+def _position_proto(position: Position) -> pb.Position:
+    """The proto form of one world position."""
+    return pb.Position(x=position.x, y=position.y)
+
+
+def _moved_proto(move: MoveResult) -> pb.ObservationEvent:
+    moved = pb.EntityMoved(entity_id=move.entity_id, to=_position_proto(move.to_pos))
+    # `from` is a Python keyword, so it cannot be a kwarg.
+    getattr(moved, "from").CopyFrom(_position_proto(move.from_pos))
+    return pb.ObservationEvent(entity_moved=moved)
+
+
+@dataclass(frozen=True)
+class EventKind:
+    """One event list on a `TickResult`, and how it reaches an observer.
+
+    `visible` decides whether this observer perceives the event; `build` turns
+    it into the proto the observation carries. Adding an event class means
+    adding one row to `EVENT_KINDS`, nothing else.
+    """
+
+    source: str
+    visible: Callable[["ObservationServiceServicer", Any, str, Position], bool]
+    build: Callable[[Any], pb.ObservationEvent]
+
+
+# Every event class an observation carries, in the order it is reported.
+EVENT_KINDS: tuple[EventKind, ...] = (
+    EventKind(
+        source="move_results",
+        visible=lambda service, move, entity_id, centre: move.success
+        and (
+            move.entity_id == entity_id
+            or _within(move.to_pos, centre, VIEW_RADIUS)
+            or _within(move.from_pos, centre, VIEW_RADIUS)
+        ),
+        build=_moved_proto,
+    ),
+    EventKind(
+        source="action_results",
+        visible=lambda service, action, entity_id, centre: action.entity_id == entity_id
+        or service.actor_in_view(action, centre),
+        build=lambda action: pb.ObservationEvent(
+            entity_acted=pb.EntityActed(
+                entity_id=action.entity_id,
+                action_type=action.action_type,
+                success=action.success,
+                details=action.details,
+            )
+        ),
+    ),
+    EventKind(
+        # `thought` is not audible, so it never reaches another agent.
+        source="utterances",
+        visible=lambda service, utterance, entity_id, centre: utterance.channel
+        in AUDIBLE_CHANNELS
+        and _within(
+            utterance.position, centre, HEARING_RADIUS_BY_CHANNEL[utterance.channel]
+        ),
+        build=lambda utterance: pb.ObservationEvent(
+            utterance=pb.Utterance(
+                speaker_id=utterance.speaker_id,
+                channel=utterance.channel,
+                text=utterance.text,
+                position=_position_proto(utterance.position),
+                conversation_id=utterance.conversation_id,
+            )
+        ),
+    ),
+    EventKind(
+        source="damage_events",
+        visible=lambda service, damage, entity_id, centre: damage.entity_id == entity_id
+        or _within(damage.position, centre, VIEW_RADIUS),
+        build=lambda damage: pb.ObservationEvent(
+            entity_damaged=pb.EntityDamaged(
+                entity_id=damage.entity_id,
+                attacker_id=damage.attacker_id,
+                amount=damage.amount,
+                remaining_health=damage.remaining_health,
+            )
+        ),
+    ),
+    EventKind(
+        source="deaths",
+        visible=lambda service, death, entity_id, centre: death.entity_id == entity_id
+        or _within(death.position, centre, VIEW_RADIUS),
+        build=lambda death: pb.ObservationEvent(
+            entity_died=pb.EntityDied(
+                entity_id=death.entity_id,
+                killer_id=death.killer_id,
+                position=_position_proto(death.position),
+            )
+        ),
+    ),
+    EventKind(
+        source="respawns",
+        visible=lambda service, respawn, entity_id, centre: respawn.entity_id
+        == entity_id
+        or _within(respawn.position, centre, VIEW_RADIUS),
+        build=lambda respawn: pb.ObservationEvent(
+            entity_respawned=pb.EntityRespawned(
+                entity_id=respawn.entity_id,
+                position=_position_proto(respawn.position),
+            )
+        ),
+    ),
+    EventKind(
+        source="objects_added",
+        visible=lambda service, added, entity_id, centre: _within(
+            added.obj.position, centre, VIEW_RADIUS
+        ),
+        build=lambda added: pb.ObservationEvent(
+            object_added=pb.ObjectAdded(object=object_to_proto(added.obj))
+        ),
+    ),
+    EventKind(
+        source="objects_removed",
+        visible=lambda service, removed, entity_id, centre: _within(
+            removed.position, centre, VIEW_RADIUS
+        ),
+        build=lambda removed: pb.ObservationEvent(
+            object_removed=pb.ObjectRemoved(
+                object_id=removed.object_id,
+                position=_position_proto(removed.position),
+            )
+        ),
+    ),
+    EventKind(
+        source="object_changes",
+        visible=lambda service, change, entity_id, centre: service.object_in_view(
+            change.object_id, centre
+        ),
+        build=lambda change: pb.ObservationEvent(
+            object_changed=pb.ObjectChanged(
+                object_id=change.object_id,
+                field=change.field,
+                old_value=change.old_value,
+                new_value=change.new_value,
+            )
+        ),
+    ),
+)
 
 
 @dataclass
@@ -156,7 +301,7 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
         """
         try:
             entity = self.world.get_entity(entity_id)
-        except Exception:
+        except EntityNotFoundError:
             return None
 
         centre = entity.position
@@ -195,162 +340,35 @@ class ObservationServiceServicer(world_pb2_grpc.ObservationServiceServicer):
     def _build_events(
         self, entity_id: str, centre: Position
     ) -> list[pb.ObservationEvent]:
-        """Build the previous tick's events this entity could perceive."""
+        """Build the previous tick's events this entity could perceive.
+
+        One pass per entry of `EVENT_KINDS`; the order of that table is the
+        order the events arrive in.
+        """
         result = self._last_result
         if result is None:
             return []
 
         events: list[pb.ObservationEvent] = []
-
-        for move in result.move_results:
-            if not move.success:
-                continue
-            visible = (
-                move.entity_id == entity_id
-                or _within(move.to_pos, centre, VIEW_RADIUS)
-                or _within(move.from_pos, centre, VIEW_RADIUS)
-            )
-            if visible:
-                moved = pb.EntityMoved(
-                    entity_id=move.entity_id,
-                    to=pb.Position(x=move.to_pos.x, y=move.to_pos.y),
-                )
-                # `from` is a Python keyword, so it cannot be a kwarg.
-                getattr(moved, "from").CopyFrom(
-                    pb.Position(x=move.from_pos.x, y=move.from_pos.y)
-                )
-                events.append(pb.ObservationEvent(entity_moved=moved))
-
-        for action in result.action_results:
-            if action.entity_id == entity_id or self._actor_in_view(action, centre):
-                events.append(
-                    pb.ObservationEvent(
-                        entity_acted=pb.EntityActed(
-                            entity_id=action.entity_id,
-                            action_type=action.action_type,
-                            success=action.success,
-                            details=action.details,
-                        )
-                    )
-                )
-
-        for utterance in result.utterances:
-            # `thought` never reaches another agent's observation.
-            if utterance.channel not in AUDIBLE_CHANNELS:
-                continue
-            earshot = HEARING_RADIUS_BY_CHANNEL[utterance.channel]
-            if not _within(utterance.position, centre, earshot):
-                continue
-            events.append(
-                pb.ObservationEvent(
-                    utterance=pb.Utterance(
-                        speaker_id=utterance.speaker_id,
-                        channel=utterance.channel,
-                        text=utterance.text,
-                        position=pb.Position(
-                            x=utterance.position.x, y=utterance.position.y
-                        ),
-                        conversation_id=utterance.conversation_id,
-                    )
-                )
-            )
-
-        for damage in result.damage_events:
-            if damage.entity_id == entity_id or _within(
-                damage.position, centre, VIEW_RADIUS
-            ):
-                events.append(
-                    pb.ObservationEvent(
-                        entity_damaged=pb.EntityDamaged(
-                            entity_id=damage.entity_id,
-                            attacker_id=damage.attacker_id,
-                            amount=damage.amount,
-                            remaining_health=damage.remaining_health,
-                        )
-                    )
-                )
-
-        for death in result.deaths:
-            if death.entity_id == entity_id or _within(
-                death.position, centre, VIEW_RADIUS
-            ):
-                events.append(
-                    pb.ObservationEvent(
-                        entity_died=pb.EntityDied(
-                            entity_id=death.entity_id,
-                            killer_id=death.killer_id,
-                            position=pb.Position(
-                                x=death.position.x, y=death.position.y
-                            ),
-                        )
-                    )
-                )
-
-        for respawn in result.respawns:
-            if respawn.entity_id == entity_id or _within(
-                respawn.position, centre, VIEW_RADIUS
-            ):
-                events.append(
-                    pb.ObservationEvent(
-                        entity_respawned=pb.EntityRespawned(
-                            entity_id=respawn.entity_id,
-                            position=pb.Position(
-                                x=respawn.position.x, y=respawn.position.y
-                            ),
-                        )
-                    )
-                )
-
-        for added in result.objects_added:
-            if _within(added.obj.position, centre, VIEW_RADIUS):
-                events.append(
-                    pb.ObservationEvent(
-                        object_added=pb.ObjectAdded(object=object_to_proto(added.obj))
-                    )
-                )
-
-        for removed in result.objects_removed:
-            if _within(removed.position, centre, VIEW_RADIUS):
-                events.append(
-                    pb.ObservationEvent(
-                        object_removed=pb.ObjectRemoved(
-                            object_id=removed.object_id,
-                            position=pb.Position(
-                                x=removed.position.x, y=removed.position.y
-                            ),
-                        )
-                    )
-                )
-
-        for change in result.object_changes:
-            if not self._object_in_view(change.object_id, centre):
-                continue
-            events.append(
-                pb.ObservationEvent(
-                    object_changed=pb.ObjectChanged(
-                        object_id=change.object_id,
-                        field=change.field,
-                        old_value=change.old_value,
-                        new_value=change.new_value,
-                    )
-                )
-            )
-
+        for kind in EVENT_KINDS:
+            for event in getattr(result, kind.source):
+                if kind.visible(self, event, entity_id, centre):
+                    events.append(kind.build(event))
         return events
 
-    def _actor_in_view(self, action: ActionResult, centre: Position) -> bool:
+    def actor_in_view(self, action: ActionResult, centre: Position) -> bool:
         """Whether the acting entity is currently within view of centre."""
         try:
             actor = self.world.get_entity(action.entity_id)
-        except Exception:
+        except EntityNotFoundError:
             return False
         return _within(actor.position, centre, VIEW_RADIUS)
 
-    def _object_in_view(self, object_id: str, centre: Position) -> bool:
+    def object_in_view(self, object_id: str, centre: Position) -> bool:
         """Whether an object is still present and within view of centre."""
         try:
             obj = self.world.get_object(object_id)
-        except Exception:
+        except ObjectNotFoundError:
             return False
         return _within(obj.position, centre, VIEW_RADIUS)
 

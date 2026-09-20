@@ -10,6 +10,7 @@ from world.chunks import (
     chunk_coords,
     local_coords,
     world_coords,
+    terrain_chunk,
 )
 from world.state import Entity, World, WorldObject
 from world.types import Position
@@ -255,7 +256,7 @@ class TestChunkManager:
 
 
 class TestTerrainChunkExtraction:
-    """Tests for World.get_terrain_chunk()."""
+    """Tests for chunks.terrain_chunk()."""
 
     def test_get_terrain_chunk_with_floor_array(self) -> None:
         """Terrain is extracted from floor array."""
@@ -265,11 +266,11 @@ class TestTerrainChunkExtraction:
         floor[0:32, 32:64] = 4  # Dirt in second chunk
         world.set_floor_array(floor)
 
-        chunk_0_0 = world.get_terrain_chunk(0, 0)
+        chunk_0_0 = terrain_chunk(world, 0, 0)
         assert chunk_0_0.shape == (32, 32)
         assert np.all(chunk_0_0 == 3)
 
-        chunk_1_0 = world.get_terrain_chunk(1, 0)
+        chunk_1_0 = terrain_chunk(world, 1, 0)
         assert np.all(chunk_1_0 == 4)
 
     def test_get_terrain_chunk_partial_world(self) -> None:
@@ -280,7 +281,7 @@ class TestTerrainChunkExtraction:
 
         # Chunk (1,1) starts at (32,32) and extends to (63,63)
         # But world only goes to (49,49), so partial
-        chunk = world.get_terrain_chunk(1, 1)
+        chunk = terrain_chunk(world, 1, 1)
 
         # Valid area (0:18, 0:18) should be grass
         assert np.all(chunk[0:18, 0:18] == 3)
@@ -293,7 +294,7 @@ class TestTerrainChunkExtraction:
         """Without floor array, returns default stone."""
         world = World(width=64, height=64)
 
-        chunk = world.get_terrain_chunk(0, 0)
+        chunk = terrain_chunk(world, 0, 0)
         assert np.all(chunk == 6)  # Default stone
 
     def test_get_terrain_chunk_with_sparse_overrides(self) -> None:
@@ -307,7 +308,7 @@ class TestTerrainChunkExtraction:
         # Override a tile
         world.set_tile(Tile(position=Position(x=10, y=10), floor_type="mountain"))
 
-        chunk = world.get_terrain_chunk(0, 0)
+        chunk = terrain_chunk(world, 0, 0)
 
         # Most tiles are grass
         assert chunk[0, 0] == 3

@@ -6,7 +6,7 @@ records, never persisted or validated at a boundary.
 
 from dataclasses import dataclass, field
 
-from .state import WorldObject
+from .state import World, WorldObject
 from .types import Position
 
 
@@ -118,3 +118,43 @@ class TickEvents:
                 details=details,
             )
         )
+
+
+def commit_object(
+    world: World, before: WorldObject, after: WorldObject, events: TickEvents
+) -> WorldObject:
+    """Store `after` in the world and report one `ObjectChange` per changed key.
+
+    This is the one way a mechanic changes an existing object's state: it keeps
+    the world and the event stream (agent observations, the viewer, the
+    recorder, the replay server) in step without any mechanic hand-rolling an
+    `ObjectChange`. A key that `after` no longer carries is reported as a change
+    to the empty string. Returns `before` unchanged when nothing differs.
+    """
+    if before.state == after.state:
+        return before
+    world.update_object(after)
+    old_state = dict(before.state)
+    new_state = dict(after.state)
+    for key, new_value in after.state:
+        old_value = old_state.get(key, "")
+        if old_value != new_value:
+            events.object_changes.append(
+                ObjectChange(
+                    object_id=after.object_id,
+                    field=key,
+                    old_value=old_value,
+                    new_value=new_value,
+                )
+            )
+    for key, old_value in before.state:
+        if key not in new_state and old_value != "":
+            events.object_changes.append(
+                ObjectChange(
+                    object_id=after.object_id,
+                    field=key,
+                    old_value=old_value,
+                    new_value="",
+                )
+            )
+    return after

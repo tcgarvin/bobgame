@@ -112,7 +112,6 @@ def fbm_noise_vectorized(
     Returns:
         2D array of noise values, roughly in range [-1, 1].
     """
-    rng = np.random.default_rng(seed)
     result = np.zeros((height, width), dtype=np.float32)
 
     wavelength = base_wavelength

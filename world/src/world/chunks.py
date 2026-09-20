@@ -6,7 +6,46 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .state import World
+from .terrain_types import DEFAULT_FLOOR_TYPE, FloorType
 from .types import Position
+
+# Floor type name -> the code stored in a floor array, for the sparse tile
+# overrides, which keep their floor type as a string.
+_FLOOR_TYPE_TO_CODE = {floor_type.value: floor_type.code for floor_type in FloorType}
+
+
+def terrain_chunk(
+    world: World, chunk_x: int, chunk_y: int, chunk_size: int = 32
+) -> NDArray[np.uint8]:
+    """The floor codes of one chunk, as a `chunk_size` x `chunk_size` array.
+
+    Anything outside the world reads as the default floor; sparse tile
+    overrides are applied on top of the world's bulk floor array.
+    """
+    x_start = chunk_x * chunk_size
+    y_start = chunk_y * chunk_size
+    default_code = DEFAULT_FLOOR_TYPE.code
+    chunk = np.full((chunk_size, chunk_size), default_code, dtype=np.uint8)
+
+    floor_array = world.floor_array
+    if floor_array is not None and x_start < world.width and y_start < world.height:
+        x_end = min(x_start + chunk_size, world.width)
+        y_end = min(y_start + chunk_size, world.height)
+        valid_w = max(0, x_end - x_start)
+        valid_h = max(0, y_end - y_start)
+        if valid_w > 0 and valid_h > 0:
+            chunk[:valid_h, :valid_w] = floor_array[y_start:y_end, x_start:x_end]
+
+    for position, tile in world.tile_overrides().items():
+        local_x = position.x - x_start
+        local_y = position.y - y_start
+        if 0 <= local_x < chunk_size and 0 <= local_y < chunk_size:
+            chunk[local_y, local_x] = _FLOOR_TYPE_TO_CODE.get(
+                tile.floor_type, default_code
+            )
+
+    return chunk
+
 
 CHUNK_SIZE = 32
 
@@ -90,7 +129,7 @@ class ChunkManager:
         """Get existing chunk or create a new one with terrain data."""
         key = (chunk_x, chunk_y)
         if key not in self._chunks:
-            terrain = self.world.get_terrain_chunk(chunk_x, chunk_y)
+            terrain = terrain_chunk(self.world, chunk_x, chunk_y)
             self._chunks[key] = Chunk(
                 chunk_x=chunk_x,
                 chunk_y=chunk_y,
