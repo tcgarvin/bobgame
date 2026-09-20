@@ -3,7 +3,7 @@
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Iterator, Mapping
+from typing import Iterator
 
 import grpc
 import structlog
@@ -20,24 +20,23 @@ from ..events import ActionResult
 from ..lease import LeaseManager
 from ..state import Entity, World
 from ..tick import TickContext, TickLoop, TickResult
-from ..items import CONVERSATION_CHANNEL
-from ..types import AUDIBLE_CHANNELS, LOCAL_CHANNEL, SHOUT_CHANNEL, Position
+from ..types import (
+    AUDIBLE_CHANNELS,
+    HEARING_RADIUS_BY_CHANNEL,
+    SAY_RADIUS,
+    SHOUT_RADIUS,
+    Position,
+)
 
 logger = structlog.get_logger()
 
 # View radius in tiles (Chebyshev) for tiles, objects and entities.
 VIEW_RADIUS = 8
-# Earshot for `local` utterances.
-HEARING_RADIUS = 10
-# Earshot for `shout` utterances: far enough to call the settlement to a fight,
-# which is the point of shouting.
-SHOUT_RADIUS = 60
-HEARING_RADIUS_BY_CHANNEL: Mapping[str, int] = {
-    LOCAL_CHANNEL: HEARING_RADIUS,
-    SHOUT_CHANNEL: SHOUT_RADIUS,
-    # Conversation lines carry at local range, so bystanders can listen in.
-    CONVERSATION_CHANNEL: HEARING_RADIUS,
-}
+# Earshot for `local` utterances. `HEARING_RADIUS_BY_CHANNEL` and
+# `SHOUT_RADIUS` now live in `types.py`, the single source of truth shared
+# with `tick._process_say_phase` (the hearer list on the speaker's own
+# result); kept here under its old name for anything still importing it.
+HEARING_RADIUS = SAY_RADIUS
 
 
 def _within(a: Position, b: Position, radius: int) -> bool:

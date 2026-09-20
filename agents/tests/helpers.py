@@ -267,7 +267,10 @@ class FakeConverser:
 
     script: list[ConverserMove] = field(default_factory=list)
     default_action: str = "pass"
+    # `note_text` is the "agreed or learned" field; `note_commitment` is the
+    # "you said you would" field (docs/09 section 10, item 5).
     note_text: str = ""
+    note_commitment: str = ""
     prompts: list[str] = field(default_factory=list)
     note_prompts: list[str] = field(default_factory=list)
     usage: dict[str, object] = field(default_factory=dict)
@@ -280,9 +283,9 @@ class FakeConverser:
         return MoveCall(ConverserMove(action=self.default_action), self.usage)
 
     async def note(self, prompt: str) -> NoteCall:
-        """Return the fixed note text."""
+        """Return the fixed closing note fields."""
         self.note_prompts.append(prompt)
-        return NoteCall(self.note_text, self.usage)
+        return NoteCall(self.note_text, self.note_commitment, self.usage)
 
 
 def died_event(entity_id: str, killer_id: str = "") -> pb.ObservationEvent:

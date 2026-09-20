@@ -73,7 +73,7 @@ def observe(
 
 
 def session_for(
-    model: WorldModel, converser: Converser, tmp_path: Path
+    model: WorldModel, converser: Converser, tmp_path: Path, purpose: str = ""
 ) -> ConversationSession:
     """A session on `conv_1` writing its trace and notes under `tmp_path`."""
     session = ConversationSession(
@@ -82,18 +82,30 @@ def session_for(
         converser,
         trace=AgentTrace("ada", tmp_path),
         memory_path=tmp_path / "memory.md",
+        purpose=purpose,
     )
     session.begin()
     return session
 
 
-def trace_turns(session: ConversationSession, tmp_path: Path) -> list[dict]:
-    """Every `turn` line the session wrote, oldest first."""
+def trace_rows(session: ConversationSession, tmp_path: Path) -> list[dict]:
+    """Every line the session's trace wrote, oldest first."""
     session.trace.close()
     path = tmp_path / "agent-ada" / "conversations.jsonl.gz"
     with gzip.open(path, "rt", encoding="utf-8") as handle:
-        rows = [json.loads(line) for line in handle if line.strip()]
-    return [row for row in rows if row["event"] == "turn"]
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+def trace_turns(session: ConversationSession, tmp_path: Path) -> list[dict]:
+    """Every `turn` line the session wrote, oldest first."""
+    return [row for row in trace_rows(session, tmp_path) if row["event"] == "turn"]
+
+
+def trace_events(
+    session: ConversationSession, tmp_path: Path, event: str
+) -> list[dict]:
+    """Every line of `event` the session's trace wrote, oldest first."""
+    return [row for row in trace_rows(session, tmp_path) if row["event"] == event]
 
 
 class FailingConverser:
@@ -238,6 +250,24 @@ def test_the_inviters_side_of_an_accept_reads_as_an_ordinary_join() -> None:
     )
 
     assert joined_conversation(digest) == ("conv_7", "join")  # type: ignore[arg-type]
+
+
+def test_a_hail_is_recognised_as_taking_a_seat() -> None:
+    model = WorldModel("ada")
+    digest = observe(
+        model, 2, events=[acted_event("ada", "converse", True, "hail conv_7 mira")]
+    )
+
+    assert joined_conversation(digest) == ("conv_7", "hail")  # type: ignore[arg-type]
+
+
+def test_being_hailed_is_recognised_as_taking_a_seat() -> None:
+    model = WorldModel("ada")
+    digest = observe(
+        model, 2, events=[acted_event("ada", "converse", True, "hailed conv_7 ivo")]
+    )
+
+    assert joined_conversation(digest) == ("conv_7", "hailed")  # type: ignore[arg-type]
 
 
 def test_a_failed_accept_takes_no_seat() -> None:
@@ -751,6 +781,50 @@ def test_the_same_line_said_again_much_later_is_kept() -> None:
     ]
 
 
+# -- purpose (docs/09 section 10, item 4) ------------------------------------
+
+
+async def test_the_prompt_shows_the_purpose_only_when_this_actor_has_one(
+    tmp_path: Path,
+) -> None:
+    model = WorldModel("ada")
+    converser = FakeConverser()
+    conversation = converse_object("conv_1", ANCHOR, ["ada", "mira"], speaker="ada")
+    digest = observe(model, 1, objects=[conversation])
+    session = session_for(
+        model, converser, tmp_path, purpose="agree who builds the wall"
+    )
+    session.decide(digest)  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+
+    assert converser.prompts
+    assert "You started this conversation because: agree who builds the wall" in (
+        converser.prompts[-1]
+    )
+
+
+async def test_the_prompt_says_nothing_when_there_is_no_purpose(
+    tmp_path: Path,
+) -> None:
+    model = WorldModel("ada")
+    converser = FakeConverser()
+    conversation = converse_object("conv_1", ANCHOR, ["ada", "mira"], speaker="ada")
+    digest = observe(model, 1, objects=[conversation])
+    session = session_for(model, converser, tmp_path)
+    session.decide(digest)  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+
+    assert converser.prompts
+    assert "You started this conversation because" not in converser.prompts[-1]
+
+
+def test_conversation_start_traces_the_purpose(tmp_path: Path) -> None:
+    model = WorldModel("ada")
+    session = session_for(model, FakeConverser(), tmp_path, purpose="ask for wood")
+    rows = trace_events(session, tmp_path, "conversation_start")
+    assert rows[0]["purpose"] == "ask for wood"
+
+
 # -- report and note ---------------------------------------------------------
 
 
@@ -783,7 +857,7 @@ async def test_the_report_carries_the_transcript_gifts_and_note(
 
     assert report.end_reason == END_CLOSED
     assert report.received == {"plank": 2}
-    assert report.note == "mira is short of planks"
+    assert report.agreed == "mira is short of planks"
     assert "any planks?" in text
     assert "plank +2" in text
     assert "mira is short of planks" in text
@@ -803,7 +877,7 @@ async def test_a_note_lands_under_todays_notes_in_the_journal(tmp_path: Path) ->
 
     journal = Journal.parse((tmp_path / "memory.md").read_text(encoding="utf-8"))
     assert journal.scratch == [
-        "- [conversation, tick 4, with bo] bo will bring stone tomorrow"
+        "- [conversation, tick 4, with bo] agreed: bo will bring stone tomorrow"
     ]
 
 

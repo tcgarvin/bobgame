@@ -234,7 +234,8 @@ code builds a compact JSON state (target well under 8k tokens):
 ```
 {
   "brief": {"instruction": str, "success_condition": str,
-            "places": {"the_lake_shore": "dx 12 dy -4"}},
+            "places": {"the_lake_shore": "dx 12 dy -4"},
+            "hails": ["say to dov: \"Dov, can we split the wall work?\""]},
   "self": {"name": "ada", "position": [x,y], "health": "14/20", "food": "35/100",
            "fatigue": "12/100 (fresh)", "asleep": false,
            "wielded": "axe", "inventory": {"wood": 3},
@@ -265,7 +266,15 @@ only what the map cannot express - what is underfoot, every built thing
 names or offers a walk to, and one example of each material in reach - because
 a grove of trees used to fill all 25 slots with lines the map had already
 drawn. `brief.places` are the planner's named destinations, always as an
-offset: Jev never sees a coordinate.
+offset: Jev never sees a coordinate. `brief.hails` are the settlers the
+planner said Jev may address and the line to say to each; the key is absent
+when the brief granted none.
+
+The `Brief` fields are `instruction`, `success_condition`, `max_ticks`,
+`notes`, `check_every`, `travel`, `shouts` (at most `MAX_BRIEF_SHOUTS`, 4),
+`hails` (at most `MAX_BRIEF_HAILS`, 3, each a `BriefHail(settler, line)` -
+docs/09 section 9.3) and `places` (at most `MAX_BRIEF_PLACES`, 6). `shouts`
+and `hails` are the only speech Jev has: it invents neither.
 
 Questions in one Jev request:
 
@@ -560,8 +569,10 @@ observation and viewer services: `move_results`, `action_results`
   can still call `place(kind, direction)` for any direction.
 - **`drop` is not offered to Jev** (it is not in the doc's option list either);
   the planner's `drop` tool covers it.
-- **Say options** use a fixed phrase table (`come_here`, `all_good`);
-  free-text speech stays a planner tool. Jev may shout only the phrases the
+- **Jev has no free speech.** It had a fixed `say:` phrase table
+  (`come_here`, `all_good`) until 2026-09-19, when `say` left the agents'
+  surface with the invitations (docs/09 section 8); its only speech now is the
+  brief's `shouts` and `hails`. Jev may shout only the phrases the
   planner lists in the brief's `shouts` (up to 4, offered as `shout:<n>`, 8
   tick cooldown); nothing about them is wolf-specific. For 20 ticks after
   hearing anyone's shout it is offered `step_towards:shout:<speaker>`, a

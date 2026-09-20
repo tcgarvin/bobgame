@@ -79,7 +79,7 @@ def run_scenario(
         model,
         brief.travel,
         shouts=brief.shouts,
-        invitations=brief.invitations,
+        hails=brief.hails,
         places=brief.places,
         brief_text=brief.text,
     )
@@ -94,6 +94,7 @@ def run_scenario(
         notes=brief.notes,
         travel=brief.travel,
         places=brief.places,
+        hails=brief.hails,
         highlight_ids=brief_object_ids(model, brief.text),
     )
     return state, criteria

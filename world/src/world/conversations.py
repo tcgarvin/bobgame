@@ -12,7 +12,7 @@ see it through the machinery they already use.
 """
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import structlog
 
@@ -33,10 +33,12 @@ from .items import (
     CONVERSATION_TEXT_LIMIT,
     CONVERSATION_TRANSCRIPT_KEPT,
     CONVERSATION_TURN_TICKS,
+    HAIL_COOLDOWN_TICKS,
 )
 from .state import WOLF_ENTITY_TYPE, World, WorldObject
 from .types import (
     CONVERSE_ACCEPT,
+    CONVERSE_HAIL,
     CONVERSE_JOIN,
     CONVERSE_LEAVE,
     CONVERSE_OPEN,
@@ -54,6 +56,11 @@ ACTION_TYPE = "converse"
 
 # Object id prefix, so ids read as `conv_12` (docs/09, section 2.3).
 CONVERSATION_ID_PREFIX = "conv"
+
+# The word that opens the details of the hailed settler's own `EntityActed`,
+# so its agent can tell a seat it never asked for from one it did (docs/09,
+# section 9).
+HAILED_DETAIL = "hailed"
 
 # --- State keys -----------------------------------------------------------
 
@@ -219,8 +226,18 @@ def _with_updates(obj: WorldObject, updates: Mapping[str, str]) -> WorldObject:
     return updated
 
 
+def _stamp_conversation_end(world: World, entity_ids: Sequence[str]) -> None:
+    """Start the hail cooldown for settlers whose seat has just ended."""
+    for entity_id in entity_ids:
+        entity = world.all_entities().get(entity_id)
+        if entity is None:
+            continue
+        world.set_entity(entity.with_conversation_ended(world.tick))
+
+
 def _close(world: World, obj: WorldObject, reason: str, events: TickEvents) -> None:
     """Remove a conversation object and report it."""
+    _stamp_conversation_end(world, read_participants(obj))
     world.remove_object(obj.object_id)
     events.objects_removed.append(
         ObjectRemovedEvent(object_id=obj.object_id, position=obj.position)
@@ -439,6 +456,107 @@ def _accept_invitation(
     events.acted(target_id, ACTION_TYPE, True, f"join {obj.object_id}")
 
 
+def _hail(world: World, intent: ConverseIntent, events: TickEvents) -> None:
+    """Handle one `hail` action (docs/09, section 9).
+
+    A hail is one settler walking up to another and addressing it. Unlike an
+    `accept` it needs no invitation, so the roles are flipped: the hailer
+    opens the conversation with its line and the target speaks next.
+    """
+    entity_id = intent.entity_id
+    entity = world.get_entity(entity_id)
+    target_id = intent.target_entity_id
+
+    text = truncate_line(intent.text.strip())
+    if not text:
+        _fail(events, entity_id, "an opening line is required")
+        return
+
+    target = world.all_entities().get(target_id)
+    if target is None or target.entity_type == WOLF_ENTITY_TYPE:
+        _fail(events, entity_id, f"there is no settler called {target_id}")
+        return
+    if not target.alive:
+        _fail(events, entity_id, f"{target_id} is dead")
+        return
+    if entity.asleep:
+        _fail(events, entity_id, "you are asleep")
+        return
+    if target.asleep:
+        _fail(events, entity_id, f"{target_id} is asleep")
+        return
+    if conversation_of(world, entity_id) is not None:
+        _fail(events, entity_id, "already in a conversation")
+        return
+    seated = conversation_of(world, target_id)
+    if seated is not None:
+        _fail(
+            events,
+            entity_id,
+            f"{target_id} is already in conversation {seated.object_id}",
+        )
+        return
+    if not is_adjacent(entity.position, target.position):
+        _fail(events, entity_id, f"not next to {target_id}")
+        return
+    cooldown_left = target.hail_cooldown_left(world.tick, HAIL_COOLDOWN_TICKS)
+    if cooldown_left > 0:
+        ago = HAIL_COOLDOWN_TICKS - cooldown_left
+        _fail(
+            events,
+            entity_id,
+            f"{target_id} was in a conversation {ago} ticks ago and cannot be "
+            f"hailed for another {cooldown_left} ticks",
+        )
+        return
+
+    anchor = _shared_anchor(world, entity.position, target.position)
+    if anchor is None:
+        _fail(events, entity_id, "no free tile next to you both")
+        return
+
+    tick = str(world.tick)
+    opening = {"tick": world.tick, "speaker": entity_id, "text": text}
+    obj = WorldObject(
+        object_id=world.generate_object_id(CONVERSATION_ID_PREFIX),
+        position=anchor,
+        object_type=CONVERSATION,
+        state=(
+            (PARTICIPANTS_KEY, _encode([entity_id, target_id])),
+            # The hailer has already spoken, so the turn is the target's.
+            (SPEAKER_KEY, target_id),
+            (TURN_STARTED_KEY, tick),
+            (OPENED_TICK_KEY, tick),
+            (OPENED_BY_KEY, entity_id),
+            (UTTERANCES_KEY, "0"),
+            (PASSES_KEY, "0"),
+            (TRANSCRIPT_KEY, _encode([opening])),
+        ),
+    )
+    world.add_object(obj)
+    events.objects_added.append(ObjectAddedEvent(obj=obj))
+    _clear_invitation(world, entity_id)
+    _clear_invitation(world, target_id)
+    # The opening line is ordinary local speech as well, so bystanders hear it
+    # and learn which conversation it belongs to (as `open` does).
+    events.utterances.append(
+        UtteranceEvent(
+            speaker_id=entity_id,
+            channel=LOCAL_CHANNEL,
+            text=text,
+            position=entity.position,
+            conversation_id=obj.object_id,
+        )
+    )
+    events.acted(
+        entity_id, ACTION_TYPE, True, f"{CONVERSE_HAIL} {obj.object_id} {target_id}"
+    )
+    # The target is seated without asking, and its own details say so.
+    events.acted(
+        target_id, ACTION_TYPE, True, f"{HAILED_DETAIL} {obj.object_id} {entity_id}"
+    )
+
+
 def _join_conversation(
     world: World, intent: ConverseIntent, events: TickEvents
 ) -> None:
@@ -549,6 +667,7 @@ def _remove_participants(
     if len(remaining) == len(participants):
         return obj
 
+    _stamp_conversation_end(world, [p for p in participants if p in leaving])
     updates = {PARTICIPANTS_KEY: _encode(remaining)}
     speaker = obj.get_state(SPEAKER_KEY, "")
     if speaker in leaving:
@@ -637,6 +756,8 @@ def process_conversation_phase(
         _open_conversation(world, intent, events)
     for intent in by_action.get(CONVERSE_ACCEPT, ()):
         _accept_invitation(world, intent, events)
+    for intent in by_action.get(CONVERSE_HAIL, ()):
+        _hail(world, intent, events)
     for intent in by_action.get(CONVERSE_JOIN, ()):
         _join_conversation(world, intent, events)
     for intent in by_action.get(CONVERSE_SPEAK, ()):
@@ -652,6 +773,7 @@ def process_conversation_phase(
 
 __all__ = [
     "CONVERSATION_ID_PREFIX",
+    "HAILED_DETAIL",
     "OPENED_BY_KEY",
     "OPENED_TICK_KEY",
     "PARTICIPANTS_KEY",

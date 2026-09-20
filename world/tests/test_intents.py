@@ -304,6 +304,59 @@ class TestTickPipeline:
 
         assert result.utterances[0].channel == "shout"
 
+    def test_say_details_name_who_heard_it_and_ignore_wolves(self) -> None:
+        world = _world()
+        world.add_entity(Entity(entity_id="alice", position=Position(x=6, y=5)))
+        world.add_entity(Entity(entity_id="carol", position=Position(x=19, y=19)))
+        world.add_entity(
+            Entity(entity_id="wolf_1", entity_type="wolf", position=Position(x=6, y=6))
+        )
+        ctx = _context(world)
+        ctx.submit_intent("bob", SayIntent(entity_id="bob", text="hi", channel="local"))
+
+        result = process_tick(world, ctx)
+
+        say_result = next(r for r in result.action_results if r.entity_id == "bob")
+        # alice is 1 tile away (within the 10-tile local radius); carol is 14
+        # tiles away and the wolf is never counted as a hearer.
+        assert say_result.details == "heard: alice"
+
+    def test_shout_details_name_everyone_within_sixty_tiles(self) -> None:
+        world = _world()
+        world.add_entity(Entity(entity_id="alice", position=Position(x=6, y=5)))
+        world.add_entity(Entity(entity_id="carol", position=Position(x=19, y=19)))
+        ctx = _context(world)
+        ctx.submit_intent(
+            "bob", SayIntent(entity_id="bob", text="wolf!", channel="shout")
+        )
+
+        result = process_tick(world, ctx)
+
+        say_result = next(r for r in result.action_results if r.entity_id == "bob")
+        assert say_result.details == "heard: alice, carol"
+
+    def test_say_details_say_nobody_when_no_one_is_in_earshot(self) -> None:
+        world = _world()
+        ctx = _context(world)
+        ctx.submit_intent("bob", SayIntent(entity_id="bob", text="hi", channel="local"))
+
+        result = process_tick(world, ctx)
+
+        say_result = next(r for r in result.action_results if r.entity_id == "bob")
+        assert say_result.details == "heard: "
+
+    def test_thought_channel_keeps_the_plain_channel_name(self) -> None:
+        world = _world()
+        ctx = _context(world)
+        ctx.submit_intent(
+            "bob", SayIntent(entity_id="bob", text="hmm", channel="thought")
+        )
+
+        result = process_tick(world, ctx)
+
+        say_result = next(r for r in result.action_results if r.entity_id == "bob")
+        assert say_result.details == "thought"
+
     def test_attack_then_death_populates_every_list(self) -> None:
         world = _world()
         world.add_entity(Entity(entity_id="alice", position=Position(x=6, y=5)))

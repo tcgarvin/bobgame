@@ -246,7 +246,7 @@ written at startup with the prices the run is billed at (`pricing.py`). Contract
 | `options.py` | The legal actions for this tick, each carrying its proto Intent; walking is `step_towards:<target>` with a per-type quota (`STEP_GROUPS`), and `OPTION_SECTIONS` fixes what gets truncated first |
 | `jevstate.py` | The compact JSON state (17x17 ASCII map, one `facts` list, the `so_far` block, a `nearby` list of only what the map cannot say) Jev sees |
 | `jevclient.py` | The TypeSafe System One call; `JevClient` protocol for fakes |
-| `stint.py` | `Brief` (instruction, success condition, notes, shouts, invitations, `places`) -> one Jev call per tick -> Intent, plus the code rules, `StintProgress` and `StintReport` |
+| `stint.py` | `Brief` (instruction, success condition, notes, shouts, hails, `places`) -> one Jev call per tick -> Intent, plus the code rules, `StintProgress` and `StintReport` |
 | `reflex.py` | The pre-registered reflex brief: persistence, trigger, cooldown, end rule |
 | `conversation.py` | Conversation mode: the converser, the per-turn session, the report and the note |
 | `llm.py` | Model id resolution and model settings shared by the planner and the converser |
@@ -341,20 +341,17 @@ code-owned walk like the heard-shout option. A join during a stint ends it with
 reason `joined_conversation` and `start_stint` returns after the conversation
 with the report appended.
 
-### Invitations to talk (docs/09 section 8)
+### Invitations to talk (docs/09 section 8) - historical
 
-`say(text, open_to_talk=True)` keeps the speaker open to talk for
-`items.INVITATION_TICKS` (40) ticks; the flag rides on the `Utterance` and on
-`Entity`, so `WorldModel.open_invitations()` lists every settler that is either
-in view with the flag or was heard with one inside the window (id, best-known
-position, the line), and `my_invitation_live()` covers the actor's own.
-`options.py` offers `talk_to:<entity_id>` - the `accept` intent next to the
-inviter, otherwise a code-owned walk there - and `invite:<n>` per phrase in
-`Brief.invitations`, only while the actor holds no seat, and `invite` only with
-a settler inside `SAY_RADIUS` and no invitation of its own live. `jevstate.py`
-adds the `invitations` lines. The planner has `talk_to(entity_id, max_ticks)`,
-which refuses an unknown invitation, walks with the same `ApproachDriver` as
-`join_conversation` and then accepts, and `look` marks who is open to talk.
+**The agent side no longer uses invitations (2026-09-19).** There is no planner
+`say` tool, no Jev `say:`, `invite:` or `talk_to:` option, no
+`Brief.invitations`, no `invitations` block in the Jev state, no open-to-talk
+marks in `look`, and `WorldModel` has no `open_invitations()` /
+`my_invitation_live()`. The world still implements `SayIntent.open_to_talk`,
+`Entity.open_to_talk` and the `accept` action, and the viewer still draws the
+marker; nothing on this side reaches for them. Conversations are started by
+hailing instead (next section). This paragraph stays because old runs and the
+world code still speak the language.
 
 Accepting seats both settlers at once, so a conversation can start while the
 planner is mid-turn: `_detect_join` runs before the in-flight single-tick action
@@ -366,6 +363,59 @@ report has no tool waiting for it, so it goes to the planner as a note:
 `drain_reflex_notes` is now `drain_notes` and carries reflex lines and
 conversation reports alike. `conversation_start` records `via`: `open`, `join`,
 `accept`, or `accepted` for the inviter.
+
+### Hailing (docs/09 section 9)
+
+`talk_to(entity_id, opening_line, max_ticks)` takes up an invitation when the
+settler has one open and otherwise **hails** it: the code-owned
+`ApproachDriver` walk re-aims at the settler's latest known position for up to
+`WALK_LEGS` (3) legs of one tick budget, then submits
+`ConverseIntent(action="hail", target_entity_id=..., text=opening_line)` and
+blocks until the conversation ends. The world seats the target without asking,
+so `joined_conversation` also reads `hail conv_N <target>` (the hailer) and
+`hailed conv_N <hailer>` (the target), and `UNASKED_VIA` — `accepted` and
+`hailed` — is what `_detect_join` treats as a seat nobody asked for.
+`conversation_start` `via` is `hail` or `hailed`. `items.py` mirrors
+`ACTION_HAIL`, `ACTION_HAILED`, `CONVERSE_ACTION_TYPE` and
+`HAIL_COOLDOWN_TICKS` (60): a settler cannot be hailed until that long after
+its last conversation ended.
+
+**Brief hails (2026-09-19).** The planner may also hand Jev up to
+`MAX_BRIEF_HAILS` (3) hails per stint:
+`start_stint(..., hails=[{"settler": "dov", "line": "..."}])`.
+`_validated_hails` refuses a settler this actor has not met (naming who it
+has), itself, a blank pair and a line over `CONVERSATION_TEXT_LIMIT`, each as a
+`ModelRetry`; `ReflexBrief` has none. `Brief.hails` is a tuple of
+`options.BriefHail(settler, line)` - it lives in `options.py` because
+`options.py` cannot import `stint.py`. `options.py` offers `hail:<settler>` in
+its own `OPTION_SECTIONS` entry (`hail`, between `survival` and
+`conversation`, so truncation cannot drop it): the hail intent next to the
+settler, otherwise a code-owned `stop_adjacent` walk, and never while this
+actor holds a seat or for a settler that is dead, asleep, seated or unseen.
+`jevstate.py` puts them in the `brief` block as `say to dov: "<line>"`.
+`Stint` drops a hail once it lands and once the world has refused it
+`HAIL_REFUSAL_LIMIT` (2) times (`_absorb_hail_outcomes`, which reads
+`self._last_option` because a converse failure names no target), and writes
+`hailed dov at tick N` / `hail to dov refused: <reason>` into the report's
+`notable` list. A landed hail ends the stint with `joined_conversation` like
+any other seat.
+
+**Live-run fixes (2026-09-19, docs/09 section 11).** `talk_to` and
+`open_conversation` take a required `purpose` argument (only the settler that
+opened or hailed sees it, rendered in the converser's prompt as "You started
+this conversation because: …"); `BriefHail` gains an optional `purpose` that
+flows the same way through `JevAgent._detect_join`/`hailed_target`. The
+closing converser call now returns two fields (`ClosingNote`:
+`agreed_or_learned`, `you_said_you_would`) instead of one line, both appended
+to the journal and both leading `ConversationReport.to_text()`. `describe_world`
+marks an asleep settler in view and in the roster, and `talk_to` refuses one
+up front instead of walking into a world refusal. `write_sign`/`write_note`
+refuse the other's kind of object before submitting anything, and
+`place_sign` crafts its own sign from 2 wood when needed.
+`BudgetedToolset.get_tools` wraps every tool's argument validator
+(`_FriendlyArgsValidator`) so a bad kwarg's retry names the tool's actual
+parameters; `sleep`'s parameter is `bed` (was `bed_object_id`), and the
+planner agent's tool retries rose from 2 to 3 (`PLANNER_TOOL_RETRIES`).
 
 ### The eject question, split in three (docs/05)
 
@@ -462,9 +512,18 @@ What Jev may choose (`options.py`):
   tactics) whenever a wolf is in view.
 - **Tools, not rules**: the planner prompt (`SETTLEMENT_NARRATIVE`) gives the
   setting, the goal "build a civilization", the physics with numbers, and how
-  to operate Jev. It gives no strategy, etiquette or uses for the tools; those
-  are meant to emerge. Keep advice out of option descriptions and alerts too. The wolf numbers in `items.py` mirror
-  `world/wolves.py` and `world/items.py`.
+  to operate Jev. It gives no strategy or etiquette; those are meant to
+  emerge. Keep advice out of option descriptions and alerts too. The wolf
+  numbers in `items.py` mirror `world/wolves.py` and `world/items.py`.
+  **Owner's decision 2026-09-19**: this relaxed for the communication tools
+  only, because settlers were under-using conversations, boards and signs.
+  Each one (`shout`, `talk_to`, `open_conversation`,
+  `join_conversation`, a message board, a sign - the four channels left after
+  `say` was removed on 2026-09-19) now states plainly, in the
+  narrative's "Reaching the others, and what each way is good for:" section
+  and in its own tool docstring, what it is good for and not good for (a
+  fact about the channel - one-way vs. back-and-forth, permanent vs.
+  passing - never a "you should"). Strategy and etiquette still stay out.
 - **extract** now covers `reeds` (fiber, no tool) and `clay_deposit` (clay,
   pickaxe).
 - **dismantle is deliberately not offered.** It is `ExtractIntent` on a placed
@@ -503,6 +562,24 @@ turns into a `ModelRetry`), and a `BuildExecutor` runs it as a **driven stint**:
   `build_place:<kind>:<x>,<y>`. They carry no `latency_ms`, `eject`, `danger`,
   `confidence` or token count, because there was no Jev call and averaging
   zeros would poison `tools/analyze_run.py`.
+
+### Signs (docs/08_building.md, "Signs")
+
+A sign is a placed object carrying one line (`text`, `author`, `tick`). The
+agent side owns the *read guarantee*: `WorldModel._read_signs_in_view` keeps
+`sign_texts_read` (sign id -> the text this actor was shown) and puts one
+formatted line per newly-seen or newly-changed sign on `TickDigest.sign_notes`.
+`agent.py` pushes each through `_note_for_planner`, so it reaches the next tool
+result, the next turn prompt and the journal's `DayLog` exactly as a reflex line
+does, and `Stint._absorb` also folds them into the stint's `notable` list. The
+actor's own signs are recorded as read without a note.
+
+`jevstate.py` draws a sign as `S` and puts its `text` and `written_by` in
+`nearby`; `options.py` gives it a `step_towards` quota group but excludes it
+from `JEV_PLACEABLE_KINDS`, because Jev cannot write and a blank sign is
+useless. The planner has `place_sign(direction, text)` (place, then write; the
+sign id is read back out of the world's `placed <id> at ...` detail) and
+`write_sign(sign_id, text)`; the generic `place` refuses `sign`.
 
 ### Walking, and what Jev is told (2026-09-18)
 

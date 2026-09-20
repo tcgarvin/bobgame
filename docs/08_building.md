@@ -110,6 +110,73 @@ entity must stand on or next to a `bed`. One rester per bed per tick
 `"<bed> is taken"`). A successful rest heals `REST_HEAL` (2) health, capped at
 max health, and requires food > 0. Action event type: `"rest"`.
 
+## Signs (2026-09-19)
+
+Message boards have to be walked up to and read (`read_board` marks what was
+read; `look` marks unread notes `(new)` - docs/09_conversation_and_reflex.md
+section 10.4). A sign is the opposite: a very short, permanent line that is
+pushed at everyone who walks past it.
+
+| Recipe | Inputs | Yields | Where |
+|--------|--------|--------|-------|
+| `sign` | 2 wood | 1 | hand |
+
+- **Layer and blocking**: `sign` is a **structure-layer** building kind, so it
+  needs a direction to place and a road or floor can still be laid under it. It
+  blocks nobody, settler or wolf: it is in neither `BLOCKING_OBJECT_TYPES` nor
+  `WOLF_BLOCKING_OBJECT_TYPES`.
+- **State**: `text` (at most `SIGN_TEXT_MAX` = 80 characters), `author` and
+  `tick`, plus the `owner` every placed object carries. A freshly placed sign
+  has all three empty.
+- **Writing**: the existing `WriteNoteIntent`, aimed at the sign, from on or
+  next to it. `slot` must be 0 (anything else fails with `"a sign has one slot:
+  use 0"`), `title` is ignored, and `text` is the line. Anyone may rewrite any
+  sign; empty text blanks it (`author` and `tick` are cleared too). Text longer
+  than 80 characters is **refused**, never truncated: `"sign text is at most 80
+  characters, this one is N"`. A board truncates nothing either, but it fails
+  with `"text too long"`; a sign says the limit and the length, because the
+  writer has to shorten the line itself.
+- **Events**: one `ObjectChange` per changed key plus the usual `EntityActed`
+  (`write_note`), so recording, replay, chunk streaming and the viewer carry a
+  sign with no new code. The details read `wrote sign_4: "<text>"` or
+  `cleared sign_4`.
+- **Dismantling**: `sign` is in `BUILDING_KINDS`, so `DISMANTLE_WORK` (3)
+  extract actions return the item, like any other placed piece.
+
+The read guarantee, agent side (`worldmodel.py`): when a non-blank sign first
+comes into view, or a known sign's text has changed since this settler last saw
+it, and the author is not this settler, the model queues one line —
+`[sign at (x, y) by ada, written tick N: "text"]` — on the `TickDigest`. The
+tick loop pushes it through the ordinary note path (`drain_notes`: the next
+tool result, the next turn prompt and the journal's `DayLog`), and a stint
+running at the time also carries it in its `StintReport`. The same sign text is
+never delivered twice to the same settler.
+
+- **Jev** sees signs on the map as `S`, with their text in `nearby`, and gets a
+  `step_towards:<sign id>` option from the `sign` quota group. It is **not**
+  offered a `place:sign` option: it has no way to write on one and a blank sign
+  says nothing.
+- **The planner** has `place_sign(direction, text)` and `write_sign(sign_id,
+  text)`. Since 2026-09-19, `place_sign` is self-sufficient: it checks the
+  80-character limit first, crafts a sign from 2 wood if none is carried but
+  the wood is (reporting the craft in the result, up to three world actions
+  total: craft, place, write), and otherwise names the shortfall ("a sign
+  takes 2 wood; you carry N, and you have no sign to place") without touching
+  the world. If the write still fails after a good placement, the result
+  names the standing blank sign. `write_sign` and `write_note` each refuse the
+  other's kind of object before submitting anything, naming what the object
+  actually is and the right tool (`write_sign` -> `write_note` for a board,
+  and back); the world side is unchanged; it already keyed the sign-vs-board
+  dispatch off `WorldObject.object_type` and enforces slot 0 for a sign
+  regardless (docs/09_conversation_and_reflex.md section 11.2). The generic
+  `place` **refuses** `sign` and points at `place_sign`. `look` lists the
+  signs with what they read. `craft` makes a sign like any other item.
+- **Analysis**: `tools/analyze_run.py` counts `signs_written` and
+  `signs_cleared` apart from board `notes_written`, and every sign write is a
+  notable moment carrying its text.
+- **Viewer**: sprite key `sign` (DawnLike `Objects/Decor0.png` tile 40); the
+  object inspector shows the line, who wrote it and when.
+
 ## Roads, floors, chairs and tables
 
 Cosmetic for now. They are recorded, replayed and rendered, and they count in

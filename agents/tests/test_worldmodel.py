@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from agents import world_pb2 as pb
 from agents.jev_agent.items import INVITATION_TICKS
 from agents.jev_agent.worldmodel import WorldModel
@@ -319,10 +321,10 @@ def test_a_workshop_table_is_found_only_when_it_is_within_reach() -> None:
     assert far.workshop_table_near() is None
 
 
-# -- invitations to talk (docs/09 section 8.3) -------------------------------
+# -- a flagged say is still heard as ordinary speech -------------------------
 
 
-def test_a_flagged_say_is_remembered_as_an_invitation() -> None:
+def test_a_flagged_say_is_heard_like_any_other_local_line() -> None:
     model = WorldModel("ada")
     model.update(
         make_observation(
@@ -337,117 +339,93 @@ def test_a_flagged_say_is_remembered_as_an_invitation() -> None:
     )
 
     heard = model.recent_utterances(1)[0]
-    assert heard.open_to_talk
-    invitation = model.open_invitations()[0]
-    assert invitation.entity_id == "mira"
-    assert invitation.position == (14, 10)
-    assert invitation.text == "Come and plan the wall."
+    assert (heard.speaker_id, heard.text) == ("mira", "Come and plan the wall.")
 
 
-def test_an_entity_in_view_carries_its_own_open_to_talk_flag() -> None:
-    model = WorldModel("ada")
-    model.update(
-        make_observation(
-            5,
-            make_entity("ada", (10, 10)),
-            entities=[make_entity("mira", (12, 10), open_to_talk=True)],
-        )
+# -- message board unread tracking (docs/09 section 6) -----------------------
+
+
+def _board(slot0_title: str = "Wood pile", tick: int = 4) -> pb.WorldObject:
+    return make_object(
+        "board_1",
+        "message_board",
+        (11, 11),
+        {
+            "notes": json.dumps(
+                [
+                    {
+                        "title": slot0_title,
+                        "text": "chest by the spring",
+                        "author": "bob",
+                        "tick": tick,
+                    }
+                ]
+            )
+        },
     )
 
-    assert model.entities["mira"].open_to_talk
-    invitation = model.open_invitations()[0]
-    # Seen but not heard: the position is the live one and there is no line.
-    assert (invitation.position, invitation.text) == ((12, 10), "")
 
-
-def test_a_visible_inviter_is_placed_where_it_now_stands() -> None:
+def test_a_new_note_by_another_author_is_queued_once() -> None:
     model = WorldModel("ada")
-    model.update(
+    digest = model.update(
+        make_observation(5, make_entity("ada", (10, 10)), objects=[_board()])
+    )
+
+    assert digest.board_notes == ["[board_1: new note by bob: 'Wood pile']"]
+
+    # Staying in view on the next tick, with the note unchanged, queues nothing
+    # more: the push is once per (board, slot, tick).
+    digest = model.update(
+        make_observation(6, make_entity("ada", (10, 10)), objects=[_board()])
+    )
+    assert digest.board_notes == []
+
+
+def test_a_changed_note_is_queued_again() -> None:
+    model = WorldModel("ada")
+    model.update(make_observation(5, make_entity("ada", (10, 10)), objects=[_board()]))
+
+    digest = model.update(
         make_observation(
-            5,
+            6,
             make_entity("ada", (10, 10)),
-            events=[utterance_event("mira", "Talk?", (14, 10), open_to_talk=True)],
+            objects=[_board(slot0_title="New plan", tick=6)],
         )
     )
+    assert digest.board_notes == ["[board_1: new note by bob: 'New plan']"]
+
+
+def test_the_actors_own_note_is_never_queued() -> None:
+    model = WorldModel("ada")
+    board = make_object(
+        "board_1",
+        "message_board",
+        (11, 11),
+        {
+            "notes": json.dumps(
+                [{"title": "Mine", "text": "hi", "author": "ada", "tick": 4}]
+            )
+        },
+    )
+    digest = model.update(
+        make_observation(5, make_entity("ada", (10, 10)), objects=[board])
+    )
+    assert digest.board_notes == []
+
+
+def test_unread_count_drops_to_zero_once_read_and_rises_on_a_new_note() -> None:
+    model = WorldModel("ada")
+    model.update(make_observation(5, make_entity("ada", (10, 10)), objects=[_board()]))
+
+    assert model.unread_note_count("board_1") == 1
+    model.mark_board_read("board_1")
+    assert model.unread_note_count("board_1") == 0
+
     model.update(
         make_observation(
             6,
             make_entity("ada", (10, 10)),
-            entities=[make_entity("mira", (12, 11), open_to_talk=True)],
+            objects=[_board(slot0_title="New plan", tick=6)],
         )
     )
-
-    invitation = model.open_invitations()[0]
-    assert invitation.position == (12, 11)
-    assert invitation.text == "Talk?"
-
-
-def test_a_settler_in_view_without_the_flag_has_no_invitation() -> None:
-    model = WorldModel("ada")
-    model.update(
-        make_observation(
-            5,
-            make_entity("ada", (10, 10)),
-            events=[utterance_event("mira", "Talk?", (12, 10), open_to_talk=True)],
-        )
-    )
-    model.update(
-        make_observation(
-            6,
-            make_entity("ada", (10, 10)),
-            entities=[make_entity("mira", (12, 10))],
-        )
-    )
-
-    assert model.open_invitations() == []
-
-
-def test_an_invitation_expires_after_the_invitation_window() -> None:
-    model = WorldModel("ada")
-    model.update(
-        make_observation(
-            5,
-            make_entity("ada", (10, 10)),
-            events=[utterance_event("mira", "Talk?", (14, 10), open_to_talk=True)],
-        )
-    )
-    model.update(
-        make_observation(5 + INVITATION_TICKS - 1, make_entity("ada", (10, 10)))
-    )
-    assert [i.entity_id for i in model.open_invitations()] == ["mira"]
-
-    model.update(make_observation(5 + INVITATION_TICKS, make_entity("ada", (10, 10))))
-    assert model.open_invitations() == []
-
-
-def test_an_unflagged_say_is_not_an_invitation() -> None:
-    model = WorldModel("ada")
-    model.update(
-        make_observation(
-            5,
-            make_entity("ada", (10, 10)),
-            events=[utterance_event("mira", "Nice weather.", (14, 10))],
-        )
-    )
-    assert model.open_invitations() == []
-
-
-def test_the_actors_own_invitation_stands_for_the_invitation_window() -> None:
-    model = WorldModel("ada")
-    model.update(
-        make_observation(
-            5,
-            make_entity("ada", (10, 10)),
-            events=[
-                utterance_event("ada", "Anyone free?", (10, 10), open_to_talk=True)
-            ],
-        )
-    )
-    assert model.my_invitation_live()
-    assert model.my_invitation_ticks_left() == INVITATION_TICKS
-    # The actor never counts as an invitation it could accept.
-    assert model.open_invitations() == []
-
-    model.update(make_observation(5 + INVITATION_TICKS, make_entity("ada", (10, 10))))
-    assert not model.my_invitation_live()
-    assert model.my_invitation_ticks_left() == 0
+    assert model.unread_note_count("board_1") == 1

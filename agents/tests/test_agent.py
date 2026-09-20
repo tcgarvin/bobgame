@@ -981,6 +981,93 @@ async def test_a_queued_stint_waits_for_the_conversation_and_then_runs(
     assert len(jev.calls) == 3
 
 
+# -- hails: a conversation somebody else started on you (docs/09 section 9) --
+
+
+def hailed_observations(count: int, *, seated_until: int) -> list[pb.Observation]:
+    """ivo hails ada at tick 2; the conversation closes after `seated_until`."""
+    seated = converse_object("conv_1", (11, 10), ["ivo", "ada"], speaker="ada")
+    return [
+        make_observation(
+            tick,
+            make_entity("ada", (10, 10)),
+            objects=[seated] if tick <= seated_until else [],
+            events=(
+                [acted_event("ada", "converse", True, "hailed conv_1 ivo")]
+                if tick == 2
+                else []
+            ),
+        )
+        for tick in range(1, count + 1)
+    ]
+
+
+async def test_being_hailed_interrupts_a_direct_action(tmp_path: Path) -> None:
+    world = FakeWorldClient(hailed_observations(8, seated_until=4))
+    agent = build_agent(world, FakeJevClient(default_action="wait"), tmp_path)
+    agent.converser = FakeConverser()
+    outcomes: list[str] = []
+
+    async def plan() -> None:
+        outcomes.append(
+            await agent.direct_action(
+                pb.Intent(eat=pb.EatIntent(item_type="berry", amount=1)), "eat berry"
+            )
+        )
+        await asyncio.sleep(3600)
+
+    agent.planner.run = plan  # type: ignore[method-assign]
+    await agent.run()
+
+    assert outcomes[0] == "eat berry -> interrupted: conversation conv_1 started"
+
+
+async def test_a_hailed_seat_is_traced_as_hailed(tmp_path: Path) -> None:
+    world = FakeWorldClient(hailed_observations(6, seated_until=4))
+    agent = build_agent(world, FakeJevClient(default_action="wait"), tmp_path)
+    agent.converser = FakeConverser()
+
+    async def idle() -> None:
+        await asyncio.sleep(3600)
+
+    agent.planner.run = idle  # type: ignore[method-assign]
+    await agent.run()
+    agent.trace.close()
+
+    with gzip.open(
+        tmp_path / "agent-ada" / "conversations.jsonl.gz", "rt", encoding="utf-8"
+    ) as handle:
+        lines = [json.loads(line) for line in handle if line.strip()]
+    start = next(line for line in lines if line["event"] == "conversation_start")
+    assert start["via"] == "hailed"
+
+
+async def test_being_hailed_during_a_stint_ends_it_with_the_report(
+    tmp_path: Path,
+) -> None:
+    world = FakeWorldClient(hailed_observations(10, seated_until=4))
+    agent = build_agent(world, FakeJevClient(default_action="wait"), tmp_path)
+    agent.converser = FakeConverser(note_text="ivo wants rope")
+    reports: list[object] = []
+
+    async def plan() -> None:
+        reports.append(
+            await agent.run_stint(
+                Brief(instruction="Hold", success_condition="never", max_ticks=8)
+            )
+        )
+        await asyncio.sleep(3600)
+
+    agent.planner.run = plan  # type: ignore[method-assign]
+    await agent.run()
+
+    assert len(reports) == 1
+    assert reports[0].end_reason == "joined_conversation"  # type: ignore[attr-defined]
+    text = reports[0].to_text()  # type: ignore[attr-defined]
+    assert "CONVERSATION REPORT: conv_1" in text
+    assert "ivo wants rope" in text
+
+
 # --- the sleep-time journal (docs/12_sleep_journal.md) -----------------------
 
 

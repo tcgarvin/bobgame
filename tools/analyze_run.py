@@ -32,7 +32,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Mapping
 
 TOOL_CALL_RE = re.compile(r"planner_tool_call .*?tool=(\S+)")
 TURN_RE = re.compile(r"planner_turn_started")
@@ -69,7 +69,9 @@ MOMENT_PRIORITY = (
     "conversation_give",
     "conversation_joined",
     "invitation_accepted",
+    "hail",
     "milestone",
+    "sign",
     "write_note",
     "place",
     "craft",
@@ -94,6 +96,7 @@ BUILDING_KINDS = (
     frozenset(
         {
             "road",
+            "sign",
             "wood_floor",
             "stone_floor",
             "wood_wall",
@@ -139,6 +142,10 @@ VEIN_YIELD_RE = re.compile(r"\(\+1 (copper_ore|iron_ore)\)")
 # Sleep and wake details (world/src/world/sleep.py): "asleep on <bed id|the
 # ground>" and "woke up: <reason>".
 SLEEP_RE = re.compile(r"^asleep on (.+)$")
+# A sign write and a sign blanking, as `world/containers.py` words them. Signs
+# share the `write_note` action with message boards (docs/08_building.md).
+SIGN_WRITE_RE = re.compile(r'^wrote (sign_\d+): "(.*)"$')
+SIGN_CLEAR_RE = re.compile(r"^cleared (sign_\d+)$")
 WAKE_RE = re.compile(r"^woke up: (.+)$")
 
 # Conversation and give details, docs/09_conversation_and_reflex.md sections 2.3
@@ -148,6 +155,40 @@ CONVERSE_JOIN_RE = re.compile(r"^join (conv_\S+)$")
 # Invitations, docs/09_conversation_and_reflex.md section 8.2: the accepter's
 # own success details are "accept conv_12 mira" (the inviter's id last).
 CONVERSE_ACCEPT_RE = re.compile(r"^accept (conv_\S+) (\S+)$")
+# Hails, docs/09_conversation_and_reflex.md section 9: the hailer's details are
+# "hail conv_12 mira" and the settler it seated reads "hailed conv_12 ivo".
+CONVERSE_HAIL_RE = re.compile(r"^hail (conv_\S+) (\S+)$")
+CONVERSE_HAILED_RE = re.compile(r"^hailed (conv_\S+) (\S+)$")
+
+# A failed converse action reports only the world's reason, not which action
+# asked for it, so a failed hail can only be recognised by its wording. These
+# are the reasons `hail` alone produces (docs/09 section 9); the two it shares
+# with `accept` ("not next to <id>", "already in a conversation") are left out
+# rather than attributed to the wrong action, so the attempted count is a
+# lower bound.
+HAIL_FAILURE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^there is no settler called \S+$"), "no such settler"),
+    (re.compile(r"^\S+ is dead$"), "target dead"),
+    (re.compile(r"^\S+ is asleep$"), "target asleep"),
+    (re.compile(r"^you are asleep$"), "hailer asleep"),
+    (
+        re.compile(r"^\S+ is already in conversation conv_\S+$"),
+        "target already talking",
+    ),
+    (re.compile(r"cannot be hailed for another \d+ ticks$"), "hail cooldown"),
+    (re.compile(r"^no free tile next to you both$"), "no free tile"),
+    (re.compile(r"^an opening line is required$"), "no opening line"),
+)
+
+
+def hail_failure_label(details: str) -> str:
+    """The bucket for a failed `hail`, or "" when the reason is not one."""
+    for pattern, label in HAIL_FAILURE_PATTERNS:
+        if pattern.search(details):
+            return label
+    return ""
+
+
 GAVE_RE = re.compile(r"^gave (\d+) (\S+) to (\S+)$")
 
 # The stint report's stats line, e.g. "stats: hp 12/20, food 5/10 -> hp
@@ -603,6 +644,10 @@ def summarise_agent(agent_id: str, layout: RunLayout) -> dict:
     starts = [r for r in rows if r.get("event") == "stint_start"]
 
     actions = Counter(r["action"].split(":")[0] for r in ticks)
+    # Brief hails (docs/09 section 9.3): what the planner granted, and how
+    # often Jev actually took one of them.
+    brief_hails = sum(len(r.get("brief", {}).get("hails", [])) for r in starts)
+    jev_hails = sum(1 for r in ticks if str(r["action"]).startswith("hail:"))
     latencies = [r["latency_ms"] for r in ticks if "latency_ms" in r]
     tokens = [r["input_tokens"] for r in ticks if r.get("input_tokens")]
     ejects = [r["eject"] for r in ticks if "eject" in r]
@@ -642,6 +687,8 @@ def summarise_agent(agent_id: str, layout: RunLayout) -> dict:
         "top_prob_mean": statistics.mean(top_probs) if top_probs else 0,
         "confidence_mean": statistics.mean(confidences) if confidences else 0,
         "intent_failures": failures,
+        "brief_hails": brief_hails,
+        "jev_hails": jev_hails,
         "planner_turns": planner["planner_turns"],
         "planner_turn_failures": planner["planner_turn_failures"],
         "history_resets": planner["history_resets"],
@@ -707,6 +754,8 @@ class ConversationRecord:
     # Whether this conversation began with an `accept` of an invitation
     # rather than an `open` (docs/09_conversation_and_reflex.md section 8.2).
     via_invitation: bool = False
+    # Whether it began with a `hail` (docs/09 section 9).
+    via_hail: bool = False
 
     @property
     def utterance_count(self) -> int:
@@ -758,11 +807,16 @@ class WorldFacts:
     workshop_crafts: int = 0
     rests: int = 0
     notes_written: int = 0
+    signs_written: int = 0
+    signs_cleared: int = 0
     utterances: int = 0
     shouts: int = 0
     # Invitations, docs/09_conversation_and_reflex.md section 8: `say` calls
     # with `open_to_talk` set.
     invitations_said: int = 0
+    # Hails, docs/09_conversation_and_reflex.md section 9.
+    hails_succeeded: int = 0
+    hail_failures: Counter[str] = field(default_factory=Counter)
 
     # Metal tier and sleep (docs/10_metal_and_sleep.md, section 7).
     vein_yields: Counter[str] = field(default_factory=Counter)
@@ -814,9 +868,13 @@ class WorldFacts:
             "workshop_crafts": self.workshop_crafts,
             "rests": self.rests,
             "notes_written": self.notes_written,
+            "signs_written": self.signs_written,
+            "signs_cleared": self.signs_cleared,
             "utterances": self.utterances,
             "shouts": self.shouts,
             "invitations_said": self.invitations_said,
+            "hails_succeeded": self.hails_succeeded,
+            "hail_failures": dict(self.hail_failures),
             "smelts": self.smelts,
             "stations_placed": self.stations_placed,
             "metal_tools_crafted": self.metal_tools_crafted,
@@ -960,6 +1018,10 @@ def scan_world_ticks(
 
         for action in record.get("actions", ()):
             if not action.get("success"):
+                if action.get("action_type", "") in CONVERSE_ACTIONS:
+                    label = hail_failure_label(action.get("details", ""))
+                    if label:
+                        facts.hail_failures[label] += 1
                 continue
             entity = action.get("entity_id", "")
             action_type = action.get("action_type", "")
@@ -1039,16 +1101,37 @@ def scan_world_ticks(
                         )
                     )
             elif action_type in NOTE_ACTIONS:
-                facts.notes_written += 1
-                moments.append(
-                    Moment(
-                        tick, "write_note", entity, f"{entity} wrote a note: {details}"
+                sign_match = SIGN_WRITE_RE.match(details)
+                clear_match = SIGN_CLEAR_RE.match(details)
+                if sign_match:
+                    facts.signs_written += 1
+                    moments.append(
+                        Moment(
+                            tick,
+                            "sign",
+                            entity,
+                            f"{entity} wrote on {sign_match.group(1)}: "
+                            f'"{sign_match.group(2)}"',
+                        )
                     )
-                )
+                elif clear_match:
+                    facts.signs_cleared += 1
+                else:
+                    facts.notes_written += 1
+                    moments.append(
+                        Moment(
+                            tick,
+                            "write_note",
+                            entity,
+                            f"{entity} wrote a note: {details}",
+                        )
+                    )
             elif action_type in CONVERSE_ACTIONS:
                 open_match = CONVERSE_OPEN_RE.match(details)
                 join_match = CONVERSE_JOIN_RE.match(details)
                 accept_match = CONVERSE_ACCEPT_RE.match(details)
+                hail_match = CONVERSE_HAIL_RE.match(details)
+                hailed_match = CONVERSE_HAILED_RE.match(details)
                 if open_match:
                     conv_id = open_match.group(1)
                     record_conv = conversations.setdefault(
@@ -1081,6 +1164,35 @@ def scan_world_ticks(
                             f"{entity} accepted {inviter}'s invitation, " f"{conv_id}",
                         )
                     )
+                elif hail_match:
+                    # The hailer's own success details ("hail conv_N
+                    # <target>"); the settler it seated reads "hailed conv_N
+                    # <hailer>" and is picked up below (docs/09 section 9).
+                    conv_id = hail_match.group(1)
+                    target = hail_match.group(2)
+                    record_conv = conversations.setdefault(
+                        conv_id, ConversationRecord(conv_id)
+                    )
+                    record_conv.opened_tick = tick
+                    record_conv.opened_by = entity
+                    record_conv.via_hail = True
+                    record_conv.participants.add(entity)
+                    record_conv.participants.add(target)
+                    facts.hails_succeeded += 1
+                    moments.append(
+                        Moment(
+                            tick,
+                            "hail",
+                            entity,
+                            f"{entity} hailed {target}, {conv_id}",
+                        )
+                    )
+                elif hailed_match:
+                    conv_id = hailed_match.group(1)
+                    record_conv = conversations.setdefault(
+                        conv_id, ConversationRecord(conv_id)
+                    )
+                    record_conv.participants.add(entity)
                 elif join_match:
                     conv_id = join_match.group(1)
                     record_conv = conversations.setdefault(
@@ -1201,6 +1313,20 @@ def _agent_conversation_ends(agent_id: str, layout: RunLayout) -> Iterator[dict]
             yield row
 
 
+def _agent_conversation_starts(agent_id: str, layout: RunLayout) -> Iterator[dict]:
+    """`conversation_start` rows from one agent's `conversations.jsonl.gz`.
+
+    Runs recorded before this feature shipped have no such file, so an
+    absent file simply yields nothing.
+    """
+    path = layout.agents_dir / f"agent-{agent_id}" / "conversations.jsonl.gz"
+    if not path.exists():
+        return
+    for row in iter_jsonl(path):
+        if row.get("event") == "conversation_start":
+            yield row
+
+
 def summarise_conversations(
     conversations: dict[str, ConversationRecord],
     agent_ids: list[str],
@@ -1208,6 +1334,10 @@ def summarise_conversations(
     viewer_url: str,
     run_id: str,
     invitations_said: int = 0,
+    hails_succeeded: int = 0,
+    hail_failures: Mapping[str, int] | None = None,
+    brief_hails_granted: int = 0,
+    jev_hails_chosen: int = 0,
 ) -> dict:
     """The Conversations report section: world facts plus agent-side endings.
 
@@ -1221,12 +1351,32 @@ def summarise_conversations(
     for agent_id in agent_ids:
         for row in _agent_conversation_ends(agent_id, layout):
             end_reasons[row.get("end_reason", "?")] += 1
-            if str(row.get("note", "")).strip():
+            # Old runs wrote a single `note` field; newer ones write `agreed`
+            # and `commitment` (docs/09_conversation_and_reflex.md section 10,
+            # item 5). Either counts as a note written.
+            if (
+                str(row.get("note", "")).strip()
+                or str(row.get("agreed", "")).strip()
+                or str(row.get("commitment", "")).strip()
+            ):
                 notes_written += 1
+
+    # One row per seat taken, so `purpose_total` over-counts conversations
+    # with several participants; that is the right denominator here, since a
+    # purpose is per-seat, not per-conversation (docs/09 section 10, item 4).
+    purpose_total = 0
+    purpose_given = 0
+    for agent_id in agent_ids:
+        for row in _agent_conversation_starts(agent_id, layout):
+            purpose_total += 1
+            if str(row.get("purpose", "")).strip():
+                purpose_given += 1
 
     records = list(conversations.values())
     opened = sum(1 for record in records if record.opened_tick >= 0)
     opened_by_invitation = sum(1 for record in records if record.via_invitation)
+    opened_by_hail = sum(1 for record in records if record.via_hail)
+    failures = dict(hail_failures or {})
     joined = sum(len(record.joins) for record in records)
     distinct_participants = len(
         {participant for record in records for participant in record.participants}
@@ -1234,6 +1384,11 @@ def summarise_conversations(
     utterances = sum(record.utterance_count for record in records)
     durations = [record.duration_ticks for record in records if record.end_tick >= 0]
     line_counts = [record.utterance_count for record in records]
+    line_count_stats = {
+        "min": min(line_counts) if line_counts else 0,
+        "median": statistics.median(line_counts) if line_counts else 0,
+        "max": max(line_counts) if line_counts else 0,
+    }
 
     longest = sorted(
         records, key=lambda r: (r.duration_ticks, r.utterance_count), reverse=True
@@ -1243,13 +1398,26 @@ def summarise_conversations(
         "opened": opened,
         "opened_by_invitation": opened_by_invitation,
         "invitations_said": invitations_said,
+        "opened_by_hail": opened_by_hail,
+        "hails_succeeded": hails_succeeded,
+        "hails_attempted": hails_succeeded + sum(failures.values()),
+        "hail_failures": failures,
+        "brief_hails_granted": brief_hails_granted,
+        "jev_hails_chosen": jev_hails_chosen,
+        # Whatever Jev did not choose was the planner's own `talk_to`.
+        "planner_hails_attempted": max(
+            0, hails_succeeded + sum(failures.values()) - jev_hails_chosen
+        ),
         "joined": joined,
         "distinct_participants": distinct_participants,
         "utterances": utterances,
         "end_reasons": dict(end_reasons),
         "notes_written": notes_written,
+        "purpose_given": purpose_given,
+        "purpose_total": purpose_total,
         "mean_duration_ticks": statistics.mean(durations) if durations else 0,
         "mean_lines": statistics.mean(line_counts) if line_counts else 0,
+        "line_count_stats": line_count_stats,
         "longest": [
             {
                 "conversation_id": record.conversation_id,
@@ -1444,6 +1612,8 @@ def aggregate(summaries: list[dict], meta: dict) -> dict:
         "planner_turns": sum(s["planner_turns"] for s in summaries),
         "planner_turn_failures": sum(s["planner_turn_failures"] for s in summaries),
         "history_resets": sum(s["history_resets"] for s in summaries),
+        "brief_hails": sum(s.get("brief_hails", 0) for s in summaries),
+        "jev_hails": sum(s.get("jev_hails", 0) for s in summaries),
         "budget_spent": sum(s["budget_spent"] for s in summaries),
         "budget_hard_stops": sum(s["budget_hard_stops"] for s in summaries),
         "tools": dict(total_tools.most_common()),
@@ -1613,7 +1783,10 @@ def print_report(
             f"workshop_crafts={facts.workshop_crafts} rests={facts.rests}"
         )
         print(
-            f"notes written: {facts.notes_written}  utterances: {facts.utterances}"
+            f"notes written: {facts.notes_written}  "
+            f"signs written: {facts.signs_written} "
+            f"(blanked {facts.signs_cleared})  "
+            f"utterances: {facts.utterances}"
             f"  shouts: {facts.shouts}"
         )
         print()
@@ -1656,6 +1829,8 @@ def print_report(
         conversation_summary["opened"]
         or conversation_summary["end_reasons"]
         or conversation_summary["invitations_said"]
+        or conversation_summary["hails_attempted"]
+        or conversation_summary["brief_hails_granted"]
     ):
         print(
             f"opened: {conversation_summary['opened']}  "
@@ -1667,12 +1842,36 @@ def print_report(
             f"invitations said: {conversation_summary['invitations_said']}  "
             f"opened by invitation: {conversation_summary['opened_by_invitation']}"
         )
+        print(
+            f"hails: {conversation_summary['hails_attempted']} attempted, "
+            f"{conversation_summary['hails_succeeded']} succeeded  "
+            f"opened by hail: {conversation_summary['opened_by_hail']}"
+        )
+        print(
+            f"brief hails granted: {conversation_summary['brief_hails_granted']}  "
+            f"hail: chosen by Jev: {conversation_summary['jev_hails_chosen']}  "
+            f"planner talk_to hails: "
+            f"{conversation_summary['planner_hails_attempted']}"
+        )
+        if conversation_summary["hail_failures"]:
+            print(f"hails refused: {conversation_summary['hail_failures']}")
         print(f"ended by: {conversation_summary['end_reasons']}")
         print(
             f"mean length: {conversation_summary['mean_duration_ticks']:.1f} ticks, "
             f"{conversation_summary['mean_lines']:.1f} lines"
         )
+        stats = conversation_summary["line_count_stats"]
+        print(
+            f"lines per conversation: min {stats['min']}, "
+            f"median {stats['median']:.1f}, max {stats['max']}"
+        )
         print(f"notes written: {conversation_summary['notes_written']}")
+        if conversation_summary["purpose_total"]:
+            print(
+                "purpose given: "
+                f"{conversation_summary['purpose_given']} of "
+                f"{conversation_summary['purpose_total']}"
+            )
         if conversation_summary["longest"]:
             print("longest conversations:")
             for entry in conversation_summary["longest"]:
@@ -1777,6 +1976,10 @@ def main(argv: list[str] | None = None) -> int:
         viewer_url,
         layout.run_id,
         invitations_said=facts.invitations_said if facts else 0,
+        hails_succeeded=facts.hails_succeeded if facts else 0,
+        hail_failures=facts.hail_failures if facts else None,
+        brief_hails_granted=sum(s.get("brief_hails", 0) for s in summaries),
+        jev_hails_chosen=sum(s.get("jev_hails", 0) for s in summaries),
     )
     giving_summary = summarise_giving(giving)
     reflex_summary, reflex_moments = summarise_reflexes(ids, layout)

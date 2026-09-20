@@ -414,11 +414,13 @@ message WaitIntent {}
 //   action "pass":  give up the turn without speaking.
 //   action "leave": stop being a participant.
 message ConverseIntent {
-  string action = 1;           // open | join | speak | pass | leave | accept
+  string action = 1;           // open | join | speak | pass | leave | accept | hail
   Direction direction = 2;
   string conversation_id = 3;
-  string text = 4;
-  string target_entity_id = 5; // accept: the inviter (docs/09 section 8)
+  string text = 4;             // open/speak: the line; hail: the opening line
+  // accept: the inviter (docs/09 section 8);
+  // hail: the settler addressed (docs/09 section 9)
+  string target_entity_id = 5;
 }
 
 // Hand items to another entity that is adjacent or in the same conversation.

@@ -44,6 +44,7 @@ STONE_FLOOR = "stone_floor"
 WOOD_WALL = "wood_wall"
 STONE_WALL = "stone_wall"
 DOOR = "door"
+SIGN = "sign"
 BED = "bed"
 CHAIR = "chair"
 TABLE = "table"
@@ -59,7 +60,18 @@ GROUND_LAYER_KINDS: frozenset[str] = frozenset({ROAD, WOOD_FLOOR, STONE_FLOOR})
 
 # Everything the building update added; all of it can be dismantled.
 BUILDING_KINDS: frozenset[str] = GROUND_LAYER_KINDS | frozenset(
-    {WOOD_WALL, STONE_WALL, DOOR, BED, CHAIR, TABLE, WORKSHOP_TABLE, FURNACE, ANVIL}
+    {
+        WOOD_WALL,
+        STONE_WALL,
+        DOOR,
+        SIGN,
+        BED,
+        CHAIR,
+        TABLE,
+        WORKSHOP_TABLE,
+        FURNACE,
+        ANVIL,
+    }
 )
 
 ITEM_KINDS: frozenset[str] = (
@@ -128,6 +140,20 @@ CONVERSATION_TEXT_LIMIT = 300
 CONVERSATION_TRANSCRIPT_KEPT = 12
 # How long a spoken invitation ("open to talk", docs/09, section 8) stays open.
 INVITATION_TICKS = 40
+# How long after its last conversation ended a settler cannot be hailed
+# (docs/09, section 9). Invitations, joining and opening are unaffected.
+HAIL_COOLDOWN_TICKS = 60
+
+# --- Signs (docs/08_building.md, "Signs") ---------------------------------
+
+# A sign holds one line. Longer text is refused, never truncated.
+SIGN_TEXT_MAX = 80
+# Object state keys a placed sign carries.
+SIGN_TEXT_KEY = "text"
+SIGN_AUTHOR_KEY = "author"
+SIGN_TICK_KEY = "tick"
+# A sign has one slot, so `WriteNoteIntent.slot` must be this.
+SIGN_SLOT = 0
 
 # --- Combat ---------------------------------------------------------------
 
@@ -160,6 +186,8 @@ BUSH = "bush"
 ITEM_PILE = "item_pile"
 CHEST_OBJECT = "chest"
 MESSAGE_BOARD_OBJECT = "message_board"
+
+SIGN_OBJECT = "sign"
 
 REEDS = "reeds"
 CLAY_DEPOSIT = "clay_deposit"

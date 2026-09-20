@@ -9,12 +9,14 @@ moments (craft this, place that) where a whole stint would be overkill.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, AsyncIterable, Mapping, Protocol, Sequence
 
 import structlog
+from pydantic import ValidationError
 from pydantic_ai import Agent, ModelRetry, RunContext, capture_run_messages
 from pydantic_ai.messages import (
     AgentStreamEvent,
@@ -33,6 +35,7 @@ from .. import world_pb2 as pb
 from . import items
 from .conversation import (
     ACTION_ACCEPT,
+    ACTION_HAIL,
     ACTION_JOIN,
     ACTION_OPEN,
     ApproachDriver,
@@ -70,17 +73,19 @@ from .build import (
 )
 from .geometry import NAME_TO_DIRECTION, NO_DIRECTION, Coord, chebyshev
 from .options import (
+    MAX_BRIEF_HAILS,
     MAX_BRIEF_PLACES,
     MAX_BRIEF_SHOUTS,
     MAX_SHOUT_LENGTH,
     PLACE_NAME_PATTERN,
     WOLF_ALERT_RADIUS,
+    BriefHail,
     TravelState,
 )
 from .pricing import CostLedger, usage_from_messages
 from .stint import Brief, StintDriver, StintReport
 from .tracelog import AgentTrace
-from .worldmodel import HeardUtterance, OpenInvitation, WorldModel
+from .worldmodel import VIEW_RADIUS, HeardUtterance, WorldModel
 
 logger = structlog.get_logger(__name__)
 
@@ -112,6 +117,16 @@ CRAFTED_DETAIL = "crafted "
 GROUND = "the ground"
 # How many item piles `look` and a failed `pickup` list, nearest first.
 PILES_SHOWN = 6
+# How many signs `look` lists, nearest first: everything in view plus a few
+# more the actor remembers.
+SIGNS_SHOWN = 8
+# The world detail for a placed object is "placed <id> at (x, y)".
+SIGN_ID_RE = re.compile(r"\b(sign_\d+)\b")
+
+# pydantic-ai's default retry count per tool call, raised from 2: a validation
+# retry (wrong kwarg name) should not burn the model's only chances to fix a
+# real logic error too (docs/09 section 10, item 3).
+PLANNER_TOOL_RETRIES = 3
 
 # Falling asleep and dying both end the turn: the journal is being rewritten
 # behind the model's back and the next turn starts from it (docs/12).
@@ -182,11 +197,32 @@ Wolves and fighting:
 - All damage in a tick lands at once: everyone attacking the same wolf hits it
   on the same tick, and it bites back on that tick too.
 
-Voices and writing:
-- `say` reaches settlers within {items.SAY_RADIUS} tiles. `shout` reaches {items.SHOUT_RADIUS} tiles, and hearers
-  are told where it came from.
-- A message board holds twenty notes that anyone standing near it can read and
-  overwrite.
+Reaching the others, and what each way is good for:
+- `shout` reaches {items.SHOUT_RADIUS} tiles, hearers told where it came from.
+  Good for emergencies and for calling people to a spot. One line, no reply
+  possible: not good for working anything out.
+- Conversations (`talk_to`, `open_conversation`, `join_conversation`): the
+  best way to coordinate in depth. The only channel where the others answer
+  you, back and forth: good for settling who does what, agreeing a plan,
+  asking what someone knows or needs, and trading with `give`. The opening
+  line is heard by everyone within {items.SAY_RADIUS} tiles, and anyone who
+  sees the conversation can join it, up to {items.CONVERSATION_MAX_PARTICIPANTS}.
+  `talk_to` is good for one particular settler (it walks to them and starts
+  the conversation); `open_conversation` is good for gathering several around
+  a spot.
+- A message board: twenty notes; read from anywhere in view of it
+  ({items.SIGN_READ_RADIUS} tiles), written from on or next to it. Great for
+  announcements and standing information many should see over time: plans,
+  who is doing what, where things are. It reaches only those who come and
+  read it; `look` shows which notes are new to you.
+- Sign: holds one line of at most {items.SIGN_TEXT_MAX} characters, with who wrote it and
+  when; shown once to every settler who comes within view of it
+  ({items.SIGN_READ_RADIUS} tiles), and again when it changes. Good for very short permanent
+  messages tied to a place, because everyone who passes is guaranteed to be
+  shown it. Not good for temporary messages: it stays until someone rewrites
+  or dismantles it. `place_sign` crafts one from 2 wood if you need it, places
+  it and writes it in one call; `write_sign` rewrites one already standing,
+  and `look` lists the signs you know with what they read.
 - `look` lists every settler you have met by name and where you last saw them.
 
 Conversations:
@@ -206,18 +242,15 @@ Conversations:
 - `give` hands items to a settler standing next to you or seated in the same
   conversation. It is a single-tick tool and it can be used inside or outside a
   conversation.
-- `say` with `open_to_talk` set is an invitation: you stay open to talk for
-  {items.INVITATION_TICKS} ticks, everyone who hears the line and everyone who can see you knows
-  it, and any settler standing next to you can accept it. Saying another
-  invitation renews the {items.INVITATION_TICKS} ticks; taking a seat in any conversation ends it.
-  `look` marks the settlers who are open to talk, with the line they said.
-- Accepting an invitation makes a conversation on a free tile next to the two
-  of you, holding the inviter and the accepter, with the invitation line as its
-  first line and the inviter speaking first. It needs the accepter standing
-  next to the inviter and neither of them in a conversation. `talk_to` does the
-  walk and the accept in one call and returns when the conversation is over.
-- So a conversation can begin while you are mid-turn, when someone accepts your
-  invitation. Conversation mode starts on that tick and your turn carries on,
+- You start a conversation with a settler by hailing them: `talk_to` walks you
+  to them and says your opening line out loud, and a conversation appears on a
+  free tile next to you both holding the two of you, with your line as its
+  first line and them speaking next. It needs you standing next to them, both
+  of you alive, awake and in no conversation, and them out of a conversation
+  for at least {items.HAIL_COOLDOWN_TICKS} ticks. A brief's `hails` let Jev do
+  the same thing while it works.
+- So a conversation can begin while you are mid-turn, when someone walks up and
+  hails you. Conversation mode starts on that tick and your turn carries on,
   but the single-tick tool in flight and any you call while the conversation
   runs come back as "interrupted: conversation conv_N started", while a queued
   `start_stint`, `travel_to` or `build` waits until it has ended. The
@@ -300,9 +333,8 @@ How you act:
   name is on the first line of every turn. Jev is extremely literal. It picks
   one action per tick from a closed list that code builds for it: step toward
   something, attack, extract, collect, eat, craft, equip, place, rest, sleep,
-  use a chest, say a canned phrase, shout a phrase you gave it, say an
-  invitation line you gave it, accept someone else's invitation, take a seat
-  in a conversation, wait. It does not plan, and it does exactly what your
+  use a chest, shout a phrase you gave it, hail a settler you named with the
+  line you wrote, take a seat in a conversation, wait. It does not plan, and it does exactly what your
   brief says even when that is silly.
 
 What Jev sees, and how to write for it:
@@ -340,24 +372,24 @@ What Jev sees, and how to write for it:
 - Anything that has to happen at world speed, a fight included, only happens
   if Jev is doing it. `start_stint` hands your body to Jev and blocks until
   the stint ends. A brief is a concrete instruction, a success condition, a
-  tick budget, optional notes, named places, and the exact phrases Jev may
-  shout or say as invitations (it cannot invent its own). Three briefs of
-  different shape, to show the form only; the content is yours:
+  tick budget, optional notes, named places, the exact phrases Jev may shout
+  and the settlers it may hail with the line to say (it cannot invent either).
+  Three briefs of different shape, to show the form only; the content is yours:
     instruction: "Mine rock_42548 and the rocks beside it for stone. Each
-      time you are carrying 6 stone, shout the stone phrase once. When another
-      settler is within ten tiles, say the invitation line once."
+      time you are carrying 6 stone, shout the stone phrase once. If dov comes
+      into view, walk over and hail him."
     success_condition: "you are carrying 10 stone"
     max_ticks: 120
     notes: "eat a berry when food is below 40"
     shouts: ["Stone to spare at the rocks, come and take some."]
-    invitations: ["I am at the rocks if anyone wants to sort out who mines what."]
+    hails: [{{"settler": "dov", "line": "Dov, shall we sort out who mines what?"}}]
   and
     instruction: "Withdraw every plank from the chest next to you, then craft
       wood_wall until you have no planks left."
     success_condition: "you carry no planks and at least 1 wood_wall"
     max_ticks: 25
     shouts: []
-    invitations: []
+    hails: []
   and
     instruction: "Step toward the reeds until you can harvest them, then
       gather fiber."
@@ -427,6 +459,11 @@ class AgentBridge(Protocol):
 
     def clear_reflex(self) -> None:
         """Forget the reflex brief."""
+
+    def set_conversation_purpose(self, purpose: str) -> None:
+        """Remember why the conversation this actor is about to open or start
+        by hailing was started, for the next `open`/`hail` that lands
+        (docs/09 section 10, item 4)."""
 
     async def await_journal(self) -> None:
         """Wait, briefly, for a journal rewrite that is still running.
@@ -556,6 +593,54 @@ class PlannerDeps:
     day_log: DayLog = field(default_factory=DayLog)
 
 
+def _tool_signature_line(tool_def: Any) -> str:
+    """`sleep takes: bed (optional), other_arg` from a tool's JSON schema.
+
+    pydantic-ai's own validation-error text names only the field that was
+    wrong (e.g. "Extra inputs are not permitted"), never what the tool
+    actually accepts, so a model that guessed a kwarg name gets no way to
+    self-correct. This is appended to every validation retry.
+    """
+    schema = tool_def.parameters_json_schema or {}
+    properties = schema.get("properties", {})
+    if not properties:
+        return f"{tool_def.name} takes no arguments"
+    required = set(schema.get("required", ()))
+    names = ", ".join(
+        name if name in required else f"{name} (optional)" for name in properties
+    )
+    return f"{tool_def.name} takes: {names}"
+
+
+class _FriendlyArgsValidator:
+    """Wraps a tool's args validator to name its parameters on failure.
+
+    `ToolManager._validate_tool_args` calls `validate_json`/`validate_python`
+    directly on `ToolsetTool.args_validator`; wrapping it here is the one place
+    that reaches every planner tool's validation without touching pydantic-ai
+    itself (docs/09 section 10, item 3).
+    """
+
+    def __init__(self, inner: Any, tool_def: Any) -> None:
+        self._inner = inner
+        self._tool_def = tool_def
+
+    def _retry(self, error: Exception) -> None:
+        raise ModelRetry(f"{error}\n{_tool_signature_line(self._tool_def)}") from error
+
+    def validate_json(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return self._inner.validate_json(*args, **kwargs)
+        except ValidationError as error:
+            self._retry(error)
+
+    def validate_python(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return self._inner.validate_python(*args, **kwargs)
+        except ValidationError as error:
+            self._retry(error)
+
+
 @dataclass
 class BudgetedToolset(WrapperToolset[PlannerDeps]):
     """Counts tool calls into `deps.budget` and tells the model what is left.
@@ -563,6 +648,20 @@ class BudgetedToolset(WrapperToolset[PlannerDeps]):
     A call past the budget is refused with a message rather than an exception,
     so the turn ends with its reflection and its history instead of vanishing.
     """
+
+    async def get_tools(
+        self, ctx: RunContext[PlannerDeps]
+    ) -> dict[str, ToolsetTool[PlannerDeps]]:
+        tools = await self.wrapped.get_tools(ctx)
+        return {
+            name: replace(
+                tool,
+                args_validator=_FriendlyArgsValidator(
+                    tool.args_validator, tool.tool_def
+                ),
+            )
+            for name, tool in tools.items()
+        }
 
     async def call_tool(
         self,
@@ -613,20 +712,52 @@ def _validated_shouts(shouts: Sequence[str]) -> tuple[str, ...]:
     return phrases
 
 
-def _validated_invitations(invitations: Sequence[str]) -> tuple[str, ...]:
-    """The brief's invitation phrases, trimmed; too many or too long is a retry."""
-    phrases = tuple(phrase.strip() for phrase in invitations if phrase.strip())
-    if len(phrases) > MAX_BRIEF_SHOUTS:
-        raise ModelRetry(f"at most {MAX_BRIEF_SHOUTS} invitation phrases per stint")
-    too_long = [
-        phrase for phrase in phrases if len(phrase) > items.CONVERSATION_TEXT_LIMIT
-    ]
-    if too_long:
-        raise ModelRetry(
-            f"an invitation phrase is at most {items.CONVERSATION_TEXT_LIMIT} "
-            f"characters: {too_long[0]!r}"
-        )
-    return phrases
+def settlers_met(model: WorldModel) -> list[str]:
+    """Every settler this actor has ever seen, by id, sorted."""
+    return sorted(
+        entity.entity_id
+        for entity in model.entities.values()
+        if entity.entity_id != model.entity_id
+        and entity.entity_type != WOLF_ENTITY_TYPE
+    )
+
+
+def _validated_hails(
+    hails: Sequence[Mapping[str, str]], model: WorldModel
+) -> tuple[BriefHail, ...]:
+    """The brief's hails, checked against who this actor has actually met.
+
+    Jev is given the settler's name and the line and nothing else, so a name it
+    has never seen would be an option code could never build.
+    """
+    if len(hails) > MAX_BRIEF_HAILS:
+        raise ModelRetry(f"at most {MAX_BRIEF_HAILS} hails per stint")
+    met = settlers_met(model)
+    checked: list[BriefHail] = []
+    for entry in hails:
+        settler = str(entry.get("settler", "")).strip()
+        line = str(entry.get("line", "")).strip()
+        if not settler or not line:
+            raise ModelRetry(
+                "each hail needs a `settler` and a `line`, for example "
+                '{"settler": "dov", "line": "Dov, can we split the wall work?"}'
+            )
+        if settler == model.entity_id:
+            raise ModelRetry("you cannot hail yourself")
+        if settler not in met:
+            known = ", ".join(met) or "nobody yet"
+            raise ModelRetry(
+                f"you have never seen a settler called {settler}; "
+                f"settlers you have met: {known}"
+            )
+        if len(line) > items.CONVERSATION_TEXT_LIMIT:
+            raise ModelRetry(
+                f"a hail line is at most {items.CONVERSATION_TEXT_LIMIT} "
+                f"characters: {line!r}"
+            )
+        purpose = str(entry.get("purpose", "")).strip()
+        checked.append(BriefHail(settler=settler, line=line, purpose=purpose))
+    return tuple(checked)
 
 
 def _validated_places(
@@ -709,18 +840,8 @@ def _build_site_lines(model: WorldModel) -> list[str]:
     return ["building landmarks:"] + lines
 
 
-def _invitation_marks(model: WorldModel) -> dict[str, str]:
-    """`entity id -> the open-to-talk marker` for every settler open to talk."""
-    marks: dict[str, str] = {}
-    for invitation in model.open_invitations():
-        text = f': "{invitation.text}"' if invitation.text else ""
-        marks[invitation.entity_id] = f", open to talk{text}"
-    return marks
-
-
 def _roster_lines(model: WorldModel) -> list[str]:
     """Every settler the actor has met, with where and when it last saw them."""
-    marks = _invitation_marks(model)
     met = sorted(
         (
             entity
@@ -735,11 +856,15 @@ def _roster_lines(model: WorldModel) -> list[str]:
     for entity in met:
         age = model.tick - entity.last_seen
         when = "now" if age <= 0 else f"{age} ticks ago"
-        state = "" if entity.alive else ", dead"
+        if not entity.alive:
+            state = ", dead"
+        elif entity.asleep:
+            state = f", asleep as of {when}"
+        else:
+            state = ""
         lines.append(
             f"  {entity.entity_id} at {entity.position} "
             f"(d{chebyshev(entity.position, model.position)}, {when}{state})"
-            f"{marks.get(entity.entity_id, '')}"
         )
     return lines
 
@@ -803,6 +928,27 @@ def _pile_lines(model: WorldModel, limit: int) -> list[str]:
     return lines
 
 
+def _sign_lines(model: WorldModel, limit: int) -> list[str]:
+    """Every sign in view plus the nearest few known, with what each reads."""
+    signs = model.signs_known()
+    if not signs:
+        return []
+    position = model.self_info.position
+    lines = ["signs:"]
+    for sign in signs[:limit]:
+        distance = chebyshev(sign.position, position)
+        where = "in view" if distance <= VIEW_RADIUS else f"d{distance}"
+        if sign.sign_text:
+            reads = (
+                f'"{sign.sign_text}" (by {sign.sign_author or "nobody"}, '
+                f"tick {sign.sign_tick})"
+            )
+        else:
+            reads = "blank"
+        lines.append(f"  {sign.object_id} at {sign.position} ({where}): {reads}")
+    return lines
+
+
 def describe_world(model: WorldModel) -> str:
     """The `look()` summary: everything the actor knows, in a readable block."""
     info = model.self_info
@@ -851,28 +997,36 @@ def describe_world(model: WorldModel) -> str:
         lines.append(f"chest {chest.object_id} at {chest.position}: {summary}")
 
     lines.extend(_pile_lines(model, PILES_SHOWN))
+    lines.extend(_sign_lines(model, SIGNS_SHOWN))
 
     for board in model.objects_by_type(["message_board"])[:2]:
-        lines.append(f"message board {board.object_id} at {board.position}:")
-        notes = board.notes()
-        if not notes:
+        unread = model.unread_note_count(board.object_id)
+        new_text = f", {unread} new since you last read" if unread else ""
+        lines.append(f"message board {board.object_id} at {board.position}{new_text}:")
+        by_slot = board.notes_by_slot()
+        if not by_slot:
             lines.append("  (no notes yet)")
-        for index, note in enumerate(notes):
+        for slot, note in sorted(by_slot.items()):
             title = str(note.get("title", ""))
             author = str(note.get("author", "?"))
-            if title:
-                lines.append(f"  [{index}] {title} - {author}")
+            if not title:
+                continue
+            mark = " (new)" if model.is_note_unread(board.object_id, slot, note) else ""
+            lines.append(f"  [{slot}] {title} - {author}{mark}")
 
     visible = model.entities_near(8)
     if visible:
-        marks = _invitation_marks(model)
         lines.append("entities in view:")
         for entity in visible:
             wielding = f", wielding {entity.wielded}" if entity.wielded else ""
+            state = ""
+            if not entity.alive:
+                state = ", dead"
+            elif entity.asleep:
+                state = ", asleep"
             lines.append(
                 f"  {entity.entity_id} ({entity.entity_type}) at {entity.position}, "
-                f"hp {entity.health}/{entity.max_health}{wielding}"
-                f"{marks.get(entity.entity_id, '')}"
+                f"hp {entity.health}/{entity.max_health}{wielding}{state}"
             )
     else:
         lines.append("entities in view: none")
@@ -901,7 +1055,7 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
         deps_type=PlannerDeps,
         output_type=str,
         system_prompt=SETTLEMENT_NARRATIVE,
-        retries=2,
+        retries=PLANNER_TOOL_RETRIES,
         model_settings=planner_model_settings(model_name),
         toolsets=[BudgetedToolset(tools)],
     )
@@ -920,10 +1074,15 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
         notes: str = "",
         check_every: int = 1,
         shouts: Sequence[str] = (),
-        invitations: Sequence[str] = (),
+        hails: Sequence[Mapping[str, str]] = (),
         places: Mapping[str, Sequence[int]] = {},
     ) -> str:
         """Hand control to Jev until the brief is done, then read the report.
+
+        Jev cannot speak on its own: the only lines it can say are the exact
+        phrases you give it here in `shouts` and `hails`. An instruction like
+        "talk to finn about the wall" does nothing by itself; give Jev a hail
+        for finn.
 
         Args:
             instruction: what Jev should do, concretely, in one or two sentences.
@@ -933,13 +1092,22 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
             check_every: ask Jev every Nth tick and repeat the last action between.
             shouts: the exact phrases Jev may shout during this stint, for
                 example ["Stone to spare at the rocks.", "Come to the workshop."].
-                Say in the instruction when to use each. Jev cannot shout anything else;
-                leave it empty and Jev stays quiet.
-            invitations: the exact phrases Jev may say with the open-to-talk
-                flag, which keeps you open for 40 ticks so anyone who hears it
-                can walk up and start a conversation with you. Say in the
-                instruction when to say each. Jev cannot invent its own; leave
-                it empty and it invites nobody.
+                Good for calling people to Jev's spot or flagging an emergency
+                while it works; not good for a back-and-forth, since nobody
+                can answer it. Say in the instruction when to use each. Jev
+                cannot shout anything else; leave it empty and Jev stays
+                quiet.
+            hails: settlers Jev may address, each as
+                {"settler": "dov", "line": "Dov, can we split the wall work?",
+                "purpose": "agree who builds which side"}, at most 3.
+                `purpose` is optional: what you want out of the conversation
+                the hail starts, shown only to this settler once it is seated.
+                Next to that settler Jev says the line and a conversation with
+                the two of them starts; further off it can walk over first.
+                Good for having Jev start a conversation with a particular
+                settler when it meets them, or at the point you name; say in
+                the instruction when. Jev cannot invent one, and a settler you
+                have not met is refused.
             places: named map positions Jev may walk to, for example
                 {"the_lake_shore": [1539, 974]}. Jev is offered one step toward
                 each and is shown how far off it is; it never sees the
@@ -953,7 +1121,7 @@ def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
             notes=notes,
             check_every=max(1, check_every),
             shouts=_validated_shouts(shouts),
-            invitations=_validated_invitations(invitations),
+            hails=_validated_hails(hails, ctx.deps.bridge.model),
             places=_validated_places(places, ctx.deps.bridge.model),
         )
         report = await ctx.deps.bridge.run_stint(brief)
@@ -1060,21 +1228,47 @@ def action_succeeded(outcome: str) -> bool:
     return " ok:" in outcome
 
 
-def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
-    async def _sit_through(ctx: RunContext[PlannerDeps], outcome: str) -> str:
-        """Wait out the conversation the last action started, then report it."""
-        if not action_succeeded(outcome):
-            return outcome
-        report = await ctx.deps.bridge.await_conversation()
-        if report is None:
-            return f"{outcome}\nno conversation started"
-        return f"{outcome}\n{report.to_text()}"
+# `tick._process_say_phase` (world/src/world/tick.py) reports a successful
+# `say` as `"say ok: heard: <comma-separated entity ids>"` (empty when nobody
+# was in earshot); `direct_action` wraps that as `"<description> -> <that>"`.
+_HEARD_MARKER = "say ok: heard: "
 
+
+def _speak_result(outcome: str, verb: str, radius: int) -> str:
+    """Replace the raw hearer list with a plain sentence naming who heard.
+
+    Anything that is not a successful say/shout (a failure, an
+    `interrupted: ...`, an asleep rejection) passes through unchanged.
+    """
+    marker_index = outcome.find(_HEARD_MARKER)
+    if marker_index == -1:
+        return outcome
+    ids_csv = outcome[marker_index + len(_HEARD_MARKER) :]
+    heard = [entity_id.strip() for entity_id in ids_csv.split(",") if entity_id.strip()]
+    if not heard:
+        return f"nobody was within {radius} tiles to hear it"
+    return f"{verb} to {', '.join(heard)} (within {radius} tiles)"
+
+
+async def _sit_through(ctx: RunContext[PlannerDeps], outcome: str) -> str:
+    """Wait out the conversation the last action started, then report it."""
+    if not action_succeeded(outcome):
+        return outcome
+    report = await ctx.deps.bridge.await_conversation()
+    if report is None:
+        return f"{outcome}\nno conversation started"
+    return f"{outcome}\n{report.to_text()}"
+
+
+def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
     @tools.tool
     async def open_conversation(
-        ctx: RunContext[PlannerDeps], direction: str, opening_line: str
+        ctx: RunContext[PlannerDeps], direction: str, opening_line: str, purpose: str
     ) -> str:
         """Open a conversation next to you and stay in it until it is over.
+
+        Good for gathering people around a spot for back-and-forth: the only
+        channel where the others can answer you.
 
         The anchor is the neighbouring tile in `direction`; it must be free.
         The opening line is said out loud, with the conversation attached to
@@ -1085,19 +1279,28 @@ def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         Args:
             direction: N, NE, E, SE, S, SW, W or NW: where the anchor tile goes.
             opening_line: what you say as you open it, at most 300 characters.
+            purpose: what you want out of this conversation; only you see it,
+                and it is handed back to you while you are in the conversation.
         """
         value = _direction_value(direction)
-        outcome = await ctx.deps.bridge.direct_action(
-            converse_intent(ACTION_OPEN, text=opening_line, direction=value),
-            f"open a conversation to the {direction.strip().upper()}",
-        )
-        return await _sit_through(ctx, outcome)
+        ctx.deps.bridge.set_conversation_purpose(purpose)
+        try:
+            outcome = await ctx.deps.bridge.direct_action(
+                converse_intent(ACTION_OPEN, text=opening_line, direction=value),
+                f"open a conversation to the {direction.strip().upper()}",
+            )
+            return await _sit_through(ctx, outcome)
+        finally:
+            ctx.deps.bridge.set_conversation_purpose("")
 
     @tools.tool
     async def join_conversation(
         ctx: RunContext[PlannerDeps], conversation_id: str, max_ticks: int = 40
     ) -> str:
         """Walk to a conversation you can see, take a seat, and talk until it ends.
+
+        Good for joining in on a conversation someone else already opened,
+        rather than starting your own with `talk_to` or `open_conversation`.
 
         Code does the walking: it picks a free tile next to the anchor and goes
         there. The call returns when the conversation has ended.
@@ -1109,7 +1312,19 @@ def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         bridge = ctx.deps.bridge
         conversation = bridge.model.conversation_by_id(conversation_id)
         if conversation is None:
-            return f"you have not seen a conversation called {conversation_id!r}"
+            known = bridge.model.conversations()
+            if known:
+                listing = ", ".join(f"{c.conversation_id} at {c.anchor}" for c in known)
+                return (
+                    f"you have not seen a conversation called {conversation_id!r}; "
+                    f"in view: {listing}. talk_to walks up to a settler and "
+                    "starts one instead of joining an existing anchor"
+                )
+            return (
+                f"you have not seen a conversation called {conversation_id!r} "
+                "and none is in view; talk_to walks up to a settler and starts "
+                "one"
+            )
         if conversation.free_seats <= 0:
             return (
                 f"{conversation_id} has no free seat "
@@ -1129,44 +1344,40 @@ def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
 
     @tools.tool
     async def talk_to(
-        ctx: RunContext[PlannerDeps], entity_id: str, max_ticks: int = 40
+        ctx: RunContext[PlannerDeps],
+        entity_id: str,
+        opening_line: str,
+        purpose: str,
+        max_ticks: int = 40,
     ) -> str:
-        """Accept a settler's invitation to talk and stay until it is over.
+        """Walk up to a settler, start a conversation, and stay until it is over.
 
-        Only works on a settler who is open to talk; `look` marks them. Code
-        walks you to a free tile next to them and accepts, which puts a new
-        conversation on a free tile beside you both with the two of you in it
-        and their invitation line as its first line. The call returns when the
-        conversation has ended.
+        Good for reaching one particular settler for back-and-forth, wherever
+        they are, rather than waiting for them to come to you or to a board.
+
+        Code walks you to a free tile next to them and hails them: you say
+        `opening_line` out loud, a conversation appears on a free tile beside
+        you both holding the two of you, your line is its first line and they
+        speak next. They do not have to be expecting you, but a settler cannot
+        be hailed until 60 ticks after its last conversation ended, and
+        neither of you can already be in one, be asleep or be dead. A sleeping
+        settler cannot be hailed at all; this refuses at once if you can see
+        them asleep, and says so if they turn out to be asleep once you reach
+        them. The call returns when the conversation has ended.
 
         Args:
-            entity_id: the settler whose invitation you are taking up.
+            entity_id: the settler you want to talk to.
+            opening_line: what you say to them as you walk up, at most 300
+                characters.
+            purpose: what you want out of this conversation; only you see it,
+                and it is handed back to you while you are in the conversation.
             max_ticks: tick budget for the walk there.
         """
-        bridge = ctx.deps.bridge
-        invitation = _open_invitation(bridge.model, entity_id)
-        if invitation is None:
-            open_now = [
-                other.entity_id for other in bridge.model.open_invitations()
-            ] or ["nobody"]
-            return (
-                f"no invitation from {entity_id}; settlers open to talk right "
-                f"now: {', '.join(open_now)}"
-            )
-        walked = ""
-        if chebyshev(bridge.model.position, invitation.position) != 1:
-            walked = await _walk_next_to(ctx, invitation.position, entity_id, max_ticks)
-            invitation = _open_invitation(bridge.model, entity_id)
-            if invitation is None:
-                return f"{walked}\n{entity_id} is no longer open to talk"
-            if chebyshev(bridge.model.position, invitation.position) != 1:
-                return f"{walked}\nyou are not next to {entity_id} yet"
-        outcome = await bridge.direct_action(
-            converse_intent(ACTION_ACCEPT, target_entity_id=entity_id),
-            f"accept {entity_id}'s invitation to talk",
-        )
-        seated = await _sit_through(ctx, outcome)
-        return f"{walked}\n{seated}" if walked else seated
+        ctx.deps.bridge.set_conversation_purpose(purpose)
+        try:
+            return await _hail(ctx, entity_id, opening_line, max_ticks)
+        finally:
+            ctx.deps.bridge.set_conversation_purpose("")
 
     @tools.tool
     async def give(
@@ -1185,12 +1396,86 @@ def _register_conversation_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         )
 
 
-def _open_invitation(model: WorldModel, entity_id: str) -> OpenInvitation | None:
-    """The named settler's open invitation to talk, or None when it has none."""
-    for invitation in model.open_invitations():
-        if invitation.entity_id == entity_id:
-            return invitation
-    return None
+# How many times the code-owned walk to a moving settler re-aims before it
+# gives up; every leg spends part of the one tick budget.
+WALK_LEGS = 3
+
+# `EntityInfo.entity_type` for a wolf, which cannot be hailed.
+WOLF_ENTITY_TYPE = "wolf"
+
+
+async def _hail(
+    ctx: RunContext[PlannerDeps], entity_id: str, opening_line: str, max_ticks: int
+) -> str:
+    """Walk up to a settler and address it, starting a conversation (docs/09, section 9)."""
+    bridge = ctx.deps.bridge
+    line = opening_line.strip()
+    if not line:
+        return f"a hail needs an opening line: what you say when you reach {entity_id}"
+    known = bridge.model.entities.get(entity_id)
+    if known is None or known.entity_type == WOLF_ENTITY_TYPE:
+        return f"you have never seen a settler called {entity_id}"
+    if known.asleep and known.last_seen == bridge.model.tick:
+        return f"{entity_id} is asleep right now and cannot be hailed"
+
+    walked = await _walk_to_settler(ctx, entity_id, max_ticks)
+    known = bridge.model.entities.get(entity_id)
+    head = f"{walked}\n" if walked else ""
+    if known is None:
+        return f"{head}you have lost track of {entity_id}"
+    if chebyshev(bridge.model.position, known.position) != 1:
+        return (
+            f"{head}you are not next to {entity_id} yet; last seen at "
+            f"{known.position} on tick {known.last_seen}"
+        )
+    if known.asleep and known.last_seen == bridge.model.tick:
+        return f"{head}{entity_id} is asleep now that you have reached them"
+    outcome = await bridge.direct_action(
+        converse_intent(ACTION_HAIL, target_entity_id=entity_id, text=line),
+        f"hail {entity_id} with {line!r}",
+    )
+    seated = await _sit_through(ctx, outcome)
+    if not action_succeeded(outcome):
+        return f"{head}{seated}; {entity_id} was last seen at {known.position}"
+    return f"{head}{seated}"
+
+
+async def _walk_to_settler(
+    ctx: RunContext[PlannerDeps], entity_id: str, max_ticks: int
+) -> str:
+    """Walk onto a free tile next to a settler, re-aiming as it moves.
+
+    The target has its own plans, so each leg walks to where it was last seen
+    and the next leg aims again. The whole walk shares one tick budget.
+    """
+    bridge = ctx.deps.bridge
+    legs: list[str] = []
+    ticks_left = max(1, max_ticks)
+    for _ in range(WALK_LEGS):
+        known = bridge.model.entities.get(entity_id)
+        if known is None:
+            legs.append(f"you have lost track of {entity_id}")
+            break
+        if chebyshev(bridge.model.position, known.position) == 1:
+            break
+        tiles = free_seat_tiles(bridge.model, known.position)
+        if not tiles:
+            legs.append(f"every tile next to {entity_id} is taken or blocked")
+            break
+        driver = ApproachDriver(tiles, entity_id)
+        brief = Brief(
+            instruction=f"Walk to a free tile next to {entity_id}.",
+            success_condition=f"you are standing next to {entity_id}",
+            max_ticks=ticks_left,
+        )
+        report = await bridge.run_stint(brief, driver)
+        legs.append(report.to_text())
+        ticks_left -= report.ticks_used
+        if ticks_left <= 0 or report.end_reason != ApproachDriver.ARRIVED:
+            # Out of budget, no path, or the walk ended for a reason of its
+            # own (a reflex, or a conversation that started on the way).
+            break
+    return "\n".join(legs)
 
 
 async def _walk_to_anchor(
@@ -1253,6 +1538,8 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
                 tiles. Damage from an attacker starts it whatever the distance.
             notes: extra hints for Jev, as in start_stint.
             shouts: the exact phrases Jev may shout while the reflex runs.
+                Good for raising the alarm or calling for help the moment the
+                reflex fires; nobody can answer it.
             places: named map positions Jev may walk to, as in start_stint.
         """
         brief = ReflexBrief(
@@ -1272,6 +1559,53 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         """Remove your reflex brief; nothing runs for you until you set another."""
         ctx.deps.bridge.clear_reflex()
         return "reflex cleared"
+
+
+async def _craft_recipe(
+    ctx: RunContext[PlannerDeps], recipe: str, known: items.Recipe
+) -> str:
+    """Repeat the craft action for `recipe` until it finishes or an action fails."""
+    lines: list[str] = []
+    for _ in range(known.work + CRAFT_ACTION_MARGIN):
+        outcome = await ctx.deps.bridge.direct_action(
+            pb.Intent(craft=pb.CraftIntent(recipe=recipe)), f"craft {recipe}"
+        )
+        lines.append(outcome)
+        if not action_succeeded(outcome) or CRAFTED_DETAIL in outcome:
+            break
+    return "\n".join(lines)
+
+
+def _refuse_wrong_note_target(
+    ctx: RunContext[PlannerDeps], object_id: str, wanted_kind: str, right_tool: str
+) -> str:
+    """`""` when `object_id` is a `wanted_kind`, else why and what to use instead.
+
+    Only checked against what this actor has actually seen; an object it has
+    never observed is left to the world, which still refuses it by id.
+    """
+    obj = ctx.deps.bridge.model.objects.get(object_id)
+    if obj is None or obj.object_type == wanted_kind:
+        return ""
+    return f"{object_id} is a {obj.object_type}, not a {wanted_kind}; use {right_tool}"
+
+
+async def _submit_sign_text(
+    ctx: RunContext[PlannerDeps], sign_id: str, text: str
+) -> str:
+    """Write `text` on `sign_id` with the world's one-slot note intent."""
+    what = f'write "{text}" on {sign_id}' if text else f"blank {sign_id}"
+    return await ctx.deps.bridge.direct_action(
+        pb.Intent(
+            write_note=pb.WriteNoteIntent(
+                object_id=sign_id,
+                slot=items.SIGN_SLOT,
+                title="",
+                text=text,
+            )
+        ),
+        what,
+    )
 
 
 def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
@@ -1349,29 +1683,21 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         known = items.RECIPES.get(recipe)
         if known is None:
             return f"no such recipe {recipe!r}; known: {sorted(items.RECIPES)}"
-        lines: list[str] = []
-        for _ in range(known.work + CRAFT_ACTION_MARGIN):
-            outcome = await ctx.deps.bridge.direct_action(
-                pb.Intent(craft=pb.CraftIntent(recipe=recipe)), f"craft {recipe}"
-            )
-            lines.append(outcome)
-            if not action_succeeded(outcome) or CRAFTED_DETAIL in outcome:
-                break
-        return "\n".join(lines)
+        return await _craft_recipe(ctx, recipe, known)
 
     @tools.tool
-    async def sleep(ctx: RunContext[PlannerDeps], bed_object_id: str = "") -> str:
+    async def sleep(ctx: RunContext[PlannerDeps], bed: str = "") -> str:
         """Lie down and sleep; the call returns when you wake, and says why.
 
         Args:
-            bed_object_id: the id of a bed on or next to your tile. Leave it
-                empty to sleep on the ground where you stand.
+            bed: the id of a bed on or next to your tile. Leave it empty
+                (the default) to sleep on the ground where you stand.
         """
         bridge = ctx.deps.bridge
         since_tick = bridge.model.tick
-        where = bed_object_id or GROUND
+        where = bed or GROUND
         outcome = await bridge.direct_action(
-            pb.Intent(sleep=pb.SleepIntent(object_id=bed_object_id)),
+            pb.Intent(sleep=pb.SleepIntent(object_id=bed)),
             f"sleep on {where}",
         )
         if not action_succeeded(outcome):
@@ -1414,6 +1740,11 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
                 placed on the neighbouring tile. Leave it empty for road,
                 wood_floor and stone_floor: those go on your own tile.
         """
+        if kind == items.SIGN:
+            return (
+                "use place_sign to put a sign up: it places the sign and writes "
+                "its line in one call, and a blank sign says nothing to anybody"
+            )
         if direction:
             value = _direction_value(direction)
         elif items.is_ground_kind(kind):
@@ -1427,6 +1758,101 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
             pb.Intent(place=pb.PlaceIntent(kind=kind, direction=value)),
             f"place {kind} {direction or 'here'}",
         )
+
+    @tools.tool
+    async def place_sign(
+        ctx: RunContext[PlannerDeps], direction: str, text: str
+    ) -> str:
+        """Craft a sign if you need one, put it on the neighbouring tile, and
+        write its line on it: one call.
+
+        Good for a very short permanent message tied to a place: everyone who
+        passes is guaranteed to be shown it, once with no need to ask. Not
+        good for a temporary message; it stays until rewritten or dismantled.
+
+        A sign holds one line of at most 80 characters plus your name and the
+        tick. It blocks nobody. Every settler who comes within view of it (8
+        tiles) is shown the text once, and again when it changes; nobody has to
+        ask for it. A sign takes 2 wood: if you are not carrying one but are
+        carrying the wood, this call crafts it first (the result says so);
+        without the sign or the wood it names the shortfall and does nothing.
+
+        This is up to three world actions (craft, place, write), so it costs
+        that many ticks. If the sign goes up but the writing fails, the result
+        says so and names the sign.
+
+        Args:
+            direction: N, NE, E, SE, S, SW, W or NW: the tile to put it on.
+            text: the line to write, at most 80 characters.
+        """
+        if len(text) > items.SIGN_TEXT_MAX:
+            raise ModelRetry(
+                f"a sign holds at most {items.SIGN_TEXT_MAX} characters; "
+                f"that line is {len(text)}"
+            )
+        lines: list[str] = []
+        bridge = ctx.deps.bridge
+        if bridge.model.self_info.inventory.get(items.SIGN, 0) <= 0:
+            recipe = items.RECIPES[items.SIGN]
+            needed = recipe.inputs.get(items.WOOD, 0)
+            have = bridge.model.self_info.inventory.get(items.WOOD, 0)
+            if have < needed:
+                return (
+                    f"a sign takes {needed} wood; you carry {have}, and you "
+                    f"have no sign to place"
+                )
+            lines.append(await _craft_recipe(ctx, items.SIGN, recipe))
+            if bridge.model.self_info.inventory.get(items.SIGN, 0) <= 0:
+                return "\n".join(lines)
+        value = _direction_value(direction)
+        placed = await bridge.direct_action(
+            pb.Intent(place=pb.PlaceIntent(kind=items.SIGN, direction=value)),
+            f"place sign {direction}",
+        )
+        lines.append(placed)
+        if not action_succeeded(placed):
+            return "\n".join(lines)
+        match = SIGN_ID_RE.search(placed)
+        if match is None:
+            lines.append(
+                "the sign is standing but the world did not name it; "
+                "use look to find its id and write_sign to write on it"
+            )
+            return "\n".join(lines)
+        sign_id = match.group(1)
+        wrote = await _submit_sign_text(ctx, sign_id, text)
+        lines.append(wrote)
+        if not action_succeeded(wrote):
+            lines.append(f"{sign_id} is standing but still blank; use write_sign")
+            return "\n".join(lines)
+        lines.append(f'{sign_id} now reads: "{text}"')
+        return "\n".join(lines)
+
+    @tools.tool
+    async def write_sign(ctx: RunContext[PlannerDeps], sign_id: str, text: str) -> str:
+        """Rewrite a sign on your tile or next to it; empty text blanks it.
+
+        Good for correcting or retiring a sign's short, permanent message; use
+        `place_sign` to put up a new one instead. Refuses anything that is not
+        a sign; use `write_note` for a message board.
+
+        Anyone may rewrite any sign. A sign holds one line of at most 80
+        characters, and every settler who comes within view of it (8 tiles) is
+        shown the text once, and again when it changes.
+
+        Args:
+            sign_id: the id of the sign, as `look` lists it.
+            text: the new line, at most 80 characters; empty wipes the sign.
+        """
+        refusal = _refuse_wrong_note_target(ctx, sign_id, items.SIGN, "write_note")
+        if refusal:
+            return refusal
+        if len(text) > items.SIGN_TEXT_MAX:
+            raise ModelRetry(
+                f"a sign holds at most {items.SIGN_TEXT_MAX} characters; "
+                f"that line is {len(text)}"
+            )
+        return await _submit_sign_text(ctx, sign_id, text)
 
     @tools.tool
     async def rest(ctx: RunContext[PlannerDeps], object_id: str) -> str:
@@ -1458,42 +1884,18 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         return await ctx.deps.bridge.wait_ticks(max(1, ticks))
 
     @tools.tool
-    async def say(
-        ctx: RunContext[PlannerDeps], text: str, open_to_talk: bool = False
-    ) -> str:
-        """Speak out loud; every settler within ten tiles hears you.
-
-        Args:
-            text: what you say.
-            open_to_talk: with this set, the line is an invitation: you stay
-                open to talk for 40 ticks, everyone who hears it and everyone
-                who can see you knows it, and any settler standing next to you
-                can accept, which starts a conversation with the two of you on
-                a free tile beside you both. Saying it again renews the 40
-                ticks; taking any seat in a conversation ends it.
-        """
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(
-                say=pb.SayIntent(
-                    text=text[:200],
-                    channel=items.LOCAL_CHANNEL,
-                    open_to_talk=open_to_talk,
-                )
-            ),
-            f"say {text[:60]!r}{' (open to talk)' if open_to_talk else ''}",
-        )
-
-    @tools.tool
     async def shout(ctx: RunContext[PlannerDeps], text: str) -> str:
         """Shout; every settler within sixty tiles hears it and where it came from.
 
-        For calling help to a wolf fight or gathering people. Say where and why:
-        "Wolf at (1540, 970), two of us fighting, come!".
+        Good for emergencies and for calling people to a spot. It is one line
+        with no reply possible, so it is not good for working anything out.
+        Say where and why: "Wolf at (1540, 970), two of us fighting, come!".
         """
-        return await ctx.deps.bridge.direct_action(
+        outcome = await ctx.deps.bridge.direct_action(
             pb.Intent(say=pb.SayIntent(text=text[:200], channel=items.SHOUT_CHANNEL)),
             f"shout {text[:60]!r}",
         )
+        return _speak_result(outcome, "shouted", items.SHOUT_RADIUS)
 
     @tools.tool
     async def write_note(
@@ -1503,7 +1905,26 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
         title: str,
         text: str,
     ) -> str:
-        """Write one of a message board's twenty note slots (0-19)."""
+        """Write one of a message board's twenty note slots (0-19).
+
+        Good for announcements and standing information many should see over
+        time: plans, who is doing what, where things are. It reaches only
+        those who come and read it, unlike `say` or `shout`. Refuses anything
+        that is not a message board; use `write_sign` for a sign.
+
+        Args:
+            board_id: the board's id, as `look` prints it. You must be on or
+                next to it.
+            slot: which of its 20 slots (0-19) to write; an existing note in
+                that slot is overwritten.
+            title: shown in `look`'s listing, at most 60 characters.
+            text: the note's body, at most 500 characters.
+        """
+        refusal = _refuse_wrong_note_target(
+            ctx, board_id, items.MESSAGE_BOARD, "write_sign"
+        )
+        if refusal:
+            return refusal
         return await ctx.deps.bridge.direct_action(
             pb.Intent(
                 write_note=pb.WriteNoteIntent(
@@ -1518,22 +1939,37 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
 
     @tools.tool
     async def read_board(ctx: RunContext[PlannerDeps], board_id: str) -> str:
-        """Read every note on a message board you have seen."""
-        board = ctx.deps.bridge.model.objects.get(board_id)
+        """Read every note on a message board you have seen, and mark them read.
+
+        Good for catching up on announcements and standing information; `look`
+        marks a note `(new)` until you read it here.
+        """
+        model = ctx.deps.bridge.model
+        board = model.objects.get(board_id)
         if board is None:
-            return f"you have not seen a board called {board_id!r}"
-        notes = board.notes()
-        if not notes:
+            known = model.boards_known()
+            if not known:
+                return (
+                    f"you have not seen a board called {board_id!r} and know of "
+                    "none; place a message_board to put one down"
+                )
+            listing = ", ".join(f"{b.object_id} at {b.position}" for b in known)
+            return (
+                f"you have not seen a board called {board_id!r}; you know of: {listing}"
+            )
+        by_slot = board.notes_by_slot()
+        if not by_slot:
             return f"{board_id} is empty"
         lines = []
-        for index, note in enumerate(notes):
+        for slot, note in sorted(by_slot.items()):
             title = str(note.get("title", ""))
             if not title:
                 continue
             lines.append(
-                f"[{index}] {title} (by {note.get('author', '?')}, "
+                f"[{slot}] {title} (by {note.get('author', '?')}, "
                 f"tick {note.get('tick', '?')}): {note.get('text', '')}"
             )
+        model.mark_board_read(board_id)
         return "\n".join(lines) or f"{board_id} is empty"
 
 

@@ -9,11 +9,11 @@ fixed by docs/05_jev_agents_design.md.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Collection, Mapping
+from typing import Any, Collection, Mapping, Sequence
 
 from . import items
 from .geometry import Coord, chebyshev, direction_name
-from .options import EMPTY_PLACES, TravelState
+from .options import EMPTY_PLACES, BriefHail, TravelState
 from .pathfinding import NO_PATH, next_step, path_length
 from .worldmodel import EntityInfo, HeardUtterance, ObjectInfo, WorldModel
 
@@ -26,7 +26,8 @@ HISTORY_LINES = 8
 MAP_LEGEND = (
     ". walkable, # blocked or wall, ~ water, T tree, o rock, B bush with a "
     "berry, b bush with no berry, r reeds, y clay, v ore vein, C chest, "
-    "M message board, X workshop table, F furnace, A anvil, + door, z bed, "
+    "M message board, S sign, X workshop table, F furnace, A anvil, + door, "
+    "z bed, "
     "f furniture, , road or floor, i item pile, @ self, P player, W wolf, "
     "? unknown"
 )
@@ -45,6 +46,7 @@ _OBJECT_GLYPHS: Mapping[str, str] = {
     items.IRON_VEIN: "v",
     "chest": "C",
     "message_board": "M",
+    items.SIGN: "S",
     "item_pile": "i",
     items.WORKSHOP_TABLE: "X",
     items.FURNACE: "F",
@@ -122,6 +124,10 @@ def _object_entry(obj: ObjectInfo, origin: Coord) -> dict[str, Any]:
             entry["yields"] = yields
     elif obj.object_type == "bush":
         entry["berry"] = obj.has_berry
+    elif obj.object_type == items.SIGN:
+        # The whole point of a sign is its line, so it rides in the state.
+        entry["text"] = obj.sign_text
+        entry["written_by"] = obj.sign_author
     elif obj.object_type in ("chest", "item_pile"):
         contents = obj.contents()
         if contents:
@@ -197,12 +203,14 @@ def build_state(
     notes: str = "",
     travel: TravelState | None = None,
     places: Mapping[str, Coord] = EMPTY_PLACES,
+    hails: Sequence[BriefHail] = (),
     highlight_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Assemble the JSON state object for one Jev request.
 
     `places` are the brief's named destinations, shown relative so Jev never
-    reasons about absolute coordinates. `highlight_ids` are the objects the
+    reasons about absolute coordinates. `hails` are the settlers the brief lets
+    Jev address and the line to say to each. `highlight_ids` are the objects the
     brief names or offers a walk to, which stay in `nearby` however far off.
     """
     self_info = model.self_info
@@ -213,6 +221,8 @@ def build_state(
         "instruction": instruction,
         "success_condition": success_condition,
     }
+    if hails:
+        brief["hails"] = [f'say to {h.settler}: "{h.line}"' for h in hails]
     if places:
         brief["places"] = {
             name: f"dx {target[0] - origin[0]} dy {target[1] - origin[1]}"
@@ -256,9 +266,6 @@ def build_state(
         "map_legend": MAP_LEGEND,
         "recent": model.recent_history(HISTORY_LINES),
     }
-    invitations = _invitation_lines(model)
-    if invitations:
-        state["invitations"] = invitations
     threat = _threat_entry(model)
     if threat:
         state["threat"] = threat
@@ -280,6 +287,7 @@ NOTEWORTHY_OBJECT_TYPES: frozenset[str] = (
             items.CHEST,
             items.ITEM_PILE,
             items.MESSAGE_BOARD,
+            items.SIGN,
             items.BED,
             items.DOOR,
             items.CONVERSATION,
@@ -369,26 +377,6 @@ def _clock_entry(model: WorldModel) -> dict[str, Any]:
         "tick_of_day": f"{clock.tick_of_day}/{clock.day_length}",
         "night": clock.night,
     }
-
-
-def _invitation_lines(model: WorldModel) -> list[str]:
-    """Who is open to talk, and whether this actor is (docs/09 section 8.3).
-
-    One line per other settler with an open invitation, plus a line for the
-    actor's own while it stands.
-    """
-    origin = model.position
-    lines = [
-        f"{invitation.entity_id} at dx {invitation.position[0] - origin[0]} "
-        f"dy {invitation.position[1] - origin[1]} is open to talk: "
-        f'"{invitation.text}"'
-        for invitation in model.open_invitations()
-    ]
-    if model.my_invitation_live():
-        lines.append(
-            f"you are open to talk ({model.my_invitation_ticks_left()} ticks left)"
-        )
-    return lines
 
 
 def _threat_entry(model: WorldModel) -> dict[str, Any]:

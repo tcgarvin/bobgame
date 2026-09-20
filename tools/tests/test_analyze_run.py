@@ -522,6 +522,86 @@ def _local_utterance(speaker: str, text: str, open_to_talk: bool = False) -> dic
     }
 
 
+def _failed_action(entity: str, action_type: str, details: str) -> dict:
+    return {
+        "entity_id": entity,
+        "action_type": action_type,
+        "success": False,
+        "details": details,
+    }
+
+
+def test_hails_are_counted_with_their_refusals(tmp_path: Path) -> None:
+    """docs/09 section 9: `hail conv_N <target>` and `hailed conv_N <hailer>`."""
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(
+                1,
+                actions=[
+                    _action("theo", "converse", "hail conv_9 mira"),
+                    _action("mira", "converse", "hailed conv_9 theo"),
+                ],
+            ),
+            tick_record(
+                2,
+                actions=[
+                    _failed_action(
+                        "kai",
+                        "converse",
+                        "mira was in a conversation 14 ticks ago and cannot be "
+                        "hailed for another 46 ticks",
+                    ),
+                    _failed_action("kai", "converse", "theo is asleep"),
+                    # Shared with `accept`, so deliberately not attributed.
+                    _failed_action("kai", "converse", "not next to mira"),
+                ],
+            ),
+            tick_record(3, objects_removed=["conv_9"]),
+        ],
+    )
+
+    facts, moments, conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.hails_succeeded == 1
+    assert facts.hail_failures == {"hail cooldown": 1, "target asleep": 1}
+
+    conv = conversations["conv_9"]
+    assert conv.opened_by == "theo"
+    assert conv.via_hail is True
+    assert conv.via_invitation is False
+    assert conv.participants == {"mira", "theo"}
+    assert conv.joins == [], "the hailed settler is not a joiner"
+
+    hail_moment = next(m for m in moments if m.kind == "hail")
+    assert hail_moment.tick == 1
+    assert hail_moment.entity_id == "theo"
+    assert "mira" in hail_moment.text and "conv_9" in hail_moment.text
+    assert "conversation_joined" not in {m.kind for m in moments}
+
+    layout = analyze_run.RunLayout(
+        run_id="r",
+        root=tmp_path,
+        agents_dir=tmp_path / "agents",
+        ticks_path=ticks,
+        meta={},
+    )
+    summary = analyze_run.summarise_conversations(
+        conversations,
+        ["mira", "theo"],
+        layout,
+        "http://localhost:5173",
+        "r",
+        hails_succeeded=facts.hails_succeeded,
+        hail_failures=facts.hail_failures,
+    )
+    assert summary["opened_by_hail"] == 1
+    assert summary["hails_succeeded"] == 1
+    assert summary["hails_attempted"] == 3
+    assert summary["hail_failures"] == {"hail cooldown": 1, "target asleep": 1}
+
+
 def test_invitation_said_and_accepted(tmp_path: Path) -> None:
     """docs/09 section 8: a flagged `say` and an `accept` of it.
 
@@ -621,6 +701,7 @@ def test_summarise_conversations_and_giving(tmp_path: Path) -> None:
                 "entity_id": "mira",
                 "tick": 10,
                 "conversation_id": "conv_9",
+                "purpose": "ask theo for stone",
             },
             {
                 "event": "conversation_end",
@@ -628,7 +709,7 @@ def test_summarise_conversations_and_giving(tmp_path: Path) -> None:
                 "tick": 20,
                 "conversation_id": "conv_9",
                 "end_reason": "closed",
-                "note": "theo wants to trade stone",
+                "agreed": "theo wants to trade stone",
             },
         ],
     )
@@ -636,12 +717,19 @@ def test_summarise_conversations_and_giving(tmp_path: Path) -> None:
         layout.agents_dir / "agent-theo" / "conversations.jsonl.gz",
         [
             {
+                "event": "conversation_start",
+                "entity_id": "theo",
+                "tick": 11,
+                "conversation_id": "conv_9",
+            },
+            {
                 "event": "conversation_end",
                 "entity_id": "theo",
                 "tick": 20,
                 "conversation_id": "conv_9",
                 "end_reason": "left",
-                "note": "",
+                "agreed": "",
+                "commitment": "",
             },
         ],
     )
@@ -656,6 +744,11 @@ def test_summarise_conversations_and_giving(tmp_path: Path) -> None:
     assert summary["end_reasons"] == {"closed": 1, "left": 1}
     assert summary["notes_written"] == 1
     assert summary["mean_duration_ticks"] == 10
+    assert summary["line_count_stats"] == {"min": 1, "median": 1, "max": 1}
+    # One seat (mira's) of the two taken carried a purpose; theo joined with
+    # none, as a joiner has no purpose to give (docs/09 section 10, item 4).
+    assert summary["purpose_given"] == 1
+    assert summary["purpose_total"] == 2
     assert len(summary["longest"]) == 1
     assert summary["longest"][0]["conversation_id"] == "conv_9"
     assert summary["longest"][0]["link"].startswith("http://localhost:5173/?run=r")
@@ -835,13 +928,23 @@ def test_pre_conversation_run_reports_cleanly(run_dir: Path) -> None:
         "opened": 0,
         "opened_by_invitation": 0,
         "invitations_said": 0,
+        "opened_by_hail": 0,
+        "hails_succeeded": 0,
+        "hails_attempted": 0,
+        "brief_hails_granted": 0,
+        "jev_hails_chosen": 0,
+        "planner_hails_attempted": 0,
+        "hail_failures": {},
         "joined": 0,
         "distinct_participants": 0,
         "utterances": 0,
         "end_reasons": {},
         "notes_written": 0,
+        "purpose_given": 0,
+        "purpose_total": 0,
         "mean_duration_ticks": 0,
         "mean_lines": 0,
+        "line_count_stats": {"min": 0, "median": 0, "max": 0},
         "longest": [],
     }
     assert payload["giving"] == {"count": 0, "kinds": {}, "pairs": {}}
@@ -1419,3 +1522,94 @@ def test_a_run_without_journal_rewrites_says_so(
     out = capsys.readouterr().out
 
     assert "no journal rewrites recorded" in out
+
+
+# --------------------------------------------------------------------------
+# signs (docs/08_building.md, "Signs")
+# --------------------------------------------------------------------------
+
+
+def test_sign_writes_are_counted_and_become_moments(tmp_path: Path) -> None:
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(
+                1,
+                actions=[
+                    _action("ada", "place", "placed sign_4 at (3, 4)"),
+                    _action("ada", "write_note", 'wrote sign_4: "wolves to the north"'),
+                ],
+            ),
+            tick_record(
+                2,
+                actions=[
+                    _action("bram", "write_note", 'wrote sign_4: "all clear"'),
+                    _action("bram", "write_note", "cleared sign_4"),
+                    _action("bram", "write_note", "wrote slot 0 on board_1"),
+                ],
+            ),
+        ],
+    )
+
+    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+
+    assert facts.placements == {"sign": 1}
+    assert facts.signs_written == 2
+    assert facts.signs_cleared == 1
+    # A board note is still a board note.
+    assert facts.notes_written == 1
+    assert [m.text for m in moments if m.kind == "sign"] == [
+        'ada wrote on sign_4: "wolves to the north"',
+        'bram wrote on sign_4: "all clear"',
+    ]
+    assert [m.text for m in moments if m.kind == "milestone"] == [
+        "first sign: ada placed sign_4 at (3, 4)"
+    ]
+
+
+# --------------------------------------------------------------------------
+# brief hails (docs/09_conversation_and_reflex.md section 9.3)
+# --------------------------------------------------------------------------
+
+
+def test_brief_hails_and_jev_hail_choices_are_counted(tmp_path: Path) -> None:
+    """A brief that grants a hail, and a tick where Jev took it."""
+    root = tmp_path / "20260919-000000-settlement"
+    (root / "agents").mkdir(parents=True)
+    write_gz_jsonl(
+        root / "agents" / "agent-ada" / "stints.jsonl.gz",
+        [
+            {
+                "event": "stint_start",
+                "entity_id": "ada",
+                "tick": 1,
+                "stint_id": "ada-1",
+                "brief": {
+                    "instruction": "gather stone",
+                    "hails": [{"settler": "dov", "line": "Split the wall work?"}],
+                },
+            },
+            {
+                "entity_id": "ada",
+                "tick": 2,
+                "stint_id": "ada-1",
+                "action": "hail:dov",
+                "top": [["hail:dov", 0.7]],
+                "intent_result": "accepted",
+            },
+        ],
+    )
+    layout = analyze_run.RunLayout(
+        run_id=root.name,
+        root=root,
+        agents_dir=root / "agents",
+        ticks_path=None,
+        meta={},
+    )
+
+    summary = analyze_run.summarise_agent("ada", layout)
+
+    assert summary["brief_hails"] == 1
+    assert summary["jev_hails"] == 1
+    assert summary["actions"]["hail"] == 1

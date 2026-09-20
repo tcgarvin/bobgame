@@ -57,13 +57,17 @@ ACTION_JOIN = "join"
 # Mirrored in `items.py` with the other world constants, and named here beside
 # the actions it belongs with.
 ACTION_ACCEPT = items.ACTION_ACCEPT
+ACTION_HAIL = items.ACTION_HAIL
+# The world's own word for the target's side of a hail: a seat it never asked
+# for (docs/09 section 9).
+ACTION_HAILED = items.ACTION_HAILED
 ACTION_SPEAK = "speak"
 ACTION_PASS = "pass"
 ACTION_LEAVE = "leave"
 ACTION_GIVE = "give"
 ACTION_EAT = "eat"
 
-CONVERSE_ACTION_TYPE = "converse"
+CONVERSE_ACTION_TYPE = items.CONVERSE_ACTION_TYPE
 GIVE_ACTION_TYPE = "give"
 EAT_ACTION_TYPE = "eat"
 
@@ -81,7 +85,11 @@ END_NOBODY_JOINED = "nobody joined"
 # it. `accepted` is the inviter's side of an `accept`: the world reports it as
 # a plain `join` although the actor submitted nothing (docs/09 section 8.2).
 VIA_ACCEPTED = "accepted"
-JOIN_ACTIONS = (ACTION_OPEN, ACTION_JOIN, ACTION_ACCEPT)
+# The hailed settler's `via`; the hailer's is `hail`, the world's own word.
+VIA_HAILED = ACTION_HAILED
+JOIN_ACTIONS = (ACTION_OPEN, ACTION_JOIN, ACTION_ACCEPT, ACTION_HAIL, ACTION_HAILED)
+# The seats the actor never asked for: it was accepted, or it was hailed.
+UNASKED_VIA = (VIA_ACCEPTED, VIA_HAILED)
 
 # The world creates the conversation object on the tick it accepts the `open`
 # or `join`, but an observation can lag by a tick; wait this long for the
@@ -122,6 +130,8 @@ civilization. You are in a
 conversation with some of them right now, and this is your turn to act in it.
 
 How a conversation works:
+- This is the settlers' one channel where the others answer back: everything
+  else (`shout`, a board, a sign) only ever goes one way.
 - A conversation sits on an anchor tile. Up to {items.CONVERSATION_MAX_PARTICIPANTS} settlers stand on tiles next to
   it and take turns in the order they joined. Anyone within {items.SAY_RADIUS} tiles hears what
   is said, whether or not they are in it.
@@ -139,15 +149,31 @@ How a conversation works:
   closes when fewer than two settlers are left in it, when everyone passes in
   one full round, or after {items.CONVERSATION_MAX_UTTERANCES} lines.
 - A `give` needs the item in your pack, the exact item name, and an amount.
+- You may be in this conversation because someone walked up and addressed you
+  rather than because you asked for one. Their line is the first one in the
+  transcript and the turn is yours.
 
 Answer with one move: the action, the text if you are speaking, the target,
 item kind and amount if you are giving, and the item kind if you are eating.
 """
 
 NOTE_INSTRUCTION = (
-    "The conversation is over. Write one line to keep in your notes, or an "
-    "empty string to keep nothing. Only the line itself, no preamble."
+    "The conversation is over. Answer with two short fields, either of which "
+    "may be empty: what was agreed or learned in the conversation, and "
+    "separately what you yourself said you would do. No preamble, just the "
+    "two fields."
 )
+
+
+class ClosingNote(BaseModel):
+    """The two things worth keeping once a conversation ends."""
+
+    agreed_or_learned: str = Field(
+        default="", description="what was agreed or learned, or empty"
+    )
+    you_said_you_would: str = Field(
+        default="", description="what you yourself said you would do, or empty"
+    )
 
 
 class ConverserMove(BaseModel):
@@ -174,9 +200,14 @@ class MoveCall:
 
 @dataclass(frozen=True)
 class NoteCall:
-    """The closing note and what the call that wrote it cost."""
+    """The closing note (docs/09 section 10, item 5) and what it cost.
 
-    text: str
+    `agreed` is what was agreed or learned; `commitment` is what this settler
+    itself said it would do. Either may be empty.
+    """
+
+    agreed: str = ""
+    commitment: str = ""
     usage: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -272,9 +303,9 @@ class ModelConverser:
             model_settings=settings,
             retries=2,
         )
-        self.note_agent: Agent[None, str] = Agent(
+        self.note_agent: Agent[None, ClosingNote] = Agent(
             self.model_name,
-            output_type=str,
+            output_type=ClosingNote,
             system_prompt=CONVERSER_NARRATIVE,
             model_settings=settings,
             retries=1,
@@ -292,7 +323,10 @@ class ModelConverser:
         result = await self.note_agent.run(prompt)
         usage = usage_from_messages(result.new_messages())
         self.ledger.add_converser(usage)
-        return NoteCall(result.output.strip(), usage)
+        output = result.output
+        return NoteCall(
+            output.agreed_or_learned.strip(), output.you_said_you_would.strip(), usage
+        )
 
 
 @dataclass
@@ -307,15 +341,24 @@ class ConversationReport:
     transcript: tuple[TranscriptLine, ...]
     given: tuple[str, ...] = ()
     received: Mapping[str, int] = field(default_factory=dict)
-    note: str = ""
+    # What this settler said it would do, and what was agreed or learned
+    # (docs/09 section 10, item 5); either may be empty.
+    commitment: str = ""
+    agreed: str = ""
 
     def to_text(self) -> str:
-        """Render the report for the planner's tool result."""
+        """Render the report for the planner's tool result.
+
+        Leads with the two closing-note fields, before the transcript, so the
+        planner sees what to act on without reading the whole exchange.
+        """
         lines = [
             f"CONVERSATION REPORT: {self.conversation_id}",
             f"  ticks: {self.start_tick}-{self.end_tick}",
             f"  participants: {', '.join(self.participants) or 'nobody else'}",
             f"  ended because: {self.end_reason}",
+            f"  you said you would: {self.commitment or '(none)'}",
+            f"  agreed or learned: {self.agreed or '(none)'}",
         ]
         if self.transcript:
             lines.append("  transcript:")
@@ -329,7 +372,6 @@ class ConversationReport:
                 f"{kind} +{count}" for kind, count in sorted(self.received.items())
             )
             lines.append(f"  items you were given: {received}")
-        lines.append(f"  note kept: {self.note or '(none)'}")
         return "\n".join(lines)
 
 
@@ -410,7 +452,7 @@ def converse_intent(
 ) -> pb.Intent:
     """A `ConverseIntent` wrapped in an Intent, with the text truncated.
 
-    `target_entity_id` is the settler whose invitation an `accept` takes up.
+    `target_entity_id` is the settler a `hail` addresses.
     """
     return pb.Intent(
         converse=pb.ConverseIntent(
@@ -435,10 +477,12 @@ def joined_conversation(digest: TickDigest) -> tuple[str, str]:
 
     The world reports a successful `ConverseIntent` as an `EntityActed` with
     action type `converse` and details that start with the action name and the
-    conversation id: `open conv_12`, `join conv_12`, or `accept conv_12 mira`
-    for the settler who accepted an invitation. The inviter's own side of an
-    accept arrives as `join conv_12`, so the action alone cannot tell the two
-    apart; `JevAgent` does that from what it submitted.
+    conversation id: `open conv_12`, `join conv_12`, `accept conv_12 mira`
+    for the settler who accepted, `hail conv_12 mira` for the
+    settler who hailed one, and `hailed conv_12 ivo` for the settler that hail
+    seated. The inviter's own side of an accept arrives as `join conv_12`, so
+    the action alone cannot tell the two apart; `JevAgent` does that from what
+    it submitted.
 
     Both values are empty when the actor took no seat.
     """
@@ -454,6 +498,22 @@ def joined_conversation(digest: TickDigest) -> tuple[str, str]:
 def joined_conversation_id(digest: TickDigest) -> str:
     """The conversation the actor opened, joined or accepted into this tick."""
     return joined_conversation(digest)[0]
+
+
+def hailed_target(digest: TickDigest) -> str:
+    """The settler this actor addressed, when this tick's seat came from a hail.
+
+    Details read `hail conv_12 mira`; `""` when the seat came from anything
+    else. Used to match a Jev-chosen `hail:<settler>` option back to the
+    `BriefHail` that named it, for its purpose (docs/09 section 10, item 4).
+    """
+    for acted in digest.own_actions:
+        if acted.action_type != CONVERSE_ACTION_TYPE or not acted.success:
+            continue
+        parts = acted.details.split()
+        if len(parts) >= 3 and parts[0] == ACTION_HAIL:
+            return parts[2]
+    return ""
 
 
 def transcript_for(
@@ -527,6 +587,7 @@ class ConversationSession:
         memory_path: Path,
         reflex_line: Callable[[], str] = lambda: "",
         alert_line: Callable[[], str] = lambda: "",
+        purpose: str = "",
     ) -> None:
         self.conversation_id = conversation_id
         self.model = model
@@ -535,6 +596,10 @@ class ConversationSession:
         self.memory_path = memory_path
         self.reflex_line = reflex_line
         self.alert_line = alert_line
+        # Why this actor itself started the conversation (by opening or
+        # hailing); empty for a settler that was hailed or that joined
+        # (docs/09 section 10, item 4). Shown only in this actor's own prompt.
+        self.purpose = purpose
 
         self.start_tick = model.tick
         self.finished = False
@@ -558,18 +623,20 @@ class ConversationSession:
     def begin(self, via: str = ACTION_JOIN) -> None:
         """Write the `conversation_start` trace line.
 
-        `via` is how the seat was taken: `open`, `join`, `accept`, or
-        `accepted` for the inviter whose invitation someone took up.
+        `via` is how the seat was taken: `open`, `join`, `accept`, `hail`,
+        `accepted` for the settler someone accepted, or
+        `hailed` for the settler someone walked up to and addressed.
         """
-        self.trace.conversations.write(
-            {
-                "event": "conversation_start",
-                "entity_id": self.model.entity_id,
-                "tick": self.model.tick,
-                "conversation_id": self.conversation_id,
-                "via": via,
-            }
-        )
+        payload: dict[str, Any] = {
+            "event": "conversation_start",
+            "entity_id": self.model.entity_id,
+            "tick": self.model.tick,
+            "conversation_id": self.conversation_id,
+            "via": via,
+        }
+        if self.purpose:
+            payload["purpose"] = self.purpose
+        self.trace.conversations.write(payload)
 
     def decide(self, digest: TickDigest) -> pb.Intent:
         """This tick's intent; sets `finished` when the seat is gone."""
@@ -826,6 +893,8 @@ class ConversationSession:
             "Your journal:\n" + read_notes(self.memory_path, self.model.entity_id),
             self.reflex_line(),
         ]
+        if self.purpose:
+            parts.append(f"You started this conversation because: {self.purpose}")
         alert = self.alert_line()
         if alert:
             parts.append(alert)
@@ -869,14 +938,19 @@ class ConversationSession:
         """
         conversation = self.model.conversation_by_id(self.conversation_id)
         transcript = transcript_for(self.model, conversation, self.conversation_id)
-        note_call = await self._ask_for_note(transcript)
-        note = note_call.text
-        if note:
+        # Traced here too (it was not before, docs/09 section 10, item 5):
+        # the closing call is otherwise invisible to a run's traces.
+        prompt = self.note_prompt(transcript)
+        note_call = await self._ask_for_note(prompt)
+        agreed = note_call.agreed
+        commitment = note_call.commitment
+        if agreed or commitment:
             append_conversation_note(
                 self.memory_path,
                 tick=self.model.tick,
                 participants=self._other_participants(),
-                text=note,
+                agreed=agreed,
+                commitment=commitment,
                 entity_id=self.model.entity_id,
             )
         report = ConversationReport(
@@ -888,7 +962,8 @@ class ConversationSession:
             transcript=transcript,
             given=tuple(self._given),
             received=self._received(),
-            note=note,
+            agreed=agreed,
+            commitment=commitment,
         )
         self.trace.conversations.write(
             {
@@ -901,23 +976,29 @@ class ConversationSession:
                 "utterances": len(transcript),
                 "given": list(self._given),
                 "received": self._received(),
-                "note": note,
+                "note_prompt": prompt,
+                "agreed": agreed,
+                "commitment": commitment,
                 **({"usage": dict(note_call.usage)} if note_call.usage else {}),
             }
         )
         return report
 
-    async def _ask_for_note(self, transcript: Sequence[TranscriptLine]) -> NoteCall:
+    async def _ask_for_note(self, prompt: str) -> NoteCall:
         try:
-            call = await self.converser.note(self.note_prompt(transcript))
+            call = await self.converser.note(prompt)
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - a failed note is not fatal
             # The conversation is already over; losing the note must not lose
             # the report the planner is waiting for.
             logger.warning("conversation_note_failed", error=str(error))
-            return NoteCall("")
-        return NoteCall(call.text.strip()[:MAX_NOTE_CHARACTERS], call.usage)
+            return NoteCall()
+        return NoteCall(
+            call.agreed.strip()[:MAX_NOTE_CHARACTERS],
+            call.commitment.strip()[:MAX_NOTE_CHARACTERS],
+            call.usage,
+        )
 
     def _received(self) -> dict[str, int]:
         """What other settlers handed this actor during the conversation."""
@@ -970,11 +1051,18 @@ def append_conversation_note(
     *,
     tick: int,
     participants: Sequence[str],
-    text: str,
+    agreed: str = "",
+    commitment: str = "",
     entity_id: str = "",
 ) -> None:
-    """Append `[conversation, tick N, with a, b] <text>` to today's notes."""
+    """Append what was agreed/learned and what this settler said it would do.
+
+    Each is its own `[conversation, tick N, with a, b] ...` line under today's
+    notes when it is not empty (docs/09 section 10, item 5).
+    """
     with_whom = ", ".join(participants) or "nobody"
-    append_scratch_line(
-        path, f"[conversation, tick {tick}, with {with_whom}] {text}", entity_id
-    )
+    prefix = f"[conversation, tick {tick}, with {with_whom}]"
+    if agreed:
+        append_scratch_line(path, f"{prefix} agreed: {agreed}", entity_id)
+    if commitment:
+        append_scratch_line(path, f"{prefix} I said I would: {commitment}", entity_id)

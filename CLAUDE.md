@@ -10,6 +10,16 @@ Quick reference for AI agents working on this codebase.
 **Cooperation update**: wolves are tuned so nobody beats them alone (16 health, bite 3, simultaneous damage: a lone swordsman loses 12 of 20 health, two armed settlers lose 6 between them). Settlers have a 60-tile `shout` channel whose events carry the speaker's position, Jev shouts when a wolf is in view and is offered a walk to anyone it hears shouting, Jev's state has a `threat` block and the actor's own name, and the planner's `look` lists every settler met. The planner is told it runs in real time: every tool result shows the tick, the ticks the turn has cost, and a `!!` alert when a wolf is near or biting that tells it to hand back to Jev with a fighting `start_stint`. The planner's tool budget is 20 per turn and soft: every tool result says what is left, and a spent budget refuses calls instead of discarding the turn. Details: "Implementation notes" in [docs/05_jev_agents_design.md](docs/05_jev_agents_design.md).
 **Conversation and reflex update**: settlers can open a conversation on a tile (`ConverseIntent`: up to 4 seats adjacent to the anchor, world-enforced round-robin turns, closes on a full round of passes), hand items to each other (`GiveIntent`), and register a reflex brief with `set_reflex` that the agent drops into without the planner when a wolf comes within the chosen distance or bites, during planning, conversations and code-driven stints. In conversation mode a small "converser" model call takes each turn and a closing call writes a note to `memory.md`. Contract: [docs/09_conversation_and_reflex.md](docs/09_conversation_and_reflex.md).
 **Invitations update (2026-09-18)**: `say(open_to_talk=True)` keeps a settler open to talk for 40 ticks; a settler standing next to an open inviter can `accept` (planner tool `talk_to`, Jev option `talk_to:<id>`) and the world creates the conversation on a free tile next to both. Briefs carry `invitations` (lines Jev may say with the flag). A conversation can now start while the planner is mid-turn: in-flight single-tick tools return "interrupted: conversation conv_N started", stints wait, and the report arrives in the next tool result. The planner no longer has `move`, `attack`, `extract` or `collect` tools (Jev, `travel_to` and `build` cover them) and its budget is 20 calls. Contract: docs/09 section 8.
+**Hail update (2026-09-19)**: a settler no longer needs an invitation to start
+a conversation. `ConverseIntent` action `hail` (target + opening line) walks up
+to another settler and addresses it: the conversation appears on a free tile
+next to them both with the hailer's line first and the target speaking next,
+and the target is seated without being asked. A settler cannot be hailed for
+`HAIL_COOLDOWN_TICKS` (60) after its last conversation ended. The planner tool
+is `talk_to(entity_id, opening_line, max_ticks)`, and the planner can also
+grant Jev up to 3 hails per brief (see the channels update below). Contract:
+[docs/09_conversation_and_reflex.md](docs/09_conversation_and_reflex.md)
+section 9.
 **Jev context update (2026-09-18)**: Jev's walk options are `step_towards:<object id | entity id | place name | shout:<speaker>>` with a per-type quota (nearest 2 of each object group, every wolf, nearest 3 settlers) instead of one shared top 6, plus a step toward every object id the brief names; briefs carry `places` (`{"river": [x, y]}`) so Jev never sees an absolute coordinate; the state has one always-present `facts` list (food, wolves, fatigue, day), a `so_far` block (ticks, inventory change, action counts, net movement this stint), `B`/`b` map glyphs for bushes with and without berries, and "arrived" instead of "blocked" on a finished walk. Jev is asked a `lost` question and a stint that scores it twice ends with reason `lost` and a report line telling the planner to name the target or move closer. `agents/evals/` is a live functional suite against the real Jev API (`cd agents && uv run pytest evals -q`, needs `TYPESAFE_API_KEY`) for prompt and model-version drift; `evals/replay_states.py` re-asks recorded states. The planner prompt has a "What Jev sees, and how to write for it" section. Contract: docs/05 "Stint (Jev executor)".
 **Metal and sleep update**: recipes have a station (`workshop_table`, `furnace`, `anvil`) and a work count; station recipes with work > 1 take one craft action per tick with progress kept on the station. Copper and iron veins sit in inland outcrops (never within 60 tiles of the site) and need a pickaxe of a high enough tier; ore + charcoal smelt to ingots at a furnace, copper tools are made at the workshop table, iron tools and the iron sword at an anvil. The world has a 300-tick day (night is the last third), settlers have fatigue (tired at 60: tool work halved, hits 1 softer, no regen; collapse at 100), and sleep on beds or the ground with `SleepIntent`/`WakeIntent`; the planner has `sleep` and `wake` tools and `craft` loops multi-tick recipes. Contract: [docs/10_metal_and_sleep.md](docs/10_metal_and_sleep.md).
 **Journal update**: `memory.md` is no longer an append-only note file. It is a
@@ -29,6 +39,52 @@ refuses an empty pack and names the shortfall and recipe, `look` lists item
 piles with contents, a failed `pickup` names the nearest piles, and the prompt
 states the physics of dying (pile, respawn place and state, no permanent death,
 no armor).
+**Signs update (2026-09-19)**: settlers can craft a `sign` (2 wood, by hand),
+place it like any other structure and write one line of at most 80 characters
+on it with the existing `WriteNoteIntent`. A sign blocks nobody, anyone may
+rewrite or blank it, and it dismantles like any other built piece. Unlike a
+message board it is *pushed*: the first time a settler comes within view (8
+tiles) of a written sign, and again whenever its text changes, the line
+`[sign at (x, y) by ada, written tick N: "..."]` lands in the planner's next
+tool result, its next turn prompt, the journal's day log and any stint report
+running at the time. The planner has `place_sign` and `write_sign` (the generic
+`place` refuses a sign); Jev sees signs as `S` with their text and can walk to
+one, but never places a blank one. Contract: [docs/08_building.md](docs/08_building.md) ("Signs").
+**Channels update (2026-09-19)**: settlers now have exactly four ways to reach
+each other, and the prompt states what each is good for: `shout` (60 tiles, one
+line, no reply), a conversation (the only back-and-forth; its opening line is
+heard within 10 tiles and anyone who sees it can join, up to 4), a message
+board (20 notes, standing information, `look` marks what is new to you) and a
+sign (one pushed line tied to a place). `say` and the whole invitation
+mechanic left the agents' surface: no planner `say` tool, no Jev `say:`,
+`invite:` or `talk_to:` options, no `Brief.invitations`. The world keeps
+`open_to_talk` and `accept` intact but dormant. In their place the planner
+grants Jev **brief hails**: `start_stint(..., hails=[{"settler": "dov",
+"line": "..."}])`, at most 3, each naming a settler it has met; Jev is offered
+`hail:<settler>` (the hail next to them, a code-owned walk otherwise) and a
+hail that lands ends the stint into the conversation, exactly as a join does.
+A spent or twice-refused hail drops out of the offer and both facts go into the
+stint report. `say`/`shout` also tell the speaker who heard them, and boards
+track which notes you have read. Contract: docs/09 sections 9 and 10.
+**Live-run fixes (2026-09-19)**: a live run of the hail/signs/no-`say` build
+(`runs/20260919-211823-settlement`) showed a sleeping settler was invisible to
+the planner (13 of 23 hails refused "X is asleep") and could still be walked
+into a hail; `write_sign` could silently overwrite a message board's own note
+slot; no sign was ever crafted because `place_sign` required one already in
+the pack; a wrong tool kwarg (`sleep(bed_object_id=...)`, the real name is
+`bed`) failed the whole turn because pydantic-ai's retry text never named the
+tool's parameters; and conversations died after a couple of lines because the
+converser had no idea why the conversation started, and its closing call kept
+only one free-text line. Fixed: `describe_world`/`look` mark an asleep
+settler, `talk_to` refuses one up front; `write_sign`/`write_note` refuse the
+wrong object naming the right tool; `place_sign` crafts a sign from 2 wood
+when needed; every planner tool's argument validator now names the tool's
+parameters on a bad call, and retries rose from 2 to 3; `talk_to`/
+`open_conversation` take a required `purpose` (and Jev's brief hails an
+optional one) shown only to the settler that started the conversation; the
+closing note is now two fields (what was agreed/learned, what this settler
+said it would do), both reaching the journal and the planner's report.
+Contract: docs/09 section 11.
 **In progress**: milestone 7, run recording & replay — every run is recorded to `runs/<run_id>/` as gzip JSONL (not Parquet) and a replay server serves it to the viewer with seeking, playback and deep links. Contract: [docs/07_replay.md](docs/07_replay.md).
 **Not done**: milestone 8 (LLM agents) is superseded by `agents.jev_agent`.
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)

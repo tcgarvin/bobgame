@@ -46,6 +46,7 @@ STONE_FLOOR = "stone_floor"
 WOOD_WALL = "wood_wall"
 STONE_WALL = "stone_wall"
 DOOR = "door"
+SIGN = "sign"
 BED = "bed"
 CHAIR = "chair"
 TABLE = "table"
@@ -63,7 +64,7 @@ GROUND_LAYER_KINDS: frozenset[str] = frozenset({ROAD, WOOD_FLOOR, STONE_FLOOR})
 
 BUILDING_KINDS: frozenset[str] = (
     GROUND_LAYER_KINDS
-    | frozenset({WOOD_WALL, STONE_WALL, DOOR, BED, CHAIR, TABLE})
+    | frozenset({WOOD_WALL, STONE_WALL, DOOR, SIGN, BED, CHAIR, TABLE})
     | STATION_KINDS
 )
 
@@ -81,6 +82,19 @@ WIELDABLE_KINDS: frozenset[str] = frozenset(
         IRON_SWORD,
     }
 )
+
+# --- Signs (mirrors world/items.py, docs/08_building.md "Signs") ------------
+
+# One line, refused outright when it is longer; never truncated.
+SIGN_TEXT_MAX = 80
+# Object state keys a placed sign carries.
+SIGN_TEXT_KEY = "text"
+SIGN_AUTHOR_KEY = "author"
+SIGN_TICK_KEY = "tick"
+# A sign has one slot, so `WriteNoteIntent.slot` is always this.
+SIGN_SLOT = 0
+# How far away a sign is read from: the observation view radius.
+SIGN_READ_RADIUS = 8
 
 # --- Natural objects -------------------------------------------------------
 
@@ -299,6 +313,17 @@ CONVERSATION_TRANSCRIPT_KEPT = 12
 INVITATION_TICKS = 40
 # The `ConverseIntent` action that takes up an open invitation.
 ACTION_ACCEPT = "accept"
+# The `ConverseIntent` action that walks up to a settler and addresses it,
+# without any invitation (docs/09 section 9). The world reports it to the
+# hailer as `hail conv_N <target>` and to the target as
+# `hailed conv_N <hailer>`.
+ACTION_HAIL = "hail"
+ACTION_HAILED = "hailed"
+# A settler cannot be hailed until this many ticks after its last conversation
+# ended. Invitations, accepting, opening and joining are unaffected.
+HAIL_COOLDOWN_TICKS = 60
+# `EntityActed.action_type` for every `ConverseIntent`, whatever its action.
+CONVERSE_ACTION_TYPE = "converse"
 
 
 # --- Recipes ---------------------------------------------------------------
@@ -329,6 +354,7 @@ RECIPES: Mapping[str, Recipe] = {
     SWORD: Recipe({WOOD: 1, STONE: 3}),
     CHEST: Recipe({WOOD: 6}),
     MESSAGE_BOARD: Recipe({WOOD: 4, STONE: 1}),
+    SIGN: Recipe({WOOD: 2}),
     PLANK: Recipe({WOOD: 1}, output_count=2),
     ROPE: Recipe({FIBER: 2}),
     ROAD: Recipe({STONE: 2}, output_count=4),

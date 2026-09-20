@@ -68,6 +68,9 @@ CRAFT_RECIPES: Mapping[str, Mapping[str, int]] = items.CRAFT_RECIPES
 
 WIELDABLE_KINDS: frozenset[str] = items.WIELDABLE_KINDS
 PLACEABLE_KINDS: frozenset[str] = items.PLACEABLE_KINDS
+# A sign is only worth anything with a line on it, and Jev has no way to write
+# one: it would plant blank posts. Placing signs is the planner's `place_sign`.
+JEV_PLACEABLE_KINDS: frozenset[str] = PLACEABLE_KINDS - frozenset({items.SIGN})
 
 # Craft options are offered in this order and then truncated, so the things a
 # settler usually needs first survive the cap.
@@ -97,6 +100,7 @@ CRAFT_PRIORITY: tuple[str, ...] = (
     items.STONE_FLOOR,
     items.CHEST,
     items.MESSAGE_BOARD,
+    items.SIGN,
     items.TABLE,
     items.CHAIR,
 )
@@ -108,12 +112,6 @@ CRAFT_ONCE_KINDS: frozenset[str] = (
     | items.STATION_KINDS
     | frozenset({items.CHEST, items.MESSAGE_BOARD})
 )
-
-# Canned phrases. Jev gets a closed set; free-text speech is the planner's job.
-SAY_PHRASES: Mapping[str, str] = {
-    "come_here": "Come to me.",
-    "all_good": "All good here.",
-}
 
 # How far away a wolf counts as "here" for the planner's alert.
 WOLF_ALERT_RADIUS = 8
@@ -133,11 +131,34 @@ HEARD_SHOUT_KEY_PREFIX = f"{STEP_KEY_PREFIX}shout:"
 JOIN_CONVERSATION_KEY_PREFIX = "join_conversation:"
 JOIN_CONVERSATION_OPTION_LIMIT = 2
 
-# Invitations (docs/09 section 8): a say carrying the `open_to_talk` flag keeps
-# the speaker open for `INVITATION_TICKS`, and standing next to an open speaker
-# and accepting starts a conversation with the two of them.
-TALK_TO_KEY_PREFIX = "talk_to:"
-INVITE_KEY_PREFIX = "invite:"
+# Hails (docs/09 section 9): addressing a settler next to you starts a
+# conversation with the two of you, without either of you having asked first.
+# The planner grants them one at a time, in the brief; Jev never invents one.
+HAIL_KEY_PREFIX = "hail:"
+MAX_BRIEF_HAILS = 3
+# How many times the world may refuse one brief hail before the stint stops
+# offering it: two refusals are enough to show the reason is not going away.
+HAIL_REFUSAL_LIMIT = 2
+
+
+@dataclass(frozen=True)
+class BriefHail:
+    """One settler the planner told Jev it may address, and what to say."""
+
+    settler: str
+    line: str
+    # What the actor wants out of the conversation the hail starts, shown only
+    # to it once seated (docs/09 section 10, item 4). Empty when the planner
+    # gave none.
+    purpose: str = ""
+
+    def as_payload(self) -> dict[str, str]:
+        """The pair (and purpose, when given) as the brief payload and trace."""
+        payload = {"settler": self.settler, "line": self.line}
+        if self.purpose:
+            payload["purpose"] = self.purpose
+        return payload
+
 
 # Object groups worth walking across the map for, each with its own quota, in
 # the order they are offered. Grouping is what stops one dense resource from
@@ -153,6 +174,7 @@ STEP_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
     ("chest", frozenset({items.CHEST})),
     ("item pile", frozenset({items.ITEM_PILE})),
     ("message board", frozenset({items.MESSAGE_BOARD})),
+    ("sign", frozenset({items.SIGN})),
     ("workshop table", frozenset({items.WORKSHOP_TABLE})),
     ("furnace", frozenset({items.FURNACE})),
     ("anvil", frozenset({items.ANVIL})),
@@ -172,13 +194,12 @@ OPTION_SECTIONS: tuple[str, ...] = (
     "wait",
     "brief_steps",
     "survival",
+    "hail",
     "conversation",
-    "invitation",
     "travel_control",
     "interaction",
     "craft",
     "move",
-    "say",
     "quota_steps",
 )
 
@@ -247,7 +268,7 @@ def enumerate_options(
     travel: TravelState | None = None,
     *,
     shouts: Sequence[str] = (),
-    invitations: Sequence[str] = (),
+    hails: Sequence[BriefHail] = (),
     places: Mapping[str, Coord] = EMPTY_PLACES,
     brief_text: str = "",
     max_options: int = MAX_OPTIONS,
@@ -255,10 +276,10 @@ def enumerate_options(
     """Every action that is legal for this actor on this tick, best-first.
 
     `shouts` are the phrases the planner put in the brief; Jev may shout those
-    and nothing else. `invitations` are the phrases it may say with the
-    `open_to_talk` flag, the same way. `places` are the brief's named
-    destinations, and `brief_text` is the instruction and notes, scanned for
-    object ids so that whatever the brief names is always walkable-to.
+    and nothing else. `hails` are the settlers the brief lets Jev address, with
+    the line to say, the same way. `places` are the brief's named destinations,
+    and `brief_text` is the instruction and notes, scanned for object ids so
+    that whatever the brief names is always walkable-to.
     """
     position = model.position
     inventory = dict(model.self_info.inventory)
@@ -267,13 +288,12 @@ def enumerate_options(
         "wait": [_wait_option()],
         "brief_steps": _brief_step_options(model, position, places, brief_text),
         "survival": _survival_options(model, inventory, position, travel, shouts),
+        "hail": _hail_options(model, position, hails),
         "conversation": _conversation_options(model, position, travel),
-        "invitation": _invitation_options(model, position, travel, invitations),
         "travel_control": _travel_control_options(model, travel),
         "interaction": _interaction_options(model, inventory, position),
         "craft": _crafting_options(model, inventory),
         "move": _move_options(model, position),
-        "say": _say_options(),
         "quota_steps": _quota_step_options(model, position, travel),
     }
 
@@ -486,104 +506,72 @@ def _conversation_options(
     return options
 
 
-def _invitation_options(
+def _hail_options(
     model: WorldModel,
     position: Coord,
-    travel: TravelState | None,
-    invitations: Sequence[str],
+    hails: Sequence[BriefHail],
 ) -> list[Option]:
-    """Accepting someone's invitation to talk, and saying one of your own.
+    """Addressing a settler the brief named, or walking over to do it.
 
-    Neither is offered while the actor already holds a seat: an invitation ends
-    the moment its speaker sits down, and an accept needs both of them free.
+    Not offered while this actor holds a seat, nor for a settler that is dead,
+    asleep or already in a conversation: the world would refuse every one of
+    those, and Jev would spend the stint being told no.
     """
     if model.my_conversation() is not None:
         return []
-    options = _talk_to_options(model, position, travel)
-    options.extend(_invite_options(model, invitations))
-    return options
-
-
-def _talk_to_options(
-    model: WorldModel, position: Coord, travel: TravelState | None
-) -> list[Option]:
-    """One option per settler who is open to talk: accept it, or walk over."""
+    seated = {
+        participant
+        for conversation in model.conversations()
+        for participant in conversation.participants
+    }
     options: list[Option] = []
-    for invitation in model.open_invitations():
-        key = f"{TALK_TO_KEY_PREFIX}{invitation.entity_id}"
-        distance = chebyshev(invitation.position, position)
+    for hail in hails[:MAX_BRIEF_HAILS]:
+        target = model.entities.get(hail.settler)
+        if target is None or not target.alive or target.asleep:
+            continue
+        if target.entity_id in seated:
+            continue
+        key = f"{HAIL_KEY_PREFIX}{hail.settler}"
+        distance = chebyshev(target.position, position)
         if distance == 1:
             options.append(
                 Option(
                     key=key,
                     description=(
-                        f"accept {invitation.entity_id}'s invitation to talk: a "
-                        "conversation with the two of you starts on a free tile "
-                        "next to you both"
+                        f'say "{hail.line}" to {hail.settler}, next to you: a '
+                        "conversation with the two of you starts and "
+                        f"{hail.settler} answers first"
                     ),
                     intent=pb.Intent(
                         converse=pb.ConverseIntent(
-                            action=items.ACTION_ACCEPT,
-                            target_entity_id=invitation.entity_id,
+                            action=items.ACTION_HAIL,
+                            target_entity_id=hail.settler,
+                            text=hail.line,
                         )
                     ),
                     clears_travel=True,
                 )
             )
             continue
-        path = find_path(model, position, invitation.position, stop_adjacent=True)
+        path = find_path(model, position, target.position, stop_adjacent=True)
         if not path:
             continue
-        dx = invitation.position[0] - position[0]
-        dy = invitation.position[1] - position[1]
-        said = f' who said "{invitation.text}" and' if invitation.text else " who"
         options.append(
             Option(
                 key=key,
                 description=(
-                    f"walk to {invitation.entity_id} at dx {dx} dy {dy},{said} is "
-                    "open to talk; next to them you can accept and a "
-                    "conversation starts"
+                    f"walk to {hail.settler}, {distance} tiles away, to say "
+                    f'"{hail.line}" and start a conversation with them'
                 ),
                 intent=_move(direction_between(position, path[0])),
                 travel_target=TravelState(
-                    target=invitation.position,
-                    label=f"{invitation.entity_id}, who is open to talk",
+                    target=target.position,
+                    label=f"{hail.settler}, to say your line to them",
                     stop_adjacent=True,
                 ),
             )
         )
     return options
-
-
-def _invite_options(model: WorldModel, invitations: Sequence[str]) -> list[Option]:
-    """One option per invitation phrase the planner wrote into the brief.
-
-    Nobody within earshot means nobody would hear it, and an invitation that is
-    already open cannot be made more open, so neither case is offered.
-    """
-    if not model.allies_near(model.position, items.SAY_RADIUS):
-        return []
-    if model.my_invitation_live():
-        return []
-    return [
-        Option(
-            key=f"{INVITE_KEY_PREFIX}{index}",
-            description=(
-                f'say "{phrase}" and stay open to talk for '
-                f"{items.INVITATION_TICKS} ticks: anyone who hears it can walk "
-                "up and start a conversation with you"
-            ),
-            intent=pb.Intent(
-                say=pb.SayIntent(
-                    text=phrase,
-                    channel=items.LOCAL_CHANNEL,
-                    open_to_talk=True,
-                )
-            ),
-        )
-        for index, phrase in enumerate(invitations[:MAX_BRIEF_SHOUTS])
-    ]
 
 
 def _rest_options(model: WorldModel) -> list[Option]:
@@ -895,7 +883,7 @@ def _place_options(model: WorldModel, inventory: Mapping[str, int]) -> list[Opti
     neighbour for structures."""
     options: list[Option] = []
     position = model.position
-    for kind in sorted(PLACEABLE_KINDS & set(inventory)):
+    for kind in sorted(JEV_PLACEABLE_KINDS & set(inventory)):
         if len(options) >= PLACE_OPTION_LIMIT:
             break
         if items.is_ground_kind(kind):
@@ -1116,17 +1104,6 @@ def _quota_step_options(
         if option is not None:
             options.append(option)
     return options
-
-
-def _say_options() -> list[Option]:
-    return [
-        Option(
-            key=f"say:{name}",
-            description=f'say "{phrase}" out loud to anyone nearby',
-            intent=pb.Intent(say=pb.SayIntent(text=phrase, channel="local")),
-        )
-        for name, phrase in SAY_PHRASES.items()
-    ]
 
 
 def options_to_criteria(options: Sequence[Option]) -> dict[str, str]:

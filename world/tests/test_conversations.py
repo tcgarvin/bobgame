@@ -28,6 +28,7 @@ from world.items import (
     CONVERSATION_TEXT_LIMIT,
     CONVERSATION_TRANSCRIPT_KEPT,
     CONVERSATION_TURN_TICKS,
+    HAIL_COOLDOWN_TICKS,
     INVITATION_TICKS,
     WOOD_WALL,
 )
@@ -47,6 +48,7 @@ from world.tick import (
 from world.conversion import entity_to_proto
 from world.types import (
     CONVERSE_ACCEPT,
+    CONVERSE_HAIL,
     CONVERSE_JOIN,
     CONVERSE_LEAVE,
     CONVERSE_OPEN,
@@ -123,6 +125,16 @@ def pass_intent(entity_id: str) -> ConverseIntent:
 
 def leave_intent(entity_id: str) -> ConverseIntent:
     return ConverseIntent(entity_id=entity_id, action=CONVERSE_LEAVE)
+
+
+def hail_intent(entity_id: str, target_entity_id: str, text: str) -> ConverseIntent:
+    """A hail: walking up to a settler and addressing it (docs/09, section 9)."""
+    return ConverseIntent(
+        entity_id=entity_id,
+        action=CONVERSE_HAIL,
+        target_entity_id=target_entity_id,
+        text=text,
+    )
 
 
 def accept_intent(entity_id: str, target_entity_id: str) -> ConverseIntent:
@@ -915,3 +927,227 @@ class TestInvitationRecordingAndReplay:
         }
         assert replayed["ada"]["open_to_talk"] is False
         assert session.world.get_entity("ada").is_open_to_talk(1) is False
+
+
+class TestHail:
+    """Hailing: starting a conversation unilaterally (docs/09, section 9)."""
+
+    def test_hail_opens_a_conversation_with_both(self, world: World) -> None:
+        result = run_tick(world, hail_intent("evan", "ada", "got a moment?"))
+
+        conversations = all_conversations(world)
+        assert len(conversations) == 1
+        conversation = conversations[0]
+        assert conversation.object_type == CONVERSATION
+        assert read_participants(conversation) == ["evan", "ada"]
+        assert conversation.get_state("opened_by") == "evan"
+        # The hailer has spoken, so the target has the turn.
+        assert conversation.get_state(SPEAKER_KEY) == "ada"
+        assert conversation.get_state(UTTERANCES_KEY) == "0"
+        assert conversation.get_state(PASSES_KEY) == "0"
+        assert read_transcript(conversation) == [
+            {"tick": 0, "speaker": "evan", "text": "got a moment?"}
+        ]
+        assert [added.obj.object_id for added in result.objects_added] == [
+            conversation.object_id
+        ]
+
+    def test_the_anchor_is_the_smallest_free_shared_tile(self, world: World) -> None:
+        run_tick(world, hail_intent("evan", "ada", "hi"))
+        assert all_conversations(world)[0].position == Position(x=3, y=4)
+
+    def test_hail_emits_both_acted_events(self, world: World) -> None:
+        result = run_tick(world, hail_intent("evan", "ada", "hi"))
+        conversation_id = all_conversations(world)[0].object_id
+
+        details = {
+            (action.entity_id, action.details)
+            for action in result.action_results
+            if action.action_type == "converse" and action.success
+        }
+        assert details == {
+            ("evan", f"hail {conversation_id} ada"),
+            ("ada", f"hailed {conversation_id} evan"),
+        }
+
+    def test_the_opening_line_is_a_local_utterance(self, world: World) -> None:
+        result = run_tick(world, hail_intent("evan", "ada", "got a moment?"))
+        conversation_id = all_conversations(world)[0].object_id
+
+        assert len(result.utterances) == 1
+        utterance = result.utterances[0]
+        assert utterance.speaker_id == "evan"
+        assert utterance.channel == "local"
+        assert utterance.text == "got a moment?"
+        assert utterance.conversation_id == conversation_id
+        assert utterance.position == SEATS["evan"]
+
+    def test_the_target_speaks_next(self, world: World) -> None:
+        run_tick(world, hail_intent("evan", "ada", "got a moment?"))
+        result = run_tick(world, speak_intent("ada", "i do"))
+
+        conversation = all_conversations(world)[0]
+        assert conversation.get_state(SPEAKER_KEY) == "evan"
+        assert [line["text"] for line in read_transcript(conversation)] == [
+            "got a moment?",
+            "i do",
+        ]
+        assert result.utterances[0].channel == CONVERSATION_CHANNEL
+
+    def test_the_hailer_cannot_speak_first(self, world: World) -> None:
+        run_tick(world, hail_intent("evan", "ada", "hi"))
+        result = run_tick(world, speak_intent("evan", "and another thing"))
+        assert failures(result, "evan") == ["not your turn"]
+
+    def test_the_long_line_is_truncated(self, world: World) -> None:
+        run_tick(
+            world, hail_intent("evan", "ada", "x" * (CONVERSATION_TEXT_LIMIT + 50))
+        )
+        transcript = read_transcript(all_conversations(world)[0])
+        assert transcript[0]["text"] == "x" * CONVERSATION_TEXT_LIMIT
+
+    def test_hail_clears_both_invitations(self, world: World) -> None:
+        run_tick(world, invite_intent("ada"), invite_intent("evan"))
+        run_tick(world, hail_intent("evan", "ada", "hi"))
+        assert world.get_entity("ada").is_open_to_talk(world.tick) is False
+        assert world.get_entity("evan").is_open_to_talk(world.tick) is False
+
+    def test_the_target_can_leave(self, world: World) -> None:
+        run_tick(world, hail_intent("evan", "ada", "hi"))
+        run_tick(world, leave_intent("ada"))
+        assert all_conversations(world) == []
+
+    def test_a_third_settler_can_join(self, world: World) -> None:
+        run_tick(world, hail_intent("evan", "ada", "hi"))
+        conversation = all_conversations(world)[0]
+        # The anchor is (3, 4); cleo walks nowhere, so use a settler beside it.
+        world.update_entity_position("bram", Position(x=3, y=3))
+        run_tick(world, join_intent("bram", conversation.object_id))
+        assert read_participants(world.get_object(conversation.object_id)) == [
+            "evan",
+            "ada",
+            "bram",
+        ]
+
+
+class TestHailFailures:
+    def test_an_opening_line_is_required(self, world: World) -> None:
+        result = run_tick(world, hail_intent("evan", "ada", "   "))
+        assert failures(result, "evan") == ["an opening line is required"]
+        assert all_conversations(world) == []
+
+    def test_an_unknown_target(self, world: World) -> None:
+        result = run_tick(world, hail_intent("evan", "nobody", "hi"))
+        assert failures(result, "evan") == ["there is no settler called nobody"]
+
+    def test_a_wolf_is_not_a_settler(self, world: World) -> None:
+        world.add_entity(
+            Entity(entity_id="wolf_1", position=Position(x=3, y=3), entity_type="wolf")
+        )
+        result = run_tick(world, hail_intent("evan", "wolf_1", "hi"))
+        assert failures(result, "evan") == ["there is no settler called wolf_1"]
+
+    def test_a_dead_target(self, world: World) -> None:
+        kill_entity(world, "ada", "", TickEvents())
+        result = run_tick(world, hail_intent("evan", "ada", "hi"))
+        assert failures(result, "evan") == ["ada is dead"]
+
+    def test_a_sleeping_target(self, world: World) -> None:
+        world.set_entity(world.get_entity("ada").as_asleep(""))
+        result = run_tick(world, hail_intent("evan", "ada", "hi"))
+        assert failures(result, "evan") == ["ada is asleep"]
+
+    def test_a_collapsed_target(self, world: World) -> None:
+        world.set_entity(world.get_entity("ada").as_asleep("", collapsed=True))
+        result = run_tick(world, hail_intent("evan", "ada", "hi"))
+        assert failures(result, "evan") == ["ada is asleep"]
+
+    def test_the_hailer_is_already_in_a_conversation(self, world: World) -> None:
+        # evan (4,4) sits down first, then tries to hail cleo (5,4).
+        open_and_join(world, joiners=("evan",))
+        result = run_tick(world, hail_intent("evan", "cleo", "hi"))
+        assert failures(result, "evan") == ["already in a conversation"]
+
+    def test_the_target_is_already_in_a_conversation(self, world: World) -> None:
+        conversation = open_and_join(world)
+        result = run_tick(world, hail_intent("evan", "ada", "hi"))
+        assert failures(result, "evan") == [
+            f"ada is already in conversation {conversation.object_id}"
+        ]
+
+    def test_not_next_to_the_target(self, world: World) -> None:
+        result = run_tick(world, hail_intent("bram", "ada", "hi"))
+        assert failures(result, "bram") == ["not next to ada"]
+
+    def test_no_free_tile_next_to_both(self, world: World) -> None:
+        # evan (4,4) and ada (4,5) share (3,4), (3,5), (5,4) and (5,5); cleo
+        # stands on (5,4), so walling the other three leaves nothing.
+        for index, position in enumerate(
+            (Position(x=3, y=4), Position(x=3, y=5), Position(x=5, y=5)), start=1
+        ):
+            world.add_object(
+                WorldObject(
+                    object_id=f"wall_{index}",
+                    position=position,
+                    object_type=WOOD_WALL,
+                )
+            )
+        result = run_tick(world, hail_intent("evan", "ada", "hi"))
+        assert failures(result, "evan") == ["no free tile next to you both"]
+        assert all_conversations(world) == []
+
+
+class TestHailCooldown:
+    """A settler cannot be hailed straight back into another conversation."""
+
+    def close_one_conversation(self, world: World) -> None:
+        """evan hails ada on tick 0; ada leaves on tick 1, closing it."""
+        run_tick(world, hail_intent("evan", "ada", "hi"))
+        run_tick(world, leave_intent("ada"))
+        assert all_conversations(world) == []
+
+    def test_the_cooldown_starts_when_the_conversation_ends(self, world: World) -> None:
+        self.close_one_conversation(world)
+        for entity_id in ("ada", "evan"):
+            assert world.get_entity(entity_id).last_conversation_end_tick == 1
+
+    def test_hailing_inside_the_cooldown_fails_with_the_numbers(
+        self, world: World
+    ) -> None:
+        self.close_one_conversation(world)
+        idle_ticks(world, 13)
+        result = run_tick(world, hail_intent("evan", "ada", "again?"))
+
+        assert failures(result, "evan") == [
+            "ada was in a conversation 14 ticks ago and cannot be hailed for "
+            "another 46 ticks"
+        ]
+        assert all_conversations(world) == []
+
+    def test_hailing_works_again_once_the_cooldown_has_run_out(
+        self, world: World
+    ) -> None:
+        self.close_one_conversation(world)
+        idle_ticks(world, HAIL_COOLDOWN_TICKS - 1)
+        run_tick(world, hail_intent("evan", "ada", "again?"))
+        assert len(all_conversations(world)) == 1
+
+    def test_the_cooldown_does_not_block_an_accept(self, world: World) -> None:
+        self.close_one_conversation(world)
+        run_tick(world, invite_intent("ada"))
+        run_tick(world, accept_intent("evan", "ada"))
+        assert len(all_conversations(world)) == 1
+
+    def test_the_cooldown_does_not_block_opening_or_joining(self, world: World) -> None:
+        self.close_one_conversation(world)
+        run_tick(world, open_intent("ada", Direction.EAST, "hello"))
+        conversation = all_conversations(world)[0]
+        run_tick(world, join_intent("evan", conversation.object_id))
+        assert read_participants(world.get_object(conversation.object_id)) == [
+            "ada",
+            "evan",
+        ]
+
+    def test_an_untouched_settler_has_no_cooldown(self, world: World) -> None:
+        assert world.get_entity("bram").last_conversation_end_tick == -1
+        assert world.get_entity("bram").hail_cooldown_left(0, HAIL_COOLDOWN_TICKS) == 0

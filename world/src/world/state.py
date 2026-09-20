@@ -166,6 +166,10 @@ class Entity(BaseModel, frozen=True):
     open_until_tick: int = -1
     invitation_text: str = ""
     invitation_tick: int = -1
+    # The tick this entity's last conversation seat ended (docs/09, section 9).
+    # It cannot be hailed again until `HAIL_COOLDOWN_TICKS` have passed; -1
+    # means it has never sat in one.
+    last_conversation_end_tick: int = -1
 
     def with_position(self, new_position: Position) -> "Entity":
         """Return copy with updated position."""
@@ -233,6 +237,17 @@ class Entity(BaseModel, frozen=True):
                 "invitation_tick": -1,
             }
         )
+
+    def with_conversation_ended(self, tick: int) -> "Entity":
+        """Return copy whose hail cooldown starts at `tick` (docs/09, section 9)."""
+        return self.model_copy(update={"last_conversation_end_tick": tick})
+
+    def hail_cooldown_left(self, tick: int, cooldown_ticks: int) -> int:
+        """Ticks before this entity may be hailed again; 0 when it may be now."""
+        if self.last_conversation_end_tick < 0:
+            return 0
+        elapsed = tick - self.last_conversation_end_tick
+        return max(0, cooldown_ticks - elapsed)
 
     def as_dead(self) -> "Entity":
         """Return copy marked dead: no health, no inventory, nothing wielded."""

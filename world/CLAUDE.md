@@ -406,6 +406,18 @@ spawn placement. Walls block everyone; doors block `entity_type == "wolf"`
 only. Observations flip `Tile.walkable` to false on wall tiles so agent path
 finding needs no new concept; door tiles stay walkable.
 
+### Signs
+
+`sign` is an ordinary structure-layer building kind (2 wood, by hand) that
+blocks nobody. `containers.process_place_phase` gives it empty `text`, `author`
+and `tick` state, and `containers._write_sign` - reached from
+`process_write_note_phase`, which now accepts a `message_board` **or** a `sign`
+- writes those three keys from a `WriteNoteIntent` on slot 0, ignoring the
+title. Text over `SIGN_TEXT_MAX` (80) is refused with the limit and the length,
+never truncated; empty text blanks all three keys. One `ObjectChange` per
+changed key, so replay, chunks and the viewer need no new code. Contract:
+[docs/08_building.md](../docs/08_building.md), "Signs".
+
 ### Dismantling and resting
 
 An `ExtractIntent` aimed at a `BUILDING_KINDS` object dismantles it:
@@ -508,6 +520,20 @@ free tile adjacent to both, in ascending `(x, y)` order, with the inviter as
 opener and its invitation line as transcript entry 0, and emits two
 `EntityActed`s (`accept conv_N <target>` for the accepter, `join conv_N` for the
 inviter) and no utterance. Taking any seat, and dying, clears the invitation.
+
+### Hailing (docs/09 section 9)
+
+`converse` action `hail` (with `target_entity_id` and `text`) needs no
+invitation: the hailer must be adjacent to a living, awake, unseated settler
+that is out of its hail cooldown, and there must be a free shared anchor
+(`_shared_anchor`, as for `accept`). It creates the conversation with
+`participants = [hailer, target]`, `opened_by` the hailer, its line as
+transcript entry 0 and the **target** speaking first, emits that line as a
+`local` utterance with the conversation id, and acts twice: `hail conv_N
+<target>` and `hailed conv_N <hailer>`. `HAIL_COOLDOWN_TICKS` (60) is enforced
+through `Entity.last_conversation_end_tick`, stamped in `_remove_participants`
+and `_close` for everyone whose seat ends; it is world-only state and is not in
+the proto, the viewer payload or the recording.
 
 ### Giving (`containers.process_give_phase`)
 

@@ -72,6 +72,8 @@ const OBJECT_SPRITE_MAP: Record<string, string> = {
   boulder: 'boulder',
   chest: 'chest-closed',
   message_board: 'message-board',
+  // Signs (docs/08_building.md, "Signs").
+  sign: 'sign',
   item_pile: 'item-pile',
   // Natural building materials (docs/08_building.md).
   reeds: 'reeds',

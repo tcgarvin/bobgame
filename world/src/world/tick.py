@@ -50,7 +50,7 @@ from .stats import (
     process_respawns,
     process_rest_phase,
 )
-from .state import World
+from .state import WOLF_ENTITY_TYPE, World
 from .tick_context import TickContext
 from .types import (
     AttackIntent,
@@ -63,6 +63,7 @@ from .types import (
     EquipIntent,
     ExtractIntent,
     GiveIntent,
+    HEARING_RADIUS_BY_CHANNEL,
     INVITATION_CHANNELS,
     PickupIntent,
     PlaceIntent,
@@ -187,6 +188,32 @@ def _record_eat_results(results: list[EatResult], events: TickEvents) -> None:
             events.acted(result.entity_id, "eat", False, result.failure_reason or "")
 
 
+def _hearer_ids(world: World, entity_id: str, channel: str) -> list[str]:
+    """Living, non-wolf settlers other than `entity_id` within the channel's
+    earshot (`HEARING_RADIUS_BY_CHANNEL`), sorted for a stable report.
+
+    Used only to tell the speaker who heard them (docs/09); observation
+    filtering for what each listener actually receives happens independently
+    in `services/observation_service.py`.
+    """
+    radius = HEARING_RADIUS_BY_CHANNEL.get(channel)
+    if radius is None:
+        return []
+    speaker = world.get_entity(entity_id)
+    heard = []
+    for other_id, other in world.all_entities().items():
+        if other_id == entity_id or not other.alive:
+            continue
+        if other.entity_type == WOLF_ENTITY_TYPE:
+            continue
+        if (
+            abs(other.position.x - speaker.position.x) <= radius
+            and abs(other.position.y - speaker.position.y) <= radius
+        ):
+            heard.append(other_id)
+    return sorted(heard)
+
+
 def _process_say_phase(
     world: World, intents: Mapping[str, SayIntent], events: TickEvents
 ) -> None:
@@ -195,6 +222,11 @@ def _process_say_phase(
     A line said with `open_to_talk` on an audible channel also opens the
     speaker's invitation to talk (docs/09, section 8.2); on the thought channel
     the flag is ignored.
+
+    The action result's details carry who heard it (comma-separated entity
+    ids, empty when nobody did) for `local` and `shout`, so the speaker's own
+    tool result can say so; `thought` (viewer-only, no in-world hearers) keeps
+    the plain channel name it always had.
     """
     for entity_id in sorted(intents):
         intent = intents[entity_id]
@@ -220,7 +252,13 @@ def _process_say_phase(
                     open_until_tick=world.tick + INVITATION_TICKS,
                 )
             )
-        events.acted(entity_id, "say", True, intent.channel)
+        if intent.channel in HEARING_RADIUS_BY_CHANNEL:
+            detail = (
+                f"heard: {', '.join(_hearer_ids(world, entity_id, intent.channel))}"
+            )
+        else:
+            detail = intent.channel
+        events.acted(entity_id, "say", True, detail)
 
 
 def process_tick(

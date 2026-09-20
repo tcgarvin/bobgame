@@ -253,6 +253,17 @@ Two 15-minute runs, about 440 ticks each.
 
 ## 8. Invitations: "open to talk" (added 2026-09-18)
 
+**Status: world mechanic retained, no agent uses it since 2026-09-19.** The
+world still carries `SayIntent.open_to_talk`, `Entity.open_to_talk`, the
+`accept` action and everything section 8 describes, and the viewer still draws
+the marker. The agent side no longer touches any of it: the planner has no
+`say` tool, Jev has no `invite:` or `talk_to:` option, `Brief.invitations` is
+gone and so are `WorldModel.open_invitations()` / `my_invitation_live()` and the
+state's `invitations` block. Settlers start conversations by hailing
+(section 9) instead, because an invitation lives 40 ticks and planner turns are
+100 or more apart. The rest of this section is the record of what the world
+does, not of what the agents do.
+
 ### 8.1 Why
 
 In the 2026-09-17 settlement runs settlers coordinated over `shout` and almost
@@ -441,3 +452,323 @@ show `shouts`. No sentence says when to invite or whom to talk to.
 - Trace: `stint_start` briefs carry `invitations`; the conversation trace's
   `conversation_start` carries `"via": "open" | "join" | "accept" |
   "accepted"`.
+
+## 9. Hailing: starting a conversation unilaterally (added 2026-09-19)
+
+### 9.1 Why
+
+In the runs after section 8 shipped, `talk_to` almost always came back with
+`no invitation from dov; settlers open to talk right now: nobody`. An
+invitation lives for `INVITATION_TICKS` (40) ticks and planner turns are 100 or
+more ticks apart, so two settlers were almost never in sync: starting a
+conversation needed both of them to want one inside the same 40 ticks. A hail
+removes the synchronisation: a settler walks up to another and addresses it,
+like tapping someone on the shoulder, and the conversation starts.
+
+### 9.2 World
+
+`ConverseIntent` gains the action `hail`, carrying `target_entity_id` (the
+settler addressed) and `text` (the opening line, same limit as any other line;
+the proto needs no new field). It succeeds when, checked in this order and each
+a failure reason in `EntityActed.details`:
+
+- `text` is non-empty after trimming (`an opening line is required`);
+- the target exists and is not a wolf (`there is no settler called <id>`);
+- the target is alive (`<id> is dead`);
+- the hailer is awake (`you are asleep`) and so is the target (`<id> is
+  asleep`; a collapsed settler is asleep);
+- neither holds a seat (`already in a conversation`, `<id> is already in
+  conversation conv_N`);
+- they are adjacent, Chebyshev 1 (`not next to <id>`);
+- the target is out of its hail cooldown (`<id> was in a conversation N ticks
+  ago and cannot be hailed for another M ticks`);
+- a free anchor tile exists next to both, chosen exactly as `accept` chooses it
+  (`_shared_anchor`, ascending `(x, y)`) (`no free tile next to you both`).
+
+**Hail cooldown.** `HAIL_COOLDOWN_TICKS` (60). `Entity.last_conversation_end_tick`
+is stamped for every participant when a conversation drops them or closes
+(`Entity.with_conversation_ended`, read through `hail_cooldown_left`), so a
+settler cannot be walked straight back into another conversation. It is world-
+only state: not in the proto, the viewer payload or the recorded tick, because
+only the world enforces it and the planner learns of it from the failure
+reason. Invitations, `accept`, `open` and `join` are unaffected by it.
+
+**Effect.** An accepted invitation with the roles flipped: the conversation is
+created on the anchor with `participants = [hailer, target]`,
+`opened_by = hailer`, transcript entry 0 = the hailer's line at this tick, and
+`speaker = target`, because the hailer has already spoken. Both invitations are
+cleared. The opening line also goes out as an ordinary `local` utterance with
+`conversation_id` set, exactly as `open`'s does, so bystanders hear it. Two
+`EntityActed`s are emitted: `hail conv_N <target>` for the hailer and
+`hailed conv_N <hailer>` for the target — a distinct word, so the target's
+agent can tell a seat it never asked for from one it did. Nothing else about
+turn order, leaving or closing changes.
+
+### 9.3 Agent side
+
+- `items.py` mirrors `ACTION_HAIL`, `ACTION_HAILED` and `HAIL_COOLDOWN_TICKS`.
+- `joined_conversation` accepts `hail` and `hailed` as seat-taking actions, and
+  `UNASKED_VIA = (VIA_ACCEPTED, VIA_HAILED)` is the pair `JevAgent._detect_join`
+  treats as a seat the actor did not ask for: the in-flight and queued
+  single-tick actions are answered with `INTERRUPTED_BY_CONVERSATION`, a
+  running stint (ordinary or driver) ends with `joined_conversation`, and a
+  queued stint waits. `conversation_start` records `via`: `hail` for the
+  hailer, `hailed` for the target. The reflex fires inside such a conversation
+  like any other (section 4.2).
+- Planner tool `talk_to(entity_id, opening_line, max_ticks=40)`. With a live
+  invitation from that settler it behaves as before (walk, `accept`) and says
+  in the result that the opening line was not used. Otherwise it walks next to
+  the settler with the same `ApproachDriver`, re-aiming at its latest known
+  position for at most `WALK_LEGS` (3) legs out of one shared tick budget,
+  then submits the hail and blocks until the conversation ends. Failures return
+  the world's reason verbatim plus where the settler was last seen.
+- Planner tool `start_stint(..., hails=[{"settler": "dov", "line": "Dov, can
+  we split the wall work?"}])`. **Brief hails**, added 2026-09-19:
+  `Brief.hails: tuple[BriefHail, ...]` (`BriefHail(settler, line)` lives in
+  `options.py`, beside `TravelState`, because `options.py` cannot import
+  `stint.py`). At most `MAX_BRIEF_HAILS` (3) per brief; each `line` is at most
+  `CONVERSATION_TEXT_LIMIT` characters; each `settler` must be one this actor
+  has seen and must not be itself. `_validated_hails` raises `ModelRetry`
+  naming who it has met. `ReflexBrief` has no hails. The payload and the trace
+  carry `"hails": [{"settler": ..., "line": ...}]`.
+- **Jev option** `hail:<settler>`, one per live brief hail, in its own
+  `OPTION_SECTIONS` entry (`hail`, between `survival` and `conversation`) so
+  `MAX_OPTIONS` truncation cannot drop it. Adjacent to the settler it is the
+  `ConverseIntent(action="hail", target_entity_id, text=line)`, described as
+  `say "<line>" to dov, next to you: a conversation with the two of you starts
+  and dov answers first`; further off it is a code-owned `stop_adjacent` walk
+  to the settler's latest known position, described as `walk to dov, 12 tiles
+  away, to say "<line>" and start a conversation with them`. It is not offered
+  while this actor holds a seat, nor for a settler that is dead, asleep, seated
+  in a conversation, or has never been seen.
+- **Spent hails.** `Stint` drops a hail from the offer for the rest of the
+  stint once it succeeded, and once the world has refused it
+  `HAIL_REFUSAL_LIMIT` (2) times. Both facts reach the `StintReport` `notable`
+  list: `hailed dov at tick N` and `hail to dov refused: <world reason>`. Only
+  the previous tick's option says which settler a converse failure was about,
+  so `_absorb_hail_outcomes` reads `self._last_option`.
+- A successful hail by Jev ends the stint with `joined_conversation`, exactly
+  as a `join` does, and `start_stint` returns after the conversation with the
+  report appended.
+- **Jev state**: the `brief` block carries `hails` as
+  `['say to dov: "<line>"']`. When to hail is the instruction's business, as
+  with shouts.
+
+### 9.4 Analysis
+
+`tools/analyze_run.py` counts hails beside the invitation stats (which stay,
+and read zero for a run after 2026-09-19):
+`hails: <attempted> attempted, <succeeded> succeeded`, `opened by hail: n` and
+a `hails refused` bucket count. A second line reports the brief hails:
+`brief hails granted: n` (summed over every `stint_start` brief),
+`hail: chosen by Jev: n` (stint tick rows whose action starts `hail:`) and
+`planner talk_to hails: n` (attempted minus Jev's). A failed converse action reports only the
+world's reason and not which action asked for it, so the failures are matched
+by wording (`HAIL_FAILURE_PATTERNS`); the two reasons `hail` shares with
+`accept` (`not next to <id>`, `already in a conversation`) are left out, which
+makes the attempted count a lower bound. A successful hail is also a notable
+moment.
+
+## 10. "Good for" wording, hearer feedback and board unread tracking (2026-09-19)
+
+### 10.1 Why
+
+Live runs showed LLM settlers under-using conversations, boards and signs:
+the prompt described only the physics of each channel, never what it was for,
+and `say`/`shout` gave no feedback beyond `say ok: local`, so a settler had no
+signal that a shout into an empty stretch of island had gone unheard.
+
+### 10.2 Channel purposes ([tools, not rules] relaxed for this one case)
+
+Section 1's design rule still holds for strategy and etiquette, but the owner
+decided agent-facing text may now also say plainly what a channel is **good
+for** and **not good for**, as long as that is a fact about the channel (one
+line vs. back-and-forth, reaches a room vs. reaches whoever passes by) and
+never a "you should". `SETTLEMENT_NARRATIVE`'s old "Voices and writing:"
+section is now "Reaching the others, and what each way is good for:", with one
+bullet per channel giving physics then purpose, plus the matching one-sentence
+purpose in every communication tool's docstring (`shout`, `talk_to`,
+`open_conversation`, `join_conversation`, `write_note`, `read_board`,
+`place_sign`, `write_sign`, and the `shouts`/`hails` arguments of
+`start_stint`/`set_reflex`). **Since 2026-09-19 there are four channels**:
+`shout`, conversations, the message board and the sign. `say` was removed from
+the agents' surface with the invitations (section 8); the conversations bullet
+states that the opening line is heard within `SAY_RADIUS` tiles and that
+anyone who sees a conversation can join it, up to
+`CONVERSATION_MAX_PARTICIPANTS`. `CONVERSER_NARRATIVE` gains one sentence that a
+conversation is the settlers' one back-and-forth channel. `agents/CLAUDE.md`'s
+"Tools, not rules" bullet records the decision.
+
+### 10.3 `say`/`shout` hearer feedback
+
+`tick._process_say_phase` (`world/src/world/tick.py`) now computes, for a
+`local` or `shout` `SayIntent`, every living non-wolf entity other than the
+speaker within that channel's earshot (`HEARING_RADIUS_BY_CHANNEL`, moved from
+`services/observation_service.py` to `types.py` as the shared source of truth,
+alongside the new `SAY_RADIUS`/`SHOUT_RADIUS` names) and puts them, sorted and
+comma-separated, in the successful `EntityActed.details` as `"heard: <ids>"`
+(empty after the colon when nobody was in range). `thought` is unaffected: its
+detail stays the plain channel name, since it has no in-world hearers. This is
+a pure `details`-string change; `action_type` stays `"say"` for every channel,
+`ActionResult`/`EntityActed`/the recording format are untouched, and no test
+or the viewer parsed the old `"local"`/`"shout"` value, so nothing else needed
+to change for backward compatibility.
+
+Agent side, `planner.py`'s `shout` tool (and, until 2026-09-19, `say`) no
+longer returns the world's
+`"<description> -> say ok: heard: <ids>"` verbatim: `_speak_result` rewrites it
+to `"said to cleo, finn (within 10 tiles)"` / `"shouted to cleo, finn (within
+60 tiles)"`, or `"nobody was within <radius> tiles to hear it"` when the id
+list is empty. Anything that is not that exact successful shape (a failure, an
+`interrupted: ...`, an asleep rejection) passes through unchanged.
+
+### 10.4 Board unread tracking
+
+`ObjectInfo.notes()` drops empty slots, so its list index was never the real
+slot number; `notes_by_slot()` (`worldmodel.py`) parses the same `notes` JSON
+into `{slot: note}` so read-tracking survives other slots filling or emptying.
+`WorldModel` keeps two independent per-board `{slot: tick}` maps:
+
+- `board_notes_read`, written only by the planner's `read_board` tool
+  (`mark_board_read`), drives `unread_note_count(board_id)` and
+  `is_note_unread(board_id, slot, note)`. `describe_world`'s `look` output
+  marks every note whose current tick has not been read `(new)` and appends
+  `", N new since you last read"` to the board's header line. A note is never
+  marked read just by being seen in view; only reading it does that.
+- `_board_notes_notified` (private) drives `_check_boards_in_view`, called
+  from `update()` next to `_read_signs_in_view`: the first time a board with a
+  note by another author comes into view, or a known note's tick changes, one
+  line - `[board_1: new note by ada: 'title']` - is queued on
+  `TickDigest.board_notes`, exactly the way `sign_notes` already worked. This
+  is independent of the read map: it fires by being in view, once per
+  `(board, slot, tick)`, whether or not the note has since been read.
+  `agent.py`'s `_handle_tick` drains `digest.board_notes` through
+  `_note_for_planner`, the same path as a sign note, so it reaches the next
+  tool result, the next turn prompt and the journal's `DayLog`.
+
+### 10.5 Friendlier failures
+
+- `read_board` on an id the actor has not seen now lists every board it knows
+  with its position (`WorldModel.boards_known()`), or says none is known and
+  that `place` can put one down, instead of a bare "have not seen" miss.
+- `join_conversation` on an id the actor has not seen lists conversations in
+  view with their anchors and mentions `talk_to` as the alternative that walks
+  up to a settler directly.
+
+## 11. Live-run fixes: purpose, the closing note, and asleep visibility (2026-09-19)
+
+A live run (`runs/20260919-211823-settlement`) surfaced defects fixed the same
+day.
+
+### 11.1 Asleep settlers are visible, and cannot be hailed
+
+`describe_world`'s "entities in view" line and `_roster_lines` (`planner.py`)
+now print `asleep` for a living settler seen asleep, and `dead` (unchanged)
+takes priority over it; the roster line reads `asleep as of <when>`. `talk_to`
+refuses at once, without walking, when the target is in view and already
+known to be asleep (`"<id> is asleep right now and cannot be hailed"`), and
+says so plainly if it turns out asleep once the walk is done, instead of
+spending the hail and reading the world's refusal. The docstring states a
+sleeping settler cannot be hailed at all.
+
+### 11.2 `write_sign`/`write_note` refuse the wrong object; `place_sign` crafts
+
+Both tools now check, from what the actor has itself observed, whether the
+named object is the kind they write to; a mismatch is refused with what the
+object actually is and the right tool's name (`_refuse_wrong_note_target`,
+`planner.py`), before any intent is submitted. This is a planner-side
+guardrail: `write_sign` always writes `WriteNoteIntent` slot 0, which is a
+message board's own first note slot, so calling it on a board silently
+overwrote that slot with a blank-titled note. The world side was already
+correct and unchanged — `containers.process_write_note_phase` dispatches on
+`board.object_type`, and a sign only ever accepts slot 0
+(`world/CLAUDE.md`, "Signs").
+
+`place_sign(direction, text)` is now self-sufficient: it checks the 80-character
+limit first (before touching the pack), then crafts a sign from 2 wood if none
+is carried but the wood is (reporting the craft step in the result), and
+otherwise names the shortfall (`"a sign takes 2 wood; you carry N, and you
+have no sign to place"`) without placing or writing anything. The recipe is
+unchanged (2 wood, hand-crafted).
+
+### 11.3 A bad tool-kwarg no longer risks the whole turn
+
+pydantic-ai's own validation-error text names only the field that was wrong
+(e.g. "Extra inputs are not permitted"), never what the tool actually takes,
+so a model that guessed a parameter name (`sleep(bed_object_id=...)` for the
+renamed `sleep(bed=...)`) got no way to self-correct and could burn every
+retry. `BudgetedToolset.get_tools` (`planner.py`) wraps every tool's
+`args_validator` in `_FriendlyArgsValidator`, which catches a
+`pydantic.ValidationError` and re-raises it as a `ModelRetry` with a
+`_tool_signature_line` appended (`"<tool> takes: a, b (optional)"`) — the one
+hook point that reaches every planner tool's argument validation without
+touching pydantic-ai itself, since validation runs in `ToolManager` before a
+toolset's `call_tool` is ever invoked. The planner agent's `retries` rose from
+2 to 3 (`PLANNER_TOOL_RETRIES`). `sleep`'s parameter is renamed
+`bed_object_id` -> `bed` (default `""`, the ground).
+
+Investigated and left as-is: once a tool's retries really are exhausted,
+pydantic-ai raises `UnexpectedModelBehavior` from inside `ToolManager`
+validation, before `BudgetedToolset.call_tool` (the only place this codebase
+can intercept a tool result) ever runs — there is no clean hook to turn that
+specific exception into a tool result instead of failing the call. The
+existing top-level `Planner.run` loop already catches any turn failure,
+traces `turn_failed`, and retries after `TURN_RETRY_SECONDS`, so the agent
+does not crash; a turn is lost, but with the friendlier retry message and the
+raised retry count this should now be rare.
+
+### 11.4 Conversations carry a purpose
+
+`talk_to` and `open_conversation` both gain a required `purpose` argument:
+"what you want out of this conversation; only you see it; it is handed to you
+while you are in the conversation." A hail Jev makes from the brief can carry
+one too: `BriefHail` (`options.py`) gains an optional `purpose`, so
+`start_stint(..., hails=[{"settler": "dov", "line": "...", "purpose": "..."}])`
+flows it the same way. A settler that was hailed, or that only joined, has no
+purpose — only the settler that opened or hailed sees one.
+
+Mechanically: `AgentBridge.set_conversation_purpose` (implemented on
+`JevAgent`) stashes the value the planner tool passed just before the `open`
+or `hail` intent; `JevAgent._detect_join` reads it back (via
+`_conversation_purpose`) when that actor's own seat lands, matching a
+Jev-driven `hail:<settler>` option to its `BriefHail` through
+`hailed_target(digest)` when the seat came from an active stint rather than a
+direct planner tool call. `ConversationSession.purpose` renders as "You
+started this conversation because: …" in `build_prompt`, for that settler's
+own turns only, and `conversation_start` traces it.
+
+### 11.5 The closing note asks for two things
+
+`ModelConverser`'s closing call now returns a structured `ClosingNote`
+(`agreed_or_learned`, `you_said_you_would`), replacing the old single free
+line; `NoteCall` carries both as `agreed`/`commitment`. Both are appended to
+the journal's `Today's notes` as their own
+`[conversation, tick N, with a, b] agreed: …` / `... I said I would: …` lines
+when non-empty (`append_conversation_note`), and `ConversationReport.to_text()`
+leads with `you said you would: …` / `agreed or learned: …` before the
+transcript, so the planner sees the takeaway without reading the whole
+exchange. The note prompt is now traced too, in the `conversation_end` line
+(`note_prompt`), which it was not before.
+
+Also checked against `world/src/world/conversations.py` and `items.py` and
+added to `CONVERSER_NARRATIVE`, as physics rather than strategy: leaving is
+final for that settler (the conversation goes on without it, or closes if
+fewer than two remain); after a conversation ends its members cannot be
+hailed for `HAIL_COOLDOWN_TICKS` (60) ticks; a full round of passes closes it.
+
+### 11.6 `start_stint` names what Jev can and cannot say
+
+The `instruction` docstring now states plainly: "Jev cannot speak on its own:
+it can only shout the `shouts` and hail the `hails` you give it here" — three
+briefs in the diagnosed run told Jev to "talk to finn about…" with no hails
+granted, which Jev has no way to act on.
+
+### 11.7 Analysis
+
+`tools/analyze_run.py`'s conversations section gains a per-conversation line
+count distribution (`line_count_stats`: min/median/max over each
+conversation's utterance count) and `purpose given: N of M` (`purpose_total`
+counts every seat taken that wrote a `conversation_start` trace row across all
+agents, i.e. per seat, not per conversation; `purpose_given` is how many of
+those carried a non-empty `purpose`). Both read as zero on a run recorded
+before this shipped.

@@ -105,6 +105,22 @@ class ObjectInfo:
             return ("", 0)
         return (recipe, int(done))
 
+    @property
+    def sign_text(self) -> str:
+        """The one line a sign carries; `""` for a blank sign or anything else."""
+        return self.state.get(items.SIGN_TEXT_KEY, "")
+
+    @property
+    def sign_author(self) -> str:
+        """Who wrote this sign's current line, or `""` when it is blank."""
+        return self.state.get(items.SIGN_AUTHOR_KEY, "")
+
+    @property
+    def sign_tick(self) -> int:
+        """The tick this sign's current line was written; 0 when it is blank."""
+        raw = self.state.get(items.SIGN_TICK_KEY, "")
+        return int(raw) if raw.isdigit() else 0
+
     def notes(self) -> list[dict[str, object]]:
         """Parsed `notes` JSON for message boards, with empty slots dropped."""
         raw = self.state.get("notes", "")
@@ -117,6 +133,26 @@ class ObjectInfo:
         if not isinstance(parsed, list):
             return []
         return [note for note in parsed if isinstance(note, dict)]
+
+    def notes_by_slot(self) -> dict[int, dict[str, object]]:
+        """Parsed `notes` JSON for message boards, keyed by their real slot.
+
+        `notes()` drops empty slots, so its list index is not the slot number
+        `write_note` and `read_board` use; this keeps that number so read
+        tracking survives other slots filling or emptying.
+        """
+        raw = self.state.get("notes", "")
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, list):
+            return {}
+        return {
+            index: note for index, note in enumerate(parsed) if isinstance(note, dict)
+        }
 
 
 @dataclass(frozen=True)
@@ -284,21 +320,6 @@ def conversation_from_object(obj: ObjectInfo) -> ConversationInfo:
 
 
 @dataclass(frozen=True)
-class OpenInvitation:
-    """Another settler who is open to talk, and where to go to accept.
-
-    `position` is the best known one: where the settler stands if it is in
-    view, otherwise where it was standing when the invitation was heard.
-    `text` is the most recent flagged line heard from it, or `""` when the
-    invitation was only seen on the settler itself.
-    """
-
-    entity_id: str
-    position: Coord
-    text: str
-
-
-@dataclass(frozen=True)
 class DamageTaken:
     """One hit this actor took; `attacker_id` is empty for starvation."""
 
@@ -323,6 +344,14 @@ class TickDigest:
     discovered_object_ids: list[str] = field(default_factory=list)
     self_died: bool = False
     self_respawned: bool = False
+    # One line per sign whose text this actor is being shown for the first
+    # time (docs/08_building.md, "Signs"). Already formatted for the planner.
+    sign_notes: list[str] = field(default_factory=list)
+    # One line per message board note by another author this actor is seeing
+    # for the first time (docs/09_conversation_and_reflex.md), on the same
+    # note path as `sign_notes`. Independent of `read_board`: it fires just by
+    # being in view, `read_board` only clears the `look` "(new)" marker.
+    board_notes: list[str] = field(default_factory=list)
 
 
 def _parse_counts(raw: str) -> dict[str, int]:
@@ -340,6 +369,17 @@ def _parse_counts(raw: str) -> dict[str, int]:
         if isinstance(value, int) and value > 0:
             counts[str(kind)] = value
     return counts
+
+
+def sign_note_line(sign: ObjectInfo) -> str:
+    """The one line a settler is shown when it reads a sign.
+
+    `[sign at (12, 30) by ada, written tick 91: "wolves north"]`.
+    """
+    return (
+        f"[sign at {sign.position} by {sign.sign_author or 'nobody'}, "
+        f'written tick {sign.sign_tick}: "{sign.sign_text}"]'
+    )
 
 
 def inventory_to_dict(inventory: pb.Inventory) -> dict[str, int]:
@@ -382,6 +422,17 @@ class WorldModel:
         # conversation: `heard` is a short shared window, and a converser needs
         # the whole exchange it sat through.
         self.conversation_lines: dict[str, list[TranscriptLine]] = {}
+        # sign object id -> the text this actor has already been shown. A sign
+        # is pushed at whoever walks past, once per text (docs/08_building.md).
+        self.sign_texts_read: dict[str, str] = {}
+        # board object id -> {slot: tick} for the note version this actor last
+        # read with `read_board`. Drives the `look` "(new)" marker; a note
+        # only comes off it by being read, not by walking past.
+        self.board_notes_read: dict[str, dict[int, int]] = {}
+        # board object id -> {slot: tick} for the note version this actor has
+        # already been pushed a `board_notes` line for, so a note by someone
+        # else is announced once, not on every tick it stays in view.
+        self._board_notes_notified: dict[str, dict[int, int]] = {}
         self.last_digest = TickDigest()
         # Position indexes rebuilt once per update() so that pathfinding's
         # walkability checks are O(1) instead of scanning every known object.
@@ -447,6 +498,8 @@ class WorldModel:
         self._refresh_objects(observation, digest)
         self._refresh_entities(observation)
         self._apply_events(observation, digest)
+        self._read_signs_in_view(digest)
+        self._check_boards_in_view(digest)
         self._rebuild_position_indexes()
 
         self.last_digest = digest
@@ -564,6 +617,101 @@ class WorldModel:
                     state=dict(added.state),
                     last_seen=tick,
                 )
+
+    def _read_signs_in_view(self, digest: TickDigest) -> None:
+        """Queue a note for every sign in view whose line is new to this actor.
+
+        A sign is the one channel nobody has to ask for: walking past a written
+        sign delivers its line once, and again whenever the text changes. The
+        actor's own signs are recorded as read without a note, so a settler is
+        never told what it just wrote itself.
+        """
+        for obj in self.objects.values():
+            if obj.object_type != items.SIGN or obj.last_seen != self.tick:
+                continue
+            text = obj.sign_text
+            already = self.sign_texts_read.get(obj.object_id)
+            self.sign_texts_read[obj.object_id] = text
+            if not text or text == already:
+                continue
+            if obj.sign_author == self.entity_id:
+                continue
+            digest.sign_notes.append(sign_note_line(obj))
+
+    def signs_known(self) -> list[ObjectInfo]:
+        """Every sign this actor knows about, nearest first."""
+        return self.objects_by_type([items.SIGN])
+
+    @staticmethod
+    def _note_tick(note: Mapping[str, object]) -> int:
+        """A note's `tick` field, defensively parsed; 0 for anything odd."""
+        raw = note.get("tick", 0)
+        if isinstance(raw, bool):
+            return 0
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str) and raw.isdigit():
+            return int(raw)
+        return 0
+
+    def _check_boards_in_view(self, digest: TickDigest) -> None:
+        """Queue one note for every board note by someone else seen for the
+        first time, on the same push-notification path as a sign's text
+        (docs/08_building.md, "Signs"; docs/09 section 6).
+
+        This is independent of `read_board`/`board_notes_read`, which only
+        drive the `look` "(new)" marker: a note announces itself just by
+        coming into view, whether or not it has been read.
+        """
+        for obj in self.objects.values():
+            if obj.object_type != items.MESSAGE_BOARD or obj.last_seen != self.tick:
+                continue
+            notified = self._board_notes_notified.setdefault(obj.object_id, {})
+            for slot, note in obj.notes_by_slot().items():
+                title = str(note.get("title", ""))
+                author = str(note.get("author", ""))
+                if not title or author == self.entity_id:
+                    continue
+                tick = self._note_tick(note)
+                if notified.get(slot) == tick:
+                    continue
+                notified[slot] = tick
+                digest.board_notes.append(
+                    f"[{obj.object_id}: new note by {author}: {title!r}]"
+                )
+
+    def mark_board_read(self, board_id: str) -> None:
+        """Record every current note on `board_id` as read by this actor."""
+        board = self.objects.get(board_id)
+        if board is None:
+            return
+        read = self.board_notes_read.setdefault(board_id, {})
+        for slot, note in board.notes_by_slot().items():
+            if str(note.get("title", "")):
+                read[slot] = self._note_tick(note)
+
+    def unread_note_count(self, board_id: str) -> int:
+        """How many of `board_id`'s current notes this actor has not read."""
+        board = self.objects.get(board_id)
+        if board is None:
+            return 0
+        read = self.board_notes_read.get(board_id, {})
+        return sum(
+            1
+            for slot, note in board.notes_by_slot().items()
+            if str(note.get("title", "")) and read.get(slot) != self._note_tick(note)
+        )
+
+    def is_note_unread(
+        self, board_id: str, slot: int, note: Mapping[str, object]
+    ) -> bool:
+        """Whether this actor has not read this exact version of a note."""
+        read = self.board_notes_read.get(board_id, {})
+        return read.get(slot) != self._note_tick(note)
+
+    def boards_known(self) -> list[ObjectInfo]:
+        """Every message board this actor knows about, nearest first."""
+        return self.objects_by_type([items.MESSAGE_BOARD])
 
     # -- queries ------------------------------------------------------------
 
@@ -739,66 +887,6 @@ class WorldModel:
             if u.speaker_id == self.entity_id and u.channel == items.SHOUT_CHANNEL
         ]
         return max(ticks, default=-1)
-
-    def open_invitations(self) -> list[OpenInvitation]:
-        """Every other settler open to talk right now, nearest first.
-
-        A settler qualifies when it is in view with the flag set, or when a
-        flagged line was heard from it less than `INVITATION_TICKS` ago. A
-        settler in view *without* the flag is dropped even if it was heard with
-        one: the world's own view of the entity is newer than the line.
-        """
-        invitations: dict[str, OpenInvitation] = {}
-        for utterance in self.heard:
-            if not utterance.open_to_talk or utterance.speaker_id == self.entity_id:
-                continue
-            if self.tick - utterance.tick >= items.INVITATION_TICKS:
-                continue
-            invitations[utterance.speaker_id] = OpenInvitation(
-                entity_id=utterance.speaker_id,
-                position=utterance.position,
-                text=utterance.text,
-            )
-        for entity in self.entities.values():
-            if entity.entity_id == self.entity_id or entity.entity_type == "wolf":
-                continue
-            heard = invitations.get(entity.entity_id)
-            if not entity.alive or not entity.open_to_talk:
-                if entity.last_seen == self.tick:
-                    invitations.pop(entity.entity_id, None)
-                continue
-            invitations[entity.entity_id] = OpenInvitation(
-                entity_id=entity.entity_id,
-                position=entity.position,
-                text="" if heard is None else heard.text,
-            )
-        return sorted(
-            invitations.values(),
-            key=lambda invitation: (
-                chebyshev(invitation.position, self.position),
-                invitation.entity_id,
-            ),
-        )
-
-    def last_own_invitation_tick(self) -> int:
-        """The tick of this actor's most recent flagged say, or -1 for never."""
-        ticks = [
-            u.tick
-            for u in self.heard
-            if u.speaker_id == self.entity_id and u.open_to_talk
-        ]
-        return max(ticks, default=-1)
-
-    def my_invitation_ticks_left(self) -> int:
-        """Ticks this actor's own invitation still stands; 0 when none does."""
-        last = self.last_own_invitation_tick()
-        if last < 0:
-            return 0
-        return max(0, items.INVITATION_TICKS - (self.tick - last))
-
-    def my_invitation_live(self) -> bool:
-        """Whether this actor's own invitation to talk is still open."""
-        return self.my_invitation_ticks_left() > 0
 
     def damage_since(self, tick: int) -> list[DamageTaken]:
         """Every hit the actor took at or after `tick`, oldest first."""

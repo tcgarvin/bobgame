@@ -152,8 +152,8 @@ both. Example: `http://localhost:5173/?run=fake&tick=50&entity=ada`.
 - Keys (replay only): space play/pause, `,` / `.` step ±1, `[` / `]` step ±10.
   They are suppressed while a form field has focus, and focusing the tick input
   disables the Phaser keyboard so `F`/`P`/digits do not fire.
-- `src/ui/ObjectPanel.ts` — clicking a chest, item pile, message board, bush,
-  reeds, clay deposit or any placed building opens an inspector. The data comes
+- `src/ui/ObjectPanel.ts` — clicking a chest, item pile, message board, sign,
+  bush, reeds, clay deposit or any placed building opens an inspector. The data comes
   from `ObjectState.state`, where `contents` and `notes` are JSON strings,
   `owner` is an entity id, and `progress` is extraction or dismantle work.
   Trees and rocks are deliberately not clickable: there are far too many of
@@ -287,6 +287,9 @@ the `shout` channel get the same speech bubble as `local` ones.
   `OverlayUI.fatigueState` (fresh < 60, tired 60-99, exhausted at max), and an
   "asleep"/"collapsed" status chip in the header; the header carries the clock readout (`#clock-readout`,
   `day 2 · 143/300 · night`).
+- A `sign` (docs/08_building.md, "Signs") draws from the `sign` sprite key
+  (DawnLike `Objects/Decor0.png` tile 40) and the inspector shows a "Sign"
+  section with the line it reads, who wrote it and the tick, or "blank".
 - The object inspector lists a vein's `remaining` units like any other resource
   and, for a `workshop_table`, `furnace` or `anvil`, a "Crafting" section read
   from the station's `craft:<entity_id>` = `<recipe>:<done>` state keys.

@@ -35,13 +35,16 @@ import structlog
 from .. import world_pb2 as pb
 from .client import WorldClient
 from .conversation import (
+    ACTION_HAIL,
     ACTION_JOIN,
     ACTION_OPEN,
+    UNASKED_VIA,
     VIA_ACCEPTED,
     ConversationReport,
     ConversationSession,
     Converser,
     ModelConverser,
+    hailed_target,
     joined_conversation,
 )
 from .jevclient import JevClient, TypeSafeJevClient
@@ -324,6 +327,10 @@ class JevAgent:
         self._pending_thought = ""
         self._last_status = ("", "", "", "", "")
         self._running = False
+        # Set by the planner's `open_conversation`/`talk_to` just before the
+        # open or hail intent, and read once by `_begin_conversation` when that
+        # actor's own seat lands (docs/09 section 10, item 4).
+        self._pending_purpose = ""
 
     # -- AgentBridge --------------------------------------------------------
 
@@ -347,6 +354,10 @@ class JevAgent:
         """Forget the reflex brief; nothing fires until a new one is set."""
         self._reflex_watch.set_brief(EMPTY_REFLEX)
         self.reflex_store.save(EMPTY_REFLEX)
+
+    def set_conversation_purpose(self, purpose: str) -> None:
+        """Remember why the open/hail about to be submitted was started."""
+        self._pending_purpose = purpose
 
     def drain_notes(self, *, for_prompt: bool = False) -> list[str]:
         """Reflex lines and conversation reports not yet shown, emptied as taken.
@@ -523,6 +534,12 @@ class JevAgent:
 
     async def _handle_tick(self, observation: pb.Observation) -> None:
         digest = self._model.update(observation)
+        # A sign pushes its line at whoever walks past, so the planner is told
+        # through the same note path as a reflex line (docs/08_building.md).
+        for note in digest.sign_notes:
+            self._note_for_planner(note)
+        for note in digest.board_notes:
+            self._note_for_planner(note)
         self._note_life_transitions(digest)
         self._note_sleep_transitions(digest)
         if self._body_is_active():
@@ -943,23 +960,49 @@ class JevAgent:
         """Enter conversation mode when the world says the actor took a seat.
 
         The seat may come from an `open`, a `join`, an `accept` of someone
-        else's invitation, or someone accepting this actor's own. In the last
-        case the actor asked for nothing, so whatever single-tick action it had
-        in flight is answered as interrupted.
+        else's invitation, a `hail` of another settler, someone accepting this
+        actor's own invitation, or someone hailing this actor. In the last two
+        cases the actor asked for nothing, so whatever single-tick action it
+        had in flight is answered as interrupted.
         """
         conversation_id, action = joined_conversation(digest)
         if not conversation_id or self._conversation is not None:
             return
         via = self._join_via(action)
         stint = self._active_stint
+        purpose = self._conversation_purpose(via, action, digest, stint)
         if stint is not None:
             stint.finish(END_JOINED_CONVERSATION)
             self._finish_stint(hold=True)
-        elif via == VIA_ACCEPTED:
+        elif via in UNASKED_VIA:
             # Nothing in flight belongs to this seat: the planner asked for an
-            # action and got a conversation instead.
+            # action and got a conversation instead (it was accepted, or
+            # someone hailed it).
             self._refuse_direct_requests(conversation_interruption(conversation_id))
-        self._begin_conversation(conversation_id, via)
+        self._begin_conversation(conversation_id, via, purpose)
+        self._pending_purpose = ""
+
+    def _conversation_purpose(
+        self, via: str, action: str, digest: TickDigest, stint: Stint | None
+    ) -> str:
+        """Why this actor started the conversation, or `""` (docs/09 item 4).
+
+        A settler that was hailed or that only joined has no purpose. A
+        Jev-driven `hail:<settler>` option is matched back to the brief's own
+        `BriefHail`; a planner `open_conversation`/`talk_to` reads the value
+        `set_conversation_purpose` stashed just before the intent.
+        """
+        if stint is not None:
+            if action != ACTION_HAIL:
+                return ""
+            target = hailed_target(digest)
+            for hail in stint.brief.hails:
+                if hail.settler == target:
+                    return hail.purpose
+            return ""
+        if via in (ACTION_OPEN, ACTION_HAIL):
+            return self._pending_purpose
+        return ""
 
     def _join_via(self, action: str) -> str:
         """How the seat was taken, for the `conversation_start` trace line.
@@ -975,7 +1018,9 @@ class JevAgent:
             return action
         return VIA_ACCEPTED
 
-    def _begin_conversation(self, conversation_id: str, via: str = ACTION_JOIN) -> None:
+    def _begin_conversation(
+        self, conversation_id: str, via: str = ACTION_JOIN, purpose: str = ""
+    ) -> None:
         session = ConversationSession(
             conversation_id,
             self._model,
@@ -984,6 +1029,7 @@ class JevAgent:
             memory_path=self.planner.memory_path,
             reflex_line=lambda: self.reflex.prompt_line(),
             alert_line=self._alert_line,
+            purpose=purpose,
         )
         session.begin(via)
         self._conversation = session

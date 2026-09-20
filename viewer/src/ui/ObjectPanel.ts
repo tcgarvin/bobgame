@@ -32,6 +32,7 @@ const BUILDING_TYPES = new Set([
   'wood_wall',
   'stone_wall',
   'door',
+  'sign',
   'bed',
   'chair',
   'table',
@@ -40,6 +41,12 @@ const BUILDING_TYPES = new Set([
   'furnace',
   'anvil',
 ]);
+
+/**
+ * A sign (docs/08_building.md, "Signs"): one line of at most 80 characters in
+ * `text`, plus `author` and `tick`. It is a building, so it also dismantles.
+ */
+const SIGN_TYPE = 'sign';
 
 /** Stations that hold per-settler craft progress in `craft:<entity_id>`. */
 const STATION_TYPES = new Set(['workshop_table', 'furnace', 'anvil']);
@@ -78,6 +85,7 @@ export const INSPECTABLE_TYPES = new Set([
   'chest',
   'item_pile',
   'message_board',
+  'sign',
   'bush',
   'reeds',
   'clay_deposit',
@@ -221,6 +229,18 @@ export class ObjectPanel {
         rows.push(this.kvRow('blocks', obj.objectType === 'door' ? 'wolves' : 'everyone'));
       }
       rows.push(this.kvRow('dismantling', `${readProgress(obj)} / ${DISMANTLE_WORK}`));
+      if (obj.objectType === SIGN_TYPE) {
+        rows.push(this.sectionLabel('Sign'));
+        const text = obj.state.text ?? '';
+        if (text === '') {
+          rows.push(this.muted('blank'));
+        } else {
+          rows.push(this.kvRow('reads', text));
+          rows.push(this.kvRow('written by', obj.state.author || '(nobody)'));
+          const tick = obj.state.tick;
+          if (tick) rows.push(this.kvRow('written at', `t${tick}`));
+        }
+      }
       if (STATION_TYPES.has(obj.objectType)) {
         const crafts = readCraftProgress(obj);
         if (crafts.length > 0) {

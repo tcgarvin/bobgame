@@ -26,6 +26,12 @@ from .items import (
     NATURAL_OBJECT_TYPES,
     PLACEABLE_KINDS,
     PLACED_OBJECT_TYPE,
+    SIGN_AUTHOR_KEY,
+    SIGN_OBJECT,
+    SIGN_SLOT,
+    SIGN_TEXT_KEY,
+    SIGN_TEXT_MAX,
+    SIGN_TICK_KEY,
 )
 from .state import WOLF_ENTITY_TYPE, World, WorldObject
 from .types import (
@@ -480,6 +486,11 @@ def process_place_phase(
             state.append((CONTENTS_KEY, encode_contents({})))
         elif object_type == MESSAGE_BOARD_OBJECT:
             state.append((NOTES_KEY, empty_notes_json()))
+        elif object_type == SIGN_OBJECT:
+            # A sign is born blank; `write_note` fills the three keys in.
+            state.append((SIGN_TEXT_KEY, ""))
+            state.append((SIGN_AUTHOR_KEY, ""))
+            state.append((SIGN_TICK_KEY, ""))
 
         obj = WorldObject(
             object_id=world.generate_object_id(object_type),
@@ -557,12 +568,70 @@ def process_give_phase(
         )
 
 
+def _write_sign(
+    world: World,
+    entity_id: str,
+    sign: WorldObject,
+    intent: WriteNoteIntent,
+    events: TickEvents,
+) -> None:
+    """Write, rewrite or blank the one line a sign carries.
+
+    A sign has a single slot and no title: the text comes from `intent.text`
+    and anything longer than `SIGN_TEXT_MAX` is refused rather than cut, so the
+    writer knows the line they meant never went up (docs/08_building.md).
+    """
+    if intent.slot != SIGN_SLOT:
+        events.acted(
+            entity_id, "write_note", False, f"a sign has one slot: use {SIGN_SLOT}"
+        )
+        return
+    text = intent.text
+    if len(text) > SIGN_TEXT_MAX:
+        events.acted(
+            entity_id,
+            "write_note",
+            False,
+            f"sign text is at most {SIGN_TEXT_MAX} characters, this one is "
+            f"{len(text)}",
+        )
+        return
+
+    if text:
+        updates = {
+            SIGN_TEXT_KEY: text,
+            SIGN_AUTHOR_KEY: entity_id,
+            SIGN_TICK_KEY: str(world.tick),
+        }
+        detail = f'wrote {sign.object_id}: "{text}"'
+    else:
+        updates = {SIGN_TEXT_KEY: "", SIGN_AUTHOR_KEY: "", SIGN_TICK_KEY: ""}
+        detail = f"cleared {sign.object_id}"
+
+    updated = sign
+    for key, new_value in updates.items():
+        old_value = updated.get_state(key, "")
+        if old_value == new_value:
+            continue
+        updated = updated.with_state(key, new_value)
+        events.object_changes.append(
+            ObjectChange(
+                object_id=updated.object_id,
+                field=key,
+                old_value=old_value,
+                new_value=new_value,
+            )
+        )
+    world.update_object(updated)
+    events.acted(entity_id, "write_note", True, detail)
+
+
 def process_write_note_phase(
     world: World,
     intents: Mapping[str, WriteNoteIntent],
     events: TickEvents,
 ) -> None:
-    """Write or clear one slot of a message board."""
+    """Write or clear one slot of a message board, or the one line of a sign."""
     for entity_id in sorted(intents):
         intent = intents[entity_id]
         entity = world.get_entity(entity_id)
@@ -574,16 +643,24 @@ def process_write_note_phase(
                 entity_id, "write_note", False, f"no object {intent.object_id}"
             )
             continue
-        if board.object_type != "message_board":
+        if board.object_type not in (MESSAGE_BOARD_OBJECT, SIGN_OBJECT):
             events.acted(
                 entity_id,
                 "write_note",
                 False,
-                f"{board.object_id} is not a message board",
+                f"{board.object_id} is not a message board or a sign",
             )
             continue
         if not is_same_or_adjacent(entity.position, board.position):
-            events.acted(entity_id, "write_note", False, "board is not adjacent")
+            events.acted(
+                entity_id,
+                "write_note",
+                False,
+                f"{board.object_id} is not adjacent",
+            )
+            continue
+        if board.object_type == SIGN_OBJECT:
+            _write_sign(world, entity_id, board, intent, events)
             continue
         if not 0 <= intent.slot < BOARD_SLOTS:
             events.acted(

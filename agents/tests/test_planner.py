@@ -14,6 +14,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    RetryPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -42,9 +43,13 @@ from agents.jev_agent.planner import (
     read_memory,
     threat_alert,
     trim_history,
-    _validated_invitations as validated_invitations,
+    _validated_hails as validated_hails,
 )
-from agents.jev_agent.conversation import ApproachDriver, ConversationReport
+from agents.jev_agent.conversation import (
+    CONVERSER_NARRATIVE,
+    ApproachDriver,
+    ConversationReport,
+)
 from agents.jev_agent.journal import (
     ALL_SECTIONS,
     SECTION_SCRATCH,
@@ -52,6 +57,7 @@ from agents.jev_agent.journal import (
     SECTION_TOMORROW,
     Journal,
 )
+from agents.jev_agent.options import BriefHail
 from agents.jev_agent.reflex import EMPTY_REFLEX, NO_REFLEX_LINE, ReflexBrief
 from agents.jev_agent.stint import Brief, StintReport
 from agents.jev_agent.tracelog import AgentTrace
@@ -80,6 +86,7 @@ class RecordingBridge:
         self.reflex = EMPTY_REFLEX
         self.reflex_notes: list[str] = []
         self.conversation_reports: list[ConversationReport] = []
+        self.conversation_purposes: list[str] = []
         self.direct_result = ""
         # Consumed one per `direct_action` call, ahead of `direct_result`.
         self.direct_results: list[str] = []
@@ -143,6 +150,9 @@ class RecordingBridge:
 
     def clear_reflex(self) -> None:
         self.reflex = EMPTY_REFLEX
+
+    def set_conversation_purpose(self, purpose: str) -> None:
+        self.conversation_purposes.append(purpose)
 
     def drain_notes(self, *, for_prompt: bool = False) -> list[str]:
         notes = list(self.reflex_notes)
@@ -266,6 +276,34 @@ def test_look_lists_every_settler_met_even_after_they_walk_out_of_view(
     assert "entities in view: none" in summary
     assert "settlers you have met (last seen):" in summary
     assert "bob at (11, 10) (d30, 20 ticks ago)" in summary
+
+
+def test_look_marks_an_asleep_settler_in_view_and_in_the_roster(
+    world_model: WorldModel,
+) -> None:
+    world_model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10), inventory={"wood": 2}),
+            entities=[make_entity("bob", (11, 10), asleep=True)],
+        )
+    )
+    summary = describe_world(world_model)
+    assert "bob (player) at (11, 10), hp 20/20, asleep" in summary
+    assert "bob at (11, 10) (d1, now, asleep as of now)" in summary
+
+
+def test_look_marks_a_dead_settler_over_asleep(world_model: WorldModel) -> None:
+    world_model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10), inventory={"wood": 2}),
+            entities=[make_entity("bob", (11, 10), asleep=True, alive=False)],
+        )
+    )
+    summary = describe_world(world_model)
+    assert "bob (player) at (11, 10), hp 20/20, dead" in summary
+    assert "bob at (11, 10) (d1, now, dead)" in summary
 
 
 def test_look_shows_where_a_shout_came_from_and_who_is_armed(
@@ -420,7 +458,6 @@ async def test_every_documented_tool_is_registered(deps: PlannerDeps) -> None:
         "dismantle",
         "build",
         "wait",
-        "say",
         "shout",
         "write_note",
         "read_board",
@@ -463,7 +500,7 @@ async def test_single_tick_tools_submit_the_right_intents(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
     agent = build_planner_agent("test")
-    for tool in ("equip", "say"):
+    for tool in ("equip", "shout"):
         with agent.override(model=TestModel(call_tools=[tool])):
             await agent.run("go", deps=deps)
 
@@ -497,6 +534,54 @@ async def test_read_board_renders_the_notes(deps: PlannerDeps) -> None:
     # TestModel passes a generated board id, so the tool reports the miss rather
     # than inventing content.
     assert "board" in result.output.lower() or "have not seen" in result.output
+
+
+async def test_read_board_on_an_unknown_id_lists_the_boards_known(
+    deps: PlannerDeps,
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool_once("read_board", '{"board_id": "board_9"}')):
+        result = await agent.run("go", deps=deps)
+    assert "you have not seen a board called 'board_9'" in result.output
+    assert "board_1 at (11, 11)" in result.output
+
+
+async def test_read_board_marks_notes_read_and_look_stops_marking_them_new(
+    deps: PlannerDeps, world_model: WorldModel
+) -> None:
+    assert "(new)" in describe_world(world_model)
+    assert "1 new since you last read" in describe_world(world_model)
+
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool_once("read_board", '{"board_id": "board_1"}')):
+        result = await agent.run("go", deps=deps)
+    assert "Wood pile" in result.output
+
+    text = describe_world(world_model)
+    assert "(new)" not in text
+    assert "new since you last read" not in text
+
+
+async def test_join_conversation_on_an_unknown_id_lists_conversations_in_view(
+    deps: PlannerDeps, bridge: RecordingBridge, world_model: WorldModel
+) -> None:
+    world_model.update(
+        make_observation(
+            6,
+            make_entity("ada", (10, 10)),
+            objects=[
+                make_object("conv_1", "conversation", (12, 10), {"speaker": "bob"})
+            ],
+        )
+    )
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool_once("join_conversation", '{"conversation_id": "conv_9"}')
+    ):
+        result = await agent.run("go", deps=deps)
+    assert "you have not seen a conversation called 'conv_9'" in result.output
+    assert "conv_1" in result.output
+    assert "talk_to" in result.output
 
 
 async def test_remember_appends_under_todays_notes(deps: PlannerDeps) -> None:
@@ -894,11 +979,11 @@ async def test_a_spent_budget_refuses_the_call_but_keeps_the_turn(
     monkeypatch.setattr(planner_module, "MAX_TOOL_CALLS_PER_TURN", 2)
     trace = AgentTrace("ada", tmp_path)
     planner = Planner(bridge, "ada", model_name="test", trace=trace)
-    with planner.agent.override(model=_call_tool_until_refused("say")):
+    with planner.agent.override(model=_call_tool_until_refused("shout")):
         thought = await planner.take_turn()
 
     assert thought == "Out of budget; stopping."
-    assert len(bridge.actions) == 2, "the third say was refused, not submitted"
+    assert len(bridge.actions) == 2, "the third shout was refused, not submitted"
     assert planner.history, "the turn is remembered"
     events = [line["event"] for line in planner_lines(trace)]
     assert "tool_budget_spent" in events
@@ -912,7 +997,7 @@ async def test_the_hard_limit_ends_the_turn_and_still_keeps_its_history(
     monkeypatch.setattr(planner_module, "HARD_LIMIT_MARGIN", 2)
     trace = AgentTrace("ada", tmp_path)
     planner = Planner(bridge, "ada", model_name="test", trace=trace)
-    with planner.agent.override(model=_call_tool_forever("say")):
+    with planner.agent.override(model=_call_tool_forever("shout")):
         thought = await planner.take_turn()
 
     assert "tool calls" in thought
@@ -1115,7 +1200,7 @@ def _conversation_report() -> ConversationReport:
         participants=("ada", "mira"),
         end_reason="closed",
         transcript=(TranscriptLine(6, "ada", "Who needs planks?"),),
-        note="mira needs planks",
+        agreed="mira needs planks",
     )
 
 
@@ -1207,7 +1292,11 @@ async def test_open_conversation_submits_the_intent_and_returns_the_report(
     with agent.override(
         model=_call_tool(
             "open_conversation",
-            {"direction": "E", "opening_line": "Who needs planks?"},
+            {
+                "direction": "E",
+                "opening_line": "Who needs planks?",
+                "purpose": "find planks",
+            },
         )
     ):
         result = await agent.run("go", deps=deps)
@@ -1228,7 +1317,10 @@ async def test_a_refused_open_does_not_wait_for_a_conversation(
     )
     agent = build_planner_agent("test")
     with agent.override(
-        model=_call_tool("open_conversation", {"direction": "E", "opening_line": "hi"})
+        model=_call_tool(
+            "open_conversation",
+            {"direction": "E", "opening_line": "hi", "purpose": "say hi"},
+        )
     ):
         result = await agent.run("go", deps=deps)
 
@@ -1369,7 +1461,7 @@ async def test_sleep_submits_the_intent_and_returns_the_wake(
             f"{reason}; fatigue 80 -> 25"
         )
         agent = build_planner_agent("test")
-        with agent.override(model=_call_tool("sleep", {"bed_object_id": "bed_1"})):
+        with agent.override(model=_call_tool("sleep", {"bed": "bed_1"})):
             result = await agent.run("go", deps=deps)
 
         intent, _ = bridge.actions[-1]
@@ -1385,7 +1477,7 @@ async def test_sleep_on_the_ground_names_no_bed(
     bridge.direct_result = "sleep on the ground -> sleep ok: asleep on the ground"
     bridge.wake_result = "slept on the ground from tick 5 to tick 9 (4 ticks)"
     agent = build_planner_agent("test")
-    with agent.override(model=_call_tool("sleep", {"bed_object_id": ""})):
+    with agent.override(model=_call_tool("sleep", {"bed": ""})):
         result = await agent.run("go", deps=deps)
 
     intent, description = bridge.actions[-1]
@@ -1399,7 +1491,7 @@ async def test_a_refused_sleep_does_not_wait_for_a_wake(
 ) -> None:
     bridge.direct_result = "sleep on bed_1 -> sleep failed: bed_1 is taken"
     agent = build_planner_agent("test")
-    with agent.override(model=_call_tool("sleep", {"bed_object_id": "bed_1"})):
+    with agent.override(model=_call_tool("sleep", {"bed": "bed_1"})):
         result = await agent.run("go", deps=deps)
 
     assert not bridge.wake_calls
@@ -1454,7 +1546,7 @@ def test_look_names_the_veins_and_stations_it_knows(world_model: WorldModel) -> 
     assert "fatigue 0/100 (fresh)" in summary
 
 
-# --- invitations to talk (docs/09 section 8.3) ------------------------------
+# --- brief hails and the channel narrative (docs/09 sections 9 and 10) ------
 
 
 def _call_tool_once(tool_name: str, json_args: str) -> FunctionModel:
@@ -1475,142 +1567,100 @@ def _call_tool_once(tool_name: str, json_args: str) -> FunctionModel:
     return FunctionModel(respond)
 
 
-def _invited_model(position: tuple[int, int] = (11, 10)) -> WorldModel:
-    """A model for ada who can see and has heard mira's invitation to talk."""
-    model = WorldModel("ada")
-    model.update(
+async def test_shout_reports_who_heard_it_within_sixty_tiles(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.direct_results = ["shout 'wolf!' -> say ok: heard: cleo, finn, mira"]
+    agent = build_planner_agent("test")
+    with agent.override(model=_call_tool_once("shout", '{"text": "wolf!"}')):
+        result = await agent.run("go", deps=deps)
+
+    assert "shouted to cleo, finn, mira (within 60 tiles)" in result.output
+
+
+async def test_start_stint_passes_the_hails_into_the_brief(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    deps.bridge.model.update(
         make_observation(
-            5,
-            make_entity("ada", (10, 10)),
-            entities=[make_entity("mira", position, open_to_talk=True)],
-            events=[
-                utterance_event("mira", "Plan the wall?", position, open_to_talk=True)
-            ],
+            6, make_entity("ada", (10, 10)), entities=[make_entity("mira", (12, 10))]
         )
     )
-    return model
-
-
-async def test_say_can_carry_the_open_to_talk_flag(
-    deps: PlannerDeps, bridge: RecordingBridge
-) -> None:
-    agent = build_planner_agent("test")
-    with agent.override(
-        model=_call_tool_once("say", '{"text": "Anyone free?", "open_to_talk": true}')
-    ):
-        await agent.run("go", deps=deps)
-
-    (intent, description) = bridge.actions[0]
-    assert intent.say.open_to_talk
-    assert intent.say.channel == "local"
-    assert "open to talk" in description
-
-
-async def test_say_without_the_flag_leaves_the_invitation_alone(
-    deps: PlannerDeps, bridge: RecordingBridge
-) -> None:
-    agent = build_planner_agent("test")
-    with agent.override(model=_call_tool_once("say", '{"text": "Hello."}')):
-        await agent.run("go", deps=deps)
-
-    (intent, _description) = bridge.actions[0]
-    assert not intent.say.open_to_talk
-
-
-async def test_start_stint_passes_the_invitation_phrases_into_the_brief(
-    deps: PlannerDeps, bridge: RecordingBridge
-) -> None:
-    agent = build_planner_agent("test")
     args = (
         '{"instruction": "Gather stone", "success_condition": "10 stone", '
-        '"max_ticks": 30, "invitations": ["Anyone want to plan the wall?"]}'
+        '"max_ticks": 30, "hails": [{"settler": "mira", '
+        '"line": "Shall we plan the wall?"}]}'
     )
     with agent.override(model=_call_tool_once("start_stint", args)):
         await agent.run("go", deps=deps)
 
-    assert bridge.briefs[0].invitations == ("Anyone want to plan the wall?",)
+    assert bridge.briefs[0].hails == (BriefHail("mira", "Shall we plan the wall?"),)
 
 
-def test_too_many_invitation_phrases_ask_the_model_to_try_again() -> None:
-    with pytest.raises(ModelRetry, match="at most 4 invitation phrases"):
-        validated_invitations(["a", "b", "c", "d", "e"])
+def test_a_brief_hail_must_name_a_settler_this_actor_has_met() -> None:
+    model = _seen_model((11, 10))
+    assert validated_hails([{"settler": "mira", "line": "hi"}], model) == (
+        BriefHail("mira", "hi"),
+    )
+    with pytest.raises(ModelRetry, match="settlers you have met: mira"):
+        validated_hails([{"settler": "zeno", "line": "hi"}], model)
+    with pytest.raises(ModelRetry, match="cannot hail yourself"):
+        validated_hails([{"settler": "ada", "line": "hi"}], model)
+    with pytest.raises(ModelRetry, match="at most 3 hails"):
+        validated_hails([{"settler": "mira", "line": "hi"}] * 4, model)
     with pytest.raises(ModelRetry, match="at most 300"):
-        validated_invitations(["x" * 301])
-    assert validated_invitations([" come over ", "", "  "]) == ("come over",)
+        validated_hails([{"settler": "mira", "line": "x" * 301}], model)
+    with pytest.raises(ModelRetry, match="needs a `settler` and a `line`"):
+        validated_hails([{"settler": "mira", "line": "  "}], model)
 
 
-async def test_talk_to_refuses_a_settler_who_is_not_open_to_talk(
+async def test_talk_to_refuses_a_settler_it_has_never_seen(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
     agent = build_planner_agent("test")
-    with agent.override(model=_call_tool_once("talk_to", '{"entity_id": "bob"}')):
-        result = await agent.run("go", deps=deps)
-
-    assert not bridge.actions, "nothing is submitted for an unknown invitation"
-    assert "no invitation from bob" in result.output
-
-
-async def test_talk_to_next_to_the_inviter_accepts_and_returns_the_report(
-    tmp_path: Path,
-) -> None:
-    bridge = RecordingBridge(_invited_model((11, 10)))
-    bridge.direct_result = (
-        "accept mira's invitation to talk -> converse ok: accept conv_1 mira"
-    )
-    bridge.conversation_reports.append(
-        ConversationReport(
-            conversation_id="conv_1",
-            start_tick=6,
-            end_tick=30,
-            participants=("mira", "ada"),
-            end_reason="closed",
-            transcript=(TranscriptLine(6, "mira", "Plan the wall?"),),
-            note="mira builds the north wall",
+    with agent.override(
+        model=_call_tool_once(
+            "talk_to",
+            '{"entity_id": "zeno", "opening_line": "hello", "purpose": "catch up"}',
         )
-    )
-    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
-    agent = build_planner_agent("test")
-    with agent.override(model=_call_tool_once("talk_to", '{"entity_id": "mira"}')):
+    ):
         result = await agent.run("go", deps=deps)
 
-    (intent, _description) = bridge.actions[0]
-    assert intent.converse.action == "accept"
-    assert "CONVERSATION REPORT: conv_1" in result.output
-    assert "mira builds the north wall" in result.output
-    assert intent.converse.target_entity_id == "mira"
-    assert not bridge.briefs, "nobody walks anywhere when already adjacent"
+    assert not bridge.actions, "nothing is submitted for a settler nobody has seen"
+    assert "never seen a settler called zeno" in result.output
 
 
-async def test_talk_to_walks_to_the_inviter_before_accepting(tmp_path: Path) -> None:
-    bridge = RecordingBridge(_invited_model((14, 10)))
-    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+async def test_the_planner_has_no_say_tool(deps: PlannerDeps) -> None:
     agent = build_planner_agent("test")
-    with agent.override(model=_call_tool_once("talk_to", '{"entity_id": "mira"}')):
+    model = TestModel(call_tools=[])
+    with agent.override(model=model):
         await agent.run("go", deps=deps)
-
-    assert bridge.briefs, "the walk is a code-driven stint"
-    assert isinstance(bridge.drivers[0], ApproachDriver)
-    # The recording bridge never moves the actor, so the accept is not reached.
-    assert not bridge.actions
+    names = {tool.name for tool in model.last_model_request_parameters.function_tools}
+    assert "say" not in names
+    assert {"shout", "talk_to", "start_stint"} <= names
 
 
-def test_look_marks_the_settlers_who_are_open_to_talk() -> None:
-    summary = describe_world(_invited_model((11, 10)))
-
-    assert summary.count('open to talk: "Plan the wall?"') == 2
-
-
-def test_the_prompt_states_the_invitation_physics() -> None:
-    assert "you stay open to talk for\n  40 ticks" in SETTLEMENT_NARRATIVE
-    assert "`talk_to` does the" in SETTLEMENT_NARRATIVE
+def test_the_prompt_no_longer_offers_invitations() -> None:
+    condensed = " ".join(SETTLEMENT_NARRATIVE.split())
+    assert "open_to_talk" not in SETTLEMENT_NARRATIVE
+    assert "invitation" not in condensed
     assert "interrupted: conversation conv_N started" in SETTLEMENT_NARRATIVE
-    assert "invitations: []" in SETTLEMENT_NARRATIVE
-    assert "say an invitation line you gave it" in " ".join(
-        SETTLEMENT_NARRATIVE.split()
-    )
+    assert "hails: []" in SETTLEMENT_NARRATIVE
+    assert "hail a settler you named with the line you wrote" in condensed
 
 
-# -- the goal, and the brief example's invitation cue ------------------------
+def test_the_prompt_lists_the_four_channels_with_their_purpose() -> None:
+    condensed = " ".join(SETTLEMENT_NARRATIVE.split())
+    assert "Reaching the others, and what each way is good for:" in condensed
+    assert "`shout` reaches 60 tiles" in condensed
+    assert "The opening line is heard by everyone within 10 tiles" in condensed
+    assert "A message board: twenty notes" in condensed
+    assert "Sign: holds one line" in condensed
+    assert "crafts one from 2 wood if you need it" in condensed
+
+
+# -- the goal, and the brief example's hail cue ------------------------------
 
 
 def test_the_prompt_gives_the_settler_a_place_of_its_own_to_find() -> None:
@@ -1620,10 +1670,9 @@ def test_the_prompt_gives_the_settler_a_place_of_its_own_to_find() -> None:
     )
 
 
-def test_the_brief_example_says_when_to_use_the_invitation_line() -> None:
+def test_the_brief_example_says_when_to_use_the_hail() -> None:
     assert (
-        "When another\n      settler is within ten tiles, say the invitation line "
-        "once." in SETTLEMENT_NARRATIVE
+        "If dov comes\n      into view, walk over and hail him." in SETTLEMENT_NARRATIVE
     )
 
 
@@ -1724,28 +1773,58 @@ async def test_the_turns_reflection_and_every_tool_call_reach_the_day_log(
     bridge: RecordingBridge, tmp_path: Path
 ) -> None:
     planner = Planner(bridge, "ada", model_name="test", trace=AgentTrace.disabled())
-    test_model = TestModel(call_tools=["say"], custom_output_text="Said hello.")
+    test_model = TestModel(call_tools=["shout"], custom_output_text="Said hello.")
     with planner.agent.override(model=test_model):
         await planner.take_turn()
 
     kinds = [entry.kind for entry in planner.day_log.entries]
     assert "call" in kinds and "result" in kinds and "reflection" in kinds
     calls = [e.text for e in planner.day_log.entries if e.kind == "call"]
-    assert calls[0].startswith("say(")
+    assert calls[0].startswith("shout(")
     assert planner.day_log.entries[-1].text == "Said hello."
 
 
 async def test_the_day_log_records_the_bare_tool_result_without_the_footer(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
-    bridge.direct_result = "say hello -> accepted"
+    bridge.direct_result = "shout hello -> accepted"
     agent = build_planner_agent("test")
-    with agent.override(model=_call_tool("say", {"text": "hello"})):
+    with agent.override(model=_call_tool("shout", {"text": "hello"})):
         result = await agent.run("go", deps=deps)
 
     logged = [e.text for e in deps.day_log.entries if e.kind == "result"]
-    assert logged == ["say hello -> accepted"]
+    assert logged == ["shout hello -> accepted"]
     assert "tool budget" in result.output, "the footer still reaches the model"
+
+
+async def test_a_wrong_kwarg_gets_a_retry_naming_the_tools_parameters(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    """docs/09 section 10, item 3: a bad kwarg name must self-correct."""
+    bridge.direct_result = "sleep on bed_1 -> sleep ok: asleep on bed_1"
+    bridge.wake_result = "slept on bed_1 from tick 5 to tick 9 (4 ticks)"
+    seen_retry_texts: list[str] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        last_part = messages[-1].parts[-1]
+        if isinstance(last_part, RetryPromptPart):
+            seen_retry_texts.append(str(last_part.content))
+            return ModelResponse(
+                parts=[ToolCallPart("sleep", json.dumps({"bed": "bed_1"}))]
+            )
+        if len(messages) == 1:
+            return ModelResponse(
+                parts=[ToolCallPart("sleep", json.dumps({"bed_object_id": "bed_1"}))]
+            )
+        return ModelResponse(parts=[TextPart(str(messages[-1].parts[0].content))])
+
+    agent = build_planner_agent("test")
+    with agent.override(model=FunctionModel(respond)):
+        result = await agent.run("go", deps=deps)
+
+    assert seen_retry_texts, "the model must have been retried once"
+    assert "sleep takes: bed (optional)" in seen_retry_texts[0]
+    assert "Your turn ends here" in result.output
 
 
 async def test_the_sleep_tool_spends_the_whole_budget(
@@ -1755,8 +1834,153 @@ async def test_the_sleep_tool_spends_the_whole_budget(
     bridge.direct_result = "sleep on the ground -> sleep ok: asleep on the ground"
     bridge.wake_result = "slept on the ground from tick 5 to tick 9 (4 ticks)"
     agent = build_planner_agent("test")
-    with agent.override(model=_call_tool("sleep", {"bed_object_id": ""})):
+    with agent.override(model=_call_tool("sleep", {"bed": ""})):
         result = await agent.run("go", deps=deps)
 
     assert deps.budget.left == 0
     assert "Your turn ends here" in result.output
+
+
+# --- hailing (docs/09 section 9) --------------------------------------------
+
+
+def _seen_model(position: tuple[int, int] = (11, 10)) -> WorldModel:
+    """A model for ada who can see mira, who has said nothing at all."""
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("mira", position)],
+        )
+    )
+    return model
+
+
+async def test_talk_to_hails_a_settler_next_to_you(tmp_path: Path) -> None:
+    bridge = RecordingBridge(_seen_model((11, 10)))
+    bridge.direct_result = "hail mira -> converse ok: hail conv_1 mira"
+    bridge.conversation_reports.append(
+        ConversationReport(
+            conversation_id="conv_1",
+            start_tick=5,
+            end_tick=30,
+            participants=("ada", "mira"),
+            end_reason="closed",
+            transcript=(TranscriptLine(5, "ada", "Got a moment?"),),
+            agreed="mira will cut reeds",
+        )
+    )
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool_once(
+            "talk_to",
+            '{"entity_id": "mira", "opening_line": "Got a moment?", "purpose": "ask for planks"}',
+        )
+    ):
+        result = await agent.run("go", deps=deps)
+
+    (intent, _description) = bridge.actions[0]
+    assert intent.converse.action == "hail"
+    assert intent.converse.target_entity_id == "mira"
+    assert intent.converse.text == "Got a moment?"
+    assert not bridge.briefs, "nobody walks anywhere when already adjacent"
+    assert "CONVERSATION REPORT: conv_1" in result.output
+    assert "mira will cut reeds" in result.output
+
+
+async def test_talk_to_walks_to_a_settler_before_hailing(tmp_path: Path) -> None:
+    bridge = RecordingBridge(_seen_model((14, 10)))
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool_once(
+            "talk_to",
+            '{"entity_id": "mira", "opening_line": "Got a moment?", "purpose": "ask for planks"}',
+        )
+    ):
+        result = await agent.run("go", deps=deps)
+
+    assert bridge.briefs, "the walk is a code-driven stint"
+    assert isinstance(bridge.drivers[0], ApproachDriver)
+    # The recording bridge never moves the actor, so the hail is not reached.
+    assert not bridge.actions
+    assert "you are not next to mira yet" in result.output
+    assert "last seen at (14, 10)" in result.output
+
+
+async def test_talk_to_needs_an_opening_line_to_hail(tmp_path: Path) -> None:
+    bridge = RecordingBridge(_seen_model((11, 10)))
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool_once(
+            "talk_to",
+            '{"entity_id": "mira", "opening_line": "  ", "purpose": "ask for planks"}',
+        )
+    ):
+        result = await agent.run("go", deps=deps)
+
+    assert not bridge.actions
+    assert "a hail needs an opening line" in result.output
+
+
+async def test_talk_to_refuses_an_asleep_settler_without_walking(
+    tmp_path: Path,
+) -> None:
+    model = WorldModel("ada")
+    model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("mira", (11, 10), asleep=True)],
+        )
+    )
+    bridge = RecordingBridge(model)
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool_once(
+            "talk_to",
+            '{"entity_id": "mira", "opening_line": "Got a moment?", '
+            '"purpose": "ask for planks"}',
+        )
+    ):
+        result = await agent.run("go", deps=deps)
+
+    assert "mira is asleep" in result.output
+    assert not bridge.briefs, "asleep is refused before any walk"
+    assert not bridge.actions
+
+
+async def test_a_refused_hail_reports_the_worlds_reason(tmp_path: Path) -> None:
+    bridge = RecordingBridge(_seen_model((11, 10)))
+    bridge.direct_result = (
+        "hail mira -> converse failed: mira was in a conversation 14 ticks ago "
+        "and cannot be hailed for another 46 ticks"
+    )
+    deps = PlannerDeps(bridge=bridge, memory_path=tmp_path / "memory.md")
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=_call_tool_once(
+            "talk_to",
+            '{"entity_id": "mira", "opening_line": "Got a moment?", "purpose": "ask for planks"}',
+        )
+    ):
+        result = await agent.run("go", deps=deps)
+
+    assert "cannot be hailed for another 46 ticks" in result.output
+    assert "mira was last seen at (11, 10)" in result.output
+
+
+def test_the_prompt_states_the_hail_physics() -> None:
+    condensed = " ".join(SETTLEMENT_NARRATIVE.split())
+    assert "walks you to them and says your opening line out loud" in condensed
+    assert "out of a conversation for at least 60 ticks" in condensed
+    assert "walks up and hails you" in condensed
+
+
+def test_the_converser_prompt_says_a_hailed_seat_can_happen() -> None:
+    condensed = " ".join(CONVERSER_NARRATIVE.split())
+    assert "someone walked up and addressed you" in condensed

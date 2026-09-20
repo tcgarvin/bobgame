@@ -13,8 +13,8 @@ from agents.jev_agent.options import (
     HEARD_SHOUT_KEY_PREFIX,
     HEARD_SHOUT_MAX_AGE_TICKS,
     MAX_BRIEF_SHOUTS,
-    SAY_PHRASES,
     SHOUT_COOLDOWN_TICKS,
+    BriefHail,
     Option,
     TravelState,
     enumerate_options,
@@ -318,12 +318,6 @@ def test_every_option_has_a_one_line_description() -> None:
     assert criteria
     for key, description in criteria.items():
         assert description and "\n" not in description, key
-
-
-def test_canned_phrases_are_always_available() -> None:
-    offered = keys(build_model())
-    for phrase in SAY_PHRASES:
-        assert f"say:{phrase}" in offered
 
 
 def test_retreat_option_moves_away_from_the_wolf() -> None:
@@ -719,25 +713,10 @@ def test_only_waking_is_offered_to_a_sleeper() -> None:
     assert "sleep:bed_1" not in offered
 
 
-# -- invitations to talk (docs/09 section 8.3) -------------------------------
+# -- brief hails (docs/09 section 9.3) ---------------------------------------
 
 
-def invited_model(
-    inviter_position: tuple[int, int] = (11, 10),
-    *,
-    text: str = "Come and plan the wall.",
-) -> WorldModel:
-    """A model for ada who heard, and can see, an open invitation from mira."""
-    model = WorldModel("ada")
-    model.update(
-        make_observation(
-            5,
-            make_entity("ada", (10, 10)),
-            entities=[make_entity("mira", inviter_position, open_to_talk=True)],
-            events=[utterance_event("mira", text, inviter_position, open_to_talk=True)],
-        )
-    )
-    return model
+HAIL = BriefHail("mira", "Mira, shall we split the wall work?")
 
 
 def option_for(model: WorldModel, key: str, **kwargs: object) -> Option:
@@ -748,74 +727,67 @@ def option_for(model: WorldModel, key: str, **kwargs: object) -> Option:
     return matches[0]
 
 
-def test_an_adjacent_invitation_is_the_accept_intent() -> None:
-    option = option_for(invited_model((11, 10)), "talk_to:mira")
+def test_an_adjacent_hail_is_the_hail_intent() -> None:
+    model = build_model(entities=[make_entity("mira", (11, 10))])
 
-    assert option.intent.converse.action == "accept"
+    option = option_for(model, "hail:mira", hails=[HAIL])
+
+    assert option.intent.converse.action == "hail"
     assert option.intent.converse.target_entity_id == "mira"
-    assert "accept mira's invitation to talk" in option.description
+    assert option.intent.converse.text == HAIL.line
+    assert option.clears_travel
+    assert "next to you" in option.description
+    assert HAIL.line in option.description
 
 
-def test_a_distant_invitation_is_a_walk_that_stops_next_to_the_inviter() -> None:
-    option = option_for(invited_model((14, 10)), "talk_to:mira")
+def test_a_distant_hail_is_a_walk_that_stops_next_to_the_settler() -> None:
+    model = build_model(entities=[make_entity("mira", (14, 10))])
+
+    option = option_for(model, "hail:mira", hails=[HAIL])
 
     assert option.intent.HasField("move")
     assert option.travel_target is not None
     assert option.travel_target.target == (14, 10)
     assert option.travel_target.stop_adjacent
-    assert (
-        'who said "Come and plan the wall." and is open to talk' in option.description
-    )
+    assert "walk to mira, 4 tiles away" in option.description
 
 
-def test_nobody_open_to_talk_means_no_talk_to_option() -> None:
+def test_no_hail_option_without_a_brief_hail() -> None:
     model = build_model(entities=[make_entity("mira", (11, 10))])
 
-    assert not [key for key in keys(model) if key.startswith("talk_to:")]
+    assert not [key for key in keys(model) if key.startswith("hail:")]
 
 
-def test_an_invitation_phrase_is_offered_while_a_settler_is_in_earshot() -> None:
-    model = build_model(entities=[make_entity("mira", (14, 10))])
-
-    option = option_for(model, "invite:0", invitations=["Anyone want to plan?"])
-    assert option.intent.say.channel == "local"
-    assert option.intent.say.open_to_talk
-    assert option.intent.say.text == "Anyone want to plan?"
-    assert "stay open to talk for 40 ticks" in option.description
-
-
-def test_an_invitation_is_not_offered_with_nobody_in_earshot() -> None:
-    model = build_model(entities=[make_entity("mira", (40, 10))])
-
-    assert "invite:0" not in keys_with(model, invitations=["Anyone want to plan?"])
-
-
-def test_an_invitation_is_not_offered_while_the_actors_own_one_stands() -> None:
-    model = WorldModel("ada")
-    model.update(
-        make_observation(
-            5,
-            make_entity("ada", (10, 10)),
-            entities=[make_entity("mira", (12, 10))],
-            events=[utterance_event("ada", "Anyone?", (10, 10), open_to_talk=True)],
-        )
-    )
-
-    assert "invite:0" not in keys_with(model, invitations=["Anyone want to plan?"])
-
-
-def test_neither_invitation_option_is_offered_from_a_seat() -> None:
+def test_a_hail_is_not_offered_from_a_seat() -> None:
     model = WorldModel("ada")
     model.update(
         make_observation(
             5,
             make_entity("ada", (10, 10)),
             objects=[converse_object("conv_1", (11, 11), ["mira", "ada"])],
-            entities=[make_entity("mira", (11, 10), open_to_talk=True)],
-            events=[utterance_event("mira", "Talk?", (11, 10), open_to_talk=True)],
+            entities=[make_entity("mira", (11, 10))],
         )
     )
 
-    offered = keys_with(model, invitations=["Anyone want to plan?"])
-    assert "talk_to:mira" not in offered
-    assert "invite:0" not in offered
+    assert "hail:mira" not in keys_with(model, hails=[HAIL])
+
+
+def test_a_hail_is_not_offered_for_a_settler_already_in_a_conversation() -> None:
+    model = build_model(
+        objects=[converse_object("conv_1", (12, 12), ["mira", "dov"])],
+        entities=[make_entity("mira", (11, 10))],
+    )
+
+    assert "hail:mira" not in keys_with(model, hails=[HAIL])
+
+
+def test_a_hail_is_not_offered_for_a_sleeping_settler() -> None:
+    model = build_model(entities=[make_entity("mira", (11, 10), asleep=True)])
+
+    assert "hail:mira" not in keys_with(model, hails=[HAIL])
+
+
+def test_a_hail_is_not_offered_for_a_settler_never_seen() -> None:
+    model = build_model()
+
+    assert "hail:zeno" not in keys_with(model, hails=[BriefHail("zeno", "Hello?")])

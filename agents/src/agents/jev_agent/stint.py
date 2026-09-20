@@ -16,14 +16,19 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 import structlog
 
 from .. import world_pb2 as pb
+from . import items
 from .geometry import Coord, chebyshev
 from .jevclient import JevClient, JevDecision
 from .jevstate import StintProgress, build_state, collapse_action
 from .pricing import jev_cost_usd
 from .options import (
+    HAIL_KEY_PREFIX,
+    HAIL_REFUSAL_LIMIT,
     KEEP_GOING,
+    MAX_BRIEF_HAILS,
     MAX_OPTIONS,
     STEP_KEY_PREFIX,
+    BriefHail,
     Option,
     TravelState,
     brief_object_ids,
@@ -116,9 +121,9 @@ class Brief:
     travel: TravelState | None = None
     # The only phrases Jev may shout during this stint; empty means it cannot.
     shouts: tuple[str, ...] = ()
-    # The only phrases Jev may say as an invitation to talk; empty means it
-    # cannot invite anyone (docs/09 section 8.3).
-    invitations: tuple[str, ...] = ()
+    # The only settlers Jev may hail, each with the line to say; empty means it
+    # cannot start a conversation (docs/09 section 9.3).
+    hails: tuple[BriefHail, ...] = ()
     # Named destinations Jev may step toward, so it never sees a coordinate.
     places: Mapping[str, Coord] = field(default_factory=dict)
 
@@ -141,7 +146,7 @@ class Brief:
             "notes": self.notes,
             "check_every": self.check_every,
             "shouts": list(self.shouts),
-            "invitations": list(self.invitations),
+            "hails": [hail.as_payload() for hail in self.hails],
             "places": {
                 name: [target[0], target[1]] for name, target in self.places.items()
             },
@@ -336,6 +341,10 @@ class Stint:
         self._start_stats = _stats(model)
         self._start_inventory: dict[str, int] = dict(model.self_info.inventory)
         self._notable: list[str] = []
+        # Brief hails already spent, and how often the world refused each one.
+        # Both drop a hail out of the option list for the rest of the stint.
+        self._hails_done: set[str] = set()
+        self._hail_refusals: dict[str, int] = {}
 
     # -- per-tick -----------------------------------------------------------
 
@@ -379,7 +388,7 @@ class Stint:
             self.model,
             self.travel,
             shouts=self.brief.shouts,
-            invitations=self.brief.invitations,
+            hails=self._live_hails(),
             places=self.brief.places,
             brief_text=self.brief.text,
             max_options=MAX_OPTIONS,
@@ -399,6 +408,7 @@ class Stint:
             notes=self.brief.notes,
             travel=self.travel,
             places=self.brief.places,
+            hails=self._live_hails(),
             highlight_ids=self._highlight_ids(options),
         )
         criteria = options_to_criteria(options)
@@ -545,10 +555,50 @@ class Stint:
             self._notable.append(f'heard {utterance.speaker_id}: "{utterance.text}"')
         for entity_id in digest.deaths:
             self._notable.append(f"{entity_id} died")
+        self._absorb_hail_outcomes(digest)
+        # A sign read during the stint belongs in the report too: the planner
+        # gets the same line as a note, and the report says when it was read.
+        self._notable.extend(digest.sign_notes)
         if digest.discovered_object_ids:
             self._notable.append(
                 f"discovered {len(digest.discovered_object_ids)} new objects"
             )
+
+    def _live_hails(self) -> tuple[BriefHail, ...]:
+        """The brief hails still worth offering Jev this tick.
+
+        A hail that landed has done its job, and one the world has refused
+        `HAIL_REFUSAL_LIMIT` times is refusing for a reason that will not
+        change inside this stint.
+        """
+        return tuple(
+            hail
+            for hail in self.brief.hails[:MAX_BRIEF_HAILS]
+            if hail.settler not in self._hails_done
+            and self._hail_refusals.get(hail.settler, 0) < HAIL_REFUSAL_LIMIT
+        )
+
+    def _absorb_hail_outcomes(self, digest: TickDigest) -> None:
+        """Fold the world's verdict on the hail Jev submitted into the report.
+
+        Only the previous tick's option says which settler was hailed: a
+        converse failure carries the reason and nothing else.
+        """
+        last = self._last_option
+        if last is None or not last.key.startswith(HAIL_KEY_PREFIX):
+            return
+        settler = last.key[len(HAIL_KEY_PREFIX) :]
+        for acted in digest.own_actions:
+            if acted.action_type != items.CONVERSE_ACTION_TYPE:
+                continue
+            if acted.success:
+                if not acted.details.startswith(f"{items.ACTION_HAIL} "):
+                    continue
+                self._hails_done.add(settler)
+                self._notable.append(f"hailed {settler} at tick {self.model.tick}")
+                continue
+            self._hail_refusals[settler] = self._hail_refusals.get(settler, 0) + 1
+            self._notable.append(f"hail to {settler} refused: {acted.details}")
 
     def _detect_blocked_move(self) -> None:
         """A move the world accepted but did not perform leaves us on the same tile.

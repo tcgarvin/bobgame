@@ -11,7 +11,7 @@ import pytest
 
 from agents.jev_agent.build import BUILD_OUT_OF_ITEMS, BuildExecutor, make_plan
 from agents.jev_agent.jevclient import JevDecision
-from agents.jev_agent.options import TravelState
+from agents.jev_agent.options import BriefHail, TravelState
 from agents.jev_agent.pricing import jev_cost_usd
 from agents.jev_agent.stint import (
     END_DEATH,
@@ -429,7 +429,7 @@ async def test_every_tick_is_written_to_the_stint_trace(trace: AgentTrace) -> No
         "notes": "",
         "check_every": 1,
         "shouts": [],
-        "invitations": [],
+        "hails": [],
         "places": {},
         "travel": None,
     }
@@ -686,11 +686,9 @@ async def test_a_driver_ends_the_stint_with_its_own_reason(trace: AgentTrace) ->
     assert harness.stint.end_reason == BUILD_OUT_OF_ITEMS
 
 
-async def test_the_briefs_invitation_phrases_become_jev_options(
-    trace: AgentTrace,
-) -> None:
+async def test_the_briefs_hails_become_jev_options(trace: AgentTrace) -> None:
     jev = FakeJevClient(default_action="wait")
-    brief = make_brief(invitations=("Anyone want to plan the wall?",))
+    brief = make_brief(hails=(BriefHail("mira", "Mira, shall we plan the wall?"),))
     harness = StintHarness(jev, brief, trace)
 
     await harness.tick(
@@ -701,11 +699,65 @@ async def test_the_briefs_invitation_phrases_become_jev_options(
         )
     )
 
-    assert "invite:0" in jev.last_options
-    assert "Anyone want to plan the wall?" in jev.last_options["invite:0"]
+    assert "hail:mira" in jev.last_options
+    assert "Mira, shall we plan the wall?" in jev.last_options["hail:mira"]
 
 
-def test_the_brief_payload_carries_the_invitation_phrases() -> None:
-    brief = make_brief(invitations=("Anyone want to plan the wall?",))
+def test_the_brief_payload_carries_the_hails() -> None:
+    brief = make_brief(hails=(BriefHail("mira", "Shall we plan the wall?"),))
 
-    assert brief.as_payload()["invitations"] == ["Anyone want to plan the wall?"]
+    assert brief.as_payload()["hails"] == [
+        {"settler": "mira", "line": "Shall we plan the wall?"}
+    ]
+
+
+async def test_a_successful_hail_is_dropped_and_reported(trace: AgentTrace) -> None:
+    jev = FakeJevClient(default_action="hail:mira")
+    brief = make_brief(hails=(BriefHail("mira", "Shall we plan the wall?"),))
+    harness = StintHarness(jev, brief, trace)
+
+    await harness.tick(
+        make_observation(
+            1, make_entity("ada", (10, 10)), entities=[make_entity("mira", (11, 10))]
+        )
+    )
+    await harness.tick(
+        make_observation(
+            2,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("mira", (11, 10))],
+            events=[acted_event("ada", "converse", True, "hail conv_1 mira")],
+        )
+    )
+
+    assert "hail:mira" not in jev.last_options
+    report = harness.stint.build_report().to_text()
+    assert "hailed mira at tick 2" in report
+
+
+async def test_two_refusals_drop_the_hail_and_name_the_reason(
+    trace: AgentTrace,
+) -> None:
+    jev = FakeJevClient(default_action="hail:mira")
+    brief = make_brief(hails=(BriefHail("mira", "Shall we plan the wall?"),))
+    harness = StintHarness(jev, brief, trace)
+    refusal = acted_event("ada", "converse", False, "mira is already in conv_2")
+
+    await harness.tick(
+        make_observation(
+            1, make_entity("ada", (10, 10)), entities=[make_entity("mira", (11, 10))]
+        )
+    )
+    for tick in (2, 3):
+        await harness.tick(
+            make_observation(
+                tick,
+                make_entity("ada", (10, 10)),
+                entities=[make_entity("mira", (11, 10))],
+                events=[refusal],
+            )
+        )
+
+    assert "hail:mira" not in jev.last_options
+    report = harness.stint.build_report().to_text()
+    assert "hail to mira refused: mira is already in conv_2" in report
