@@ -24,10 +24,23 @@ Development notes and patterns for the world simulation core.
 - `server.py` (`WorldServer`), `bootstrap.py` (`ServerSettings` + `run_server`,
   building a world from a config or a save) and `cli.py` (argparse).
   `python -m world.server` runs `cli.main`.
-- `terrain_types.py` - `FloorType`, **the** source of the numeric floor codes
-  (`FloorType.code`, `FLOOR_TYPE_BY_CODE`). `tests/test_terrain_types.py`
-  parses `viewer/src/terrain/TerrainConfig.ts` and fails on drift.
+- `terrain_types.py` - re-exports `FloorType` and `FLOOR_TYPE_BY_CODE` from
+  `bobgame_rules.terrain`. `tests/test_terrain_types.py` parses
+  `viewer/src/generated/rules.ts` and fails on drift.
 - `chunks.py` - the chunk manager and `terrain_chunk(world, cx, cy)`.
+
+### Game rules live in `rules/`
+
+The kinds, the recipe table, the blocking and extraction tables and every
+number behind food, health, fatigue, sleep, combat, wolves, conversations,
+signs, the day clock and the floor codes are `bobgame_rules`, the
+dependency-free package at the repo root (`rules/`, a uv path dependency).
+`items.py`, `crafting.py`, `stats.py`, `sleep.py`, `wolves.py`, `moon.py`,
+`containers.py`, `conversations.py`, `types.py`, `state/models.py` and
+`services/observation_service.py` import from it and re-export under the names
+world code already uses, so there is nothing left to keep in step by hand:
+`agents/` and the viewer read the same definitions (the viewer through
+`tools/generate_rules_ts.py`). Change a number in `rules/`, not here.
 
 ### Data Models: Pydantic Frozen Models
 
@@ -511,10 +524,10 @@ starvation damage (applied in the food phase, just before) behave the same.
 | `BED_*_RECOVERY` | (1, 1) = 1.00/tick | (2, 3) = 0.67/tick |
 | `GROUND_*_RECOVERY` | (2, 3) = 0.67/tick | (1, 2) = 0.50/tick |
 
-The agent mirrors — `items.HUNGRY_WAKE_FOOD`, `items.MIN_SLEEP_FATIGUE`,
-`items.SLEEP_RECOVERY` / `items.sleep_recovery_text` — are what every prompt
-and option string is generated from, so a change here must be copied there;
-Jev is offered no `sleep:` option below the floor.
+`HUNGRY_WAKE_FOOD`, `MIN_SLEEP_FATIGUE` and the recovery rates are
+`bobgame_rules.body`; the agent's prompts and option strings are generated from
+the same constants, so there is nothing to copy. Jev is offered no `sleep:`
+option below the floor.
 
 `is_tired(entity)` (fatigue >= 60) is the one predicate other modules use:
 `stats.process_health_regen` skips the tired, and extraction and combat apply
@@ -536,7 +549,7 @@ refuses a structure on its tile.
 State keys (all strings, see the contract): `participants` (JSON list in join
 order, opener first), `speaker`, `turn_started`, `opened_tick`, `opened_by`,
 `utterances`, `passes`, `transcript` (last 12 lines). Constants live in
-`items.py` (`CONVERSATION*`).
+`bobgame_rules.social` (`CONVERSATION*`), re-exported by `items.py`.
 
 `process_conversation_phase` runs **once per tick after movement and combat**:
 it applies `open`, `hail`, `join`, `speak`, `pass` and `leave` in that order (each group

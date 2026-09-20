@@ -32,6 +32,7 @@ History — what changed when, and why — is in [CHANGELOG.md](CHANGELOG.md).
 
 ```
 bobgame/
+├── rules/      # Python - bobgame_rules: the game's constants and tables, no dependencies
 ├── world/      # Python - Tick-based simulation engine (gRPC + WebSocket)
 ├── agents/     # Python - jev_agent (planner + Jev)
 ├── viewer/     # TypeScript/Phaser 3 - Browser visualization
@@ -104,7 +105,7 @@ uv run --with pillow python tools/visualize_world.py <map.npz> [out] [--crop X,Y
 - `state.py` - World, Entity, Tile, WorldObject, Inventory data models
 - `tick.py` - Async tick loop with deadline handling; `tick_context.py` - TickContext with one `submit_intent` dispatcher for all intent types
 - `movement.py` - Claim-resolve-enact conflict resolution
-- `items.py` - Item/object kinds, layers, blocking sets, extraction maps (the building contract in code; agents mirror it in `jev_agent/items.py`)
+- `items.py` - The world's view of `bobgame_rules` (repo root `rules/`): item/object kinds, layers, blocking sets, extraction maps, re-exported under the names world code uses
 - `foraging.py`, `combat.py`, `crafting.py`, `containers.py`, `stats.py`, `sleep.py`, `wolves.py`, `conversations.py` - the mechanics (docs/05, docs/08, docs/09, docs/10); giving lives in `containers.py`
 - `settlement.py` - Settlement site finder and spawn placement
 - `server.py` - WorldServer entry point (`--run-dir`, defaults to `$BOBGAME_RUN_DIR`); `recording.py` - run recorder; `replay/` - replay server (`python -m world.replay --runs-dir ../runs --port 8766`)
@@ -147,6 +148,7 @@ process supervision), `docs/README.md` (index of every design document).
 ## Tests
 
 ```bash
+cd rules && uv run pytest -q
 cd world && uv run pytest tests/ -v
 cd agents && uv run pytest -q
 cd runner && uv run pytest -q

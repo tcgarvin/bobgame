@@ -5,7 +5,24 @@ from typing import Mapping
 
 from pydantic import BaseModel
 
-from .items import CONVERSATION_CHANNEL
+from bobgame_rules.social import (
+    AUDIBLE_CHANNELS,
+    CONVERSATION_CHANNEL,
+    CONVERSE_ACTIONS,
+    CONVERSE_HAIL,
+    CONVERSE_JOIN,
+    CONVERSE_LEAVE,
+    CONVERSE_OPEN,
+    CONVERSE_PASS,
+    CONVERSE_SPEAK,
+    HEARING_RADIUS_BY_CHANNEL,
+    LOCAL_CHANNEL,
+    SAY_CHANNELS,
+    SAY_RADIUS,
+    SHOUT_CHANNEL,
+    SHOUT_RADIUS,
+    THOUGHT_CHANNEL,
+)
 
 
 class Direction(IntEnum):
@@ -187,31 +204,12 @@ class WakeIntent(EntityIntent, frozen=True):
     """Intent to wake up from a voluntary sleep."""
 
 
-# Channels other entities can hear; "thought" only reaches the viewer.
-LOCAL_CHANNEL = "local"
-SHOUT_CHANNEL = "shout"
-THOUGHT_CHANNEL = "thought"
-AUDIBLE_CHANNELS: frozenset[str] = frozenset(
-    {LOCAL_CHANNEL, SHOUT_CHANNEL, CONVERSATION_CHANNEL}
-)
-# Channels a bare SayIntent may use. The conversation channel is deliberately
-# absent: only a ConverseIntent can put a line on it, so every such utterance
-# carries a conversation_id the world agrees with.
-SAY_CHANNELS: frozenset[str] = frozenset(
-    {LOCAL_CHANNEL, SHOUT_CHANNEL, THOUGHT_CHANNEL}
-)
-# Earshot per channel, in Chebyshev tiles. `local` is a passing remark, `shout`
-# is far enough to call the settlement to a fight; conversation lines carry at
-# `local` range so bystanders can overhear. Used both to filter observations
-# (`services/observation_service.py`) and to tell a speaker who heard them
-# (`speech.process_say_phase`).
-SAY_RADIUS = 10
-SHOUT_RADIUS = 60
-HEARING_RADIUS_BY_CHANNEL: Mapping[str, int] = {
-    LOCAL_CHANNEL: SAY_RADIUS,
-    SHOUT_CHANNEL: SHOUT_RADIUS,
-    CONVERSATION_CHANNEL: SAY_RADIUS,
-}
+# The channels, their earshot and the `ConverseIntent` actions are
+# `bobgame_rules.social`, imported above: `local` is a passing remark, `shout`
+# is far enough to call the settlement to a fight, conversation lines carry at
+# `local` range so bystanders can overhear, and `thought` only reaches the
+# viewer. The radii filter observations (`services/observation_service.py`)
+# and tell a speaker who heard them (`speech.process_say_phase`).
 
 
 class SayIntent(EntityIntent, frozen=True):
@@ -219,25 +217,6 @@ class SayIntent(EntityIntent, frozen=True):
 
     text: str
     channel: str = "local"
-
-
-# ConverseIntent actions (docs/09_conversation_and_reflex.md, section 2.3).
-CONVERSE_OPEN = "open"
-CONVERSE_JOIN = "join"
-CONVERSE_SPEAK = "speak"
-CONVERSE_PASS = "pass"
-CONVERSE_LEAVE = "leave"
-CONVERSE_HAIL = "hail"
-CONVERSE_ACTIONS: frozenset[str] = frozenset(
-    {
-        CONVERSE_OPEN,
-        CONVERSE_JOIN,
-        CONVERSE_SPEAK,
-        CONVERSE_PASS,
-        CONVERSE_LEAVE,
-        CONVERSE_HAIL,
-    }
-)
 
 
 class ConverseIntent(EntityIntent, frozen=True):

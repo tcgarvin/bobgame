@@ -1,26 +1,17 @@
 /**
  * Terrain configuration: maps floor type values to sprite keys.
  *
- * Floor type values come from the backend (world/src/world/terrain_types.py).
- * Sprite keys are defined in TSX files (assets/dawnlike-tileset/Objects/*.tsx).
+ * The floor codes themselves come from `../generated/rules`, written from
+ * `bobgame_rules` by `tools/generate_rules_ts.py`. Sprite keys are defined in
+ * TSX files (assets/dawnlike-tileset/Objects/*.tsx).
  *
  * This is the single source of truth for terrain → sprite mapping.
  */
 
+import { FloorType } from '../generated/rules';
 import type { SpriteIndex } from '../sprites';
 
-// Floor type numeric values from backend (world/src/world/terrain_types.py)
-export const FloorType = {
-  DEEP_WATER: 0,
-  SHALLOW_WATER: 1,
-  SAND: 2,
-  GRASS: 3,
-  DIRT: 4,
-  MOUNTAIN: 5,
-  STONE: 6,
-} as const;
-
-export type FloorType = (typeof FloorType)[keyof typeof FloorType];
+export { FloorType };
 
 /**
  * Maps floor type values to sprite keys from TSX files.

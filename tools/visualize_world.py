@@ -22,14 +22,16 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-# Floor type values (from terrain_types.py)
-FLOOR_DEEP_WATER = 0
-FLOOR_SHALLOW_WATER = 1
-FLOOR_SAND = 2
-FLOOR_GRASS = 3
-FLOOR_DIRT = 4
-FLOOR_MOUNTAIN = 5
-FLOOR_STONE = 6
+from bobgame_rules.terrain import FloorType
+
+# Floor type codes (`bobgame_rules.terrain`, the one definition of them).
+FLOOR_DEEP_WATER = FloorType.DEEP_WATER.code
+FLOOR_SHALLOW_WATER = FloorType.SHALLOW_WATER.code
+FLOOR_SAND = FloorType.SAND.code
+FLOOR_GRASS = FloorType.GRASS.code
+FLOOR_DIRT = FloorType.DIRT.code
+FLOOR_MOUNTAIN = FloorType.MOUNTAIN.code
+FLOOR_STONE = FloorType.STONE.code
 
 FLOOR_NAMES = {
     FLOOR_DEEP_WATER: "Deep Water",

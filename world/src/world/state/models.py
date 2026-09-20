@@ -7,25 +7,27 @@ this in `world.py`.
 
 from pydantic import BaseModel
 
+from bobgame_rules.clock import (
+    DEFAULT_DAY_LENGTH_TICKS,
+    NIGHT_START_DENOMINATOR,
+    NIGHT_START_NUMERATOR,
+    night_start_tick,
+)
+from bobgame_rules.entities import (
+    DEFAULT_ENTITY_TYPE,
+    PLAYER_MAX_FATIGUE,
+    PLAYER_MAX_FOOD,
+    PLAYER_MAX_HEALTH,
+    WOLF_ENTITY_TYPE,
+)
+
 from ..terrain_types import FloorType
 from ..types import Position
 
 STATUS_BIT_DEAD = 1
 
-# Entity types. Wolves are stopped by doors; everyone else opens them.
-DEFAULT_ENTITY_TYPE = "default"
-WOLF_ENTITY_TYPE = "wolf"
-
-# The day clock (docs/10_metal_and_sleep.md, "The day"). The first two thirds
-# of a day are daylight, the rest is night.
-DEFAULT_DAY_LENGTH_TICKS = 300
-NIGHT_START_NUMERATOR = 2
-NIGHT_START_DENOMINATOR = 3
-
-
-def night_start_tick(day_length: int) -> int:
-    """First tick of the day that counts as night."""
-    return day_length * NIGHT_START_NUMERATOR // NIGHT_START_DENOMINATOR
+# The entity types (wolves are stopped by doors; everyone else opens them),
+# the day clock and `night_start_tick` are `bobgame_rules`, imported above.
 
 
 class WorldClock(BaseModel, frozen=True):
@@ -125,16 +127,16 @@ class Entity(BaseModel, frozen=True):
     status_bits: int = 0
     inventory: Inventory = Inventory()
     health: int = 20
-    max_health: int = 20
+    max_health: int = PLAYER_MAX_HEALTH
     food: int = 80
-    max_food: int = 100
+    max_food: int = PLAYER_MAX_FOOD
     wielded: str = ""  # item kind currently wielded, "" if none
     alive: bool = True
 
     # Body clock (docs/10_metal_and_sleep.md, "Fatigue and sleep"). Wolves
     # never accumulate fatigue, so theirs stays at 0.
     fatigue: int = 0
-    max_fatigue: int = 100
+    max_fatigue: int = PLAYER_MAX_FATIGUE
     asleep: bool = False
     # Object id of the bed slept on, "" for the ground (and while awake).
     sleeping_on: str = ""

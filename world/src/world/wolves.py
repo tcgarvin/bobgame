@@ -11,6 +11,19 @@ from typing import Any, Mapping
 
 import structlog
 
+from bobgame_rules.entities import (
+    MAX_WOLVES,
+    WOLF_CHASE_RADIUS,
+    WOLF_DESPAWN_DISTANCE,
+    WOLF_MAX_HEALTH,
+    WOLF_PROWL_CHANCE,
+    WOLF_SPAWN_ATTEMPTS,
+    WOLF_SPAWN_INTERVAL_TICKS,
+    WOLF_SPAWN_MAX_DISTANCE,
+    WOLF_SPAWN_MIN_DISTANCE,
+    WOLF_WANDER_CHANCE,
+)
+
 from .events import EntityDespawnedEvent, EntitySpawnedEvent, TickEvents
 from .moon import wolves_lie_low
 from .settlement import is_free_walkable
@@ -28,26 +41,17 @@ from .types import (
 logger = structlog.get_logger()
 
 WOLF_TYPE = WOLF_ENTITY_TYPE
-# Tuned so a lone settler wins a wolf fight only at the cost of about half
-# their health, while two or three attacking together barely get scratched:
-# damage is simultaneous, so every extra attacker shortens the fight.
-WOLF_MAX_HEALTH = 16
 
-SPAWN_INTERVAL_TICKS = 40
-# Scenario-tunable defaults; a world config may override all four
-# (`max_wolves`, `wolf_spawn_min_distance`, `wolf_spawn_max_distance`,
-# `wolf_spawn_interval_ticks`).
-MAX_WOLVES = 3
-SPAWN_MIN_DISTANCE = 20
-SPAWN_MAX_DISTANCE = 40
-CHASE_RADIUS = 8
-DESPAWN_DISTANCE = 50
-WANDER_CHANCE = 0.5
-# When wandering, a wolf that can smell a player (beyond CHASE_RADIUS) drifts
-# toward them this often; otherwise wolves spawn 20+ tiles out and never
-# meet anyone.
-PROWL_CHANCE = 0.6
-SPAWN_ATTEMPTS = 400
+# The wolf numbers are `bobgame_rules.entities`; they keep their short names
+# here, which `config.py` reads as the defaults a world config may override.
+SPAWN_INTERVAL_TICKS = WOLF_SPAWN_INTERVAL_TICKS
+SPAWN_MIN_DISTANCE = WOLF_SPAWN_MIN_DISTANCE
+SPAWN_MAX_DISTANCE = WOLF_SPAWN_MAX_DISTANCE
+CHASE_RADIUS = WOLF_CHASE_RADIUS
+DESPAWN_DISTANCE = WOLF_DESPAWN_DISTANCE
+WANDER_CHANCE = WOLF_WANDER_CHANCE
+PROWL_CHANCE = WOLF_PROWL_CHANCE
+SPAWN_ATTEMPTS = WOLF_SPAWN_ATTEMPTS
 
 # (dx, dy) -> Direction, derived from the canonical direction table.
 _DELTA_TO_DIRECTION: Mapping[tuple[int, int], Direction] = {

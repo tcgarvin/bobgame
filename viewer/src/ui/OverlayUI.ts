@@ -14,6 +14,7 @@
  * tick changes (in replay and in live mode alike).
  */
 
+import { TIRED_FATIGUE } from '../generated/rules';
 import type { InterpolatedEntity, TrackedObject, WorldState } from '../network';
 import type {
   AgentCost,
@@ -48,10 +49,10 @@ export interface OverlayCallbacks {
 const PLAYER_TYPE = 'player';
 
 /**
- * Fatigue thresholds (docs/10_metal_and_sleep.md, section 4): under 60 fresh,
- * 60-99 tired (halved work, weaker hits, no regen), at max exhausted.
+ * Fatigue thresholds (docs/10_metal_and_sleep.md, section 4): under
+ * TIRED_FATIGUE fresh, then tired (halved work, weaker hits, no regen), at max
+ * exhausted.
  */
-const TIRED_FATIGUE = 60;
 
 /** The word for a fatigue level, shown next to the number. */
 export function fatigueState(fatigue: number, maxFatigue: number): string {

@@ -16,6 +16,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Container, Mapping
 
+from bobgame_rules.clock import DEFAULT_DAY_LENGTH_TICKS
+from bobgame_rules.entities import WOLF_ENTITY_TYPE
+from bobgame_rules.items import (
+    BLOCKING_OBJECT_TYPES,
+    GROUND_LAYER_KINDS,
+    STATION_KINDS as CRAFT_STATION_KINDS,
+)
+from bobgame_rules.social import CONVERSATION
+
 from .report import Moment
 from .runio import entity_food, iter_jsonl
 
@@ -126,15 +135,14 @@ HAIL_FAILURE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^an opening line is required$"), "no opening line"),
 )
 
-WOLF_ENTITY_TYPE = "wolf"
 PLAYER_ENTITY_TYPE = "player"
-CONVERSATION_OBJECT_TYPE = "conversation"
+CONVERSATION_OBJECT_TYPE = CONVERSATION
 
 # Object kinds settlement_progress follows from tick 0 to the last tick.
-WALL_KINDS: frozenset[str] = frozenset({"wood_wall", "stone_wall"})
+WALL_KINDS: frozenset[str] = BLOCKING_OBJECT_TYPES
 DOOR_KINDS: frozenset[str] = frozenset({"door"})
-GROUND_KINDS: frozenset[str] = frozenset({"road", "wood_floor", "stone_floor"})
-BUILD_STATION_KINDS: frozenset[str] = STATION_KINDS | frozenset({"workshop_table"})
+GROUND_KINDS: frozenset[str] = GROUND_LAYER_KINDS
+BUILD_STATION_KINDS: frozenset[str] = CRAFT_STATION_KINDS
 FURNITURE_KINDS: frozenset[str] = frozenset({"bed", "chair", "table"})
 FIXTURE_KINDS: frozenset[str] = frozenset({"chest", "message_board", "sign"})
 
@@ -169,7 +177,7 @@ TIER_CRAFT_KINDS: frozenset[str] = (
     | BUILD_STATION_KINDS
 )
 
-DEFAULT_DAY_LENGTH = 300
+DEFAULT_DAY_LENGTH = DEFAULT_DAY_LENGTH_TICKS
 
 
 def hail_failure_label(details: str) -> str:

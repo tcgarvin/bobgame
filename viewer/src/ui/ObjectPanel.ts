@@ -9,6 +9,15 @@
  * extraction or dismantle work done so far.
  */
 
+import {
+  BLOCKING_TYPES,
+  BUILDING_TYPES,
+  DISMANTLE_WORK,
+  EXTRACTABLE_TYPES,
+  EXTRACT_THRESHOLD,
+  GROUND_LAYER_TYPES,
+  STATION_TYPES,
+} from '../generated/rules';
 import type { TrackedObject, WorldState } from '../network';
 import {
   CONVERSATION_TYPE,
@@ -22,63 +31,18 @@ export interface ObjectPanelCallbacks {
 }
 
 /**
- * Placed buildings (docs/08_building.md). Every one of them carries an `owner`
- * and, once someone starts taking it apart, a dismantle `progress`.
- */
-const BUILDING_TYPES = new Set([
-  'road',
-  'wood_floor',
-  'stone_floor',
-  'wood_wall',
-  'stone_wall',
-  'door',
-  'sign',
-  'bed',
-  'chair',
-  'table',
-  'workshop_table',
-  // Crafting stations (docs/10_metal_and_sleep.md, section 1).
-  'furnace',
-  'anvil',
-]);
-
-/**
- * A sign (docs/08_building.md, "Signs"): one line of at most 80 characters in
- * `text`, plus `author` and `tick`. It is a building, so it also dismantles.
+ * A sign (docs/08_building.md, "Signs"): one line of at most SIGN_TEXT_MAX
+ * characters in `text`, plus `author` and `tick`. It is a building, so it also
+ * dismantles.
  */
 const SIGN_TYPE = 'sign';
-
-/** Stations that hold per-settler craft progress in `craft:<entity_id>`. */
-const STATION_TYPES = new Set(['workshop_table', 'furnace', 'anvil']);
-
-/** Ground-layer buildings: they lie under structures and never block. */
-const GROUND_LAYER_TYPES = new Set(['road', 'wood_floor', 'stone_floor']);
-
-/** Buildings that stop someone walking through (a door only stops wolves). */
-const BLOCKING_TYPES = new Set(['wood_wall', 'stone_wall', 'door']);
-
-/** Work units needed to dismantle a building (world/src/world/items.py). */
-const DISMANTLE_WORK = 3;
-
-/** Work units for one unit of material from a natural object. */
-const EXTRACT_THRESHOLD = 3;
 
 /**
  * Natural objects worked with `extract` rather than opened. Trees and rocks
  * belong here too, but they are not in INSPECTABLE_TYPES: a map holds tens of
  * thousands of them and there is no point making every one of them clickable.
  */
-const RESOURCE_TYPES = new Set([
-  'tree',
-  'rock_small',
-  'rock_medium',
-  'rock_large',
-  'boulder',
-  'reeds',
-  'clay_deposit',
-  'copper_vein',
-  'iron_vein',
-]);
+const RESOURCE_TYPES = EXTRACTABLE_TYPES;
 
 /** Object types that have something worth inspecting. */
 export const INSPECTABLE_TYPES = new Set([

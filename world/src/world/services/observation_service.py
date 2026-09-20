@@ -8,6 +8,8 @@ from typing import Any, Callable, Iterator
 import grpc
 import structlog
 
+from bobgame_rules.social import VIEW_RADIUS
+
 from .. import world_pb2 as pb
 from .. import world_pb2_grpc
 from ..conversion import (
@@ -31,8 +33,8 @@ from ..types import (
 
 logger = structlog.get_logger()
 
-# View radius in tiles (Chebyshev) for tiles, objects and entities.
-VIEW_RADIUS = 8
+# `VIEW_RADIUS` (tiles, objects and entities, Chebyshev) is
+# `bobgame_rules.social`, imported above.
 # Earshot for `local` utterances. Every channel's radius lives in `types.py`
 # (`HEARING_RADIUS_BY_CHANNEL`), the single source of truth shared with
 # `speech.process_say_phase`; kept here under its old name for anything still

@@ -15,15 +15,7 @@ from typing import Any, Mapping, Sequence
 
 import structlog
 
-from .events import (
-    ObjectAddedEvent,
-    ObjectRemovedEvent,
-    TickEvents,
-    UtteranceEvent,
-    commit_object,
-)
-from .exceptions import ObjectNotFoundError
-from .items import (
+from bobgame_rules.social import (
     CONVERSATION,
     CONVERSATION_CHANNEL,
     CONVERSATION_LONELY_TICKS,
@@ -32,8 +24,19 @@ from .items import (
     CONVERSATION_TEXT_LIMIT,
     CONVERSATION_TRANSCRIPT_KEPT,
     CONVERSATION_TURN_TICKS,
+    CONVERSE_ACTION_TYPE,
     HAIL_COOLDOWN_TICKS,
+    HAILED_DETAIL,
 )
+
+from .events import (
+    ObjectAddedEvent,
+    ObjectRemovedEvent,
+    TickEvents,
+    UtteranceEvent,
+    commit_object,
+)
+from .exceptions import ObjectNotFoundError
 from .objstate import encode_json, read_int, read_json_list, with_updates
 from .state import WOLF_ENTITY_TYPE, World, WorldObject
 from .types import (
@@ -51,15 +54,14 @@ from .types import (
 
 logger = structlog.get_logger()
 
-ACTION_TYPE = "converse"
+# `EntityActed.action_type` for every `ConverseIntent`, and the word that opens
+# the details of the hailed settler's own `EntityActed` so its agent can tell a
+# seat it never asked for from one it did (docs/09, section 9). Both are
+# `bobgame_rules.social`, imported above.
+ACTION_TYPE = CONVERSE_ACTION_TYPE
 
 # Object id prefix, so ids read as `conv_12` (docs/09, section 2.3).
 CONVERSATION_ID_PREFIX = "conv"
-
-# The word that opens the details of the hailed settler's own `EntityActed`,
-# so its agent can tell a seat it never asked for from one it did (docs/09,
-# section 9).
-HAILED_DETAIL = "hailed"
 
 # --- State keys -----------------------------------------------------------
 

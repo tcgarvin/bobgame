@@ -7,6 +7,7 @@ import type {
   UtteranceEvent,
   WorldClock,
 } from '../network';
+import { GROUND_LAYER_TYPES, NIGHT_START_FRACTION } from '../generated/rules';
 import type { SpriteIndex } from '../sprites';
 import { getSpriteFrame } from '../sprites';
 import { ChunkManager, ViewportTracker } from '../terrain';
@@ -98,12 +99,11 @@ const OBJECT_SPRITE_MAP: Record<string, string> = {
   anvil: 'anvil',
 };
 
-/**
- * Object types that lie on the ground layer: a tile may hold one of these plus
- * one structure-layer object, so they draw underneath everything else
- * (docs/08_building.md, "Layers and placement").
+/*
+ * GROUND_LAYER_TYPES (`../generated/rules`): a tile may hold one ground-layer
+ * object plus one structure-layer object, so they draw underneath everything
+ * else (docs/08_building.md, "Layers and placement").
  */
-const GROUND_LAYER_TYPES = new Set(['road', 'wood_floor', 'stone_floor']);
 
 /** Draw depths: ground objects, then structures, then entities. */
 const GROUND_OBJECT_DEPTH = 4;
@@ -143,8 +143,6 @@ const DAMAGE_FLASH_MS = 350;
 const NIGHT_OVERLAY_DEPTH = 50;
 const NIGHT_TINT_COLOR = 0x0a1436;
 const NIGHT_TINT_ALPHA = 0.55;
-/** Daytime is the first two thirds of a day (`NIGHT_START_FRACTION`). */
-const NIGHT_START_FRACTION = 2 / 3;
 /** Dusk ramps over the last tenth of the daytime. */
 const DUSK_FRACTION = 0.1;
 /** Dawn ramps over the first tenth of the whole day. */

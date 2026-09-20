@@ -9,6 +9,9 @@ from typing import Any, Mapping
 
 import structlog
 
+from bobgame_rules.items import OWNER_KEY
+from bobgame_rules.social import BOARD_SLOTS, NOTE_TEXT_MAX, NOTE_TITLE_MAX
+
 from .conversations import share_conversation
 from .events import (
     ObjectAddedEvent,
@@ -62,11 +65,9 @@ logger = structlog.get_logger()
 
 CONTENTS_KEY = "contents"
 NOTES_KEY = "notes"
-OWNER_KEY = "owner"
 
-BOARD_SLOTS = 20
-NOTE_TITLE_MAX = 60
-NOTE_TEXT_MAX = 500
+# `OWNER_KEY`, `BOARD_SLOTS`, `NOTE_TITLE_MAX` and `NOTE_TEXT_MAX` are
+# `bobgame_rules`, imported above.
 
 Note = dict[str, Any]
 

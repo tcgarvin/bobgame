@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "bobgame-rules",
     "pillow>=12.1.0",
     "pyyaml>=6.0.3",
 ]
@@ -16,6 +17,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+
+[tool.uv.sources]
+bobgame-rules = { path = "../rules", editable = true }
 
 [build-system]
 requires = ["hatchling"]

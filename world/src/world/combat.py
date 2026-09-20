@@ -4,6 +4,8 @@ from typing import Mapping
 
 import structlog
 
+from bobgame_rules.entities import TIRED_DAMAGE_PENALTY
+
 from .containers import add_items_to_ground
 from .events import (
     DamageEvent,
@@ -20,9 +22,6 @@ from .types import AttackIntent, is_adjacent
 logger = structlog.get_logger()
 
 WOLF_TYPE = WOLF_ENTITY_TYPE
-
-# Attack damage lost while tired (docs/10_metal_and_sleep.md, "Fatigue").
-TIRED_DAMAGE_PENALTY = 1
 
 
 def apply_damage(

@@ -17,6 +17,22 @@ from typing import Mapping
 
 import structlog
 
+from bobgame_rules.body import (
+    BED_DAY_RECOVERY,
+    BED_NIGHT_RECOVERY,
+    COLLAPSE_WAKE_FATIGUE,
+    FATIGUE_INTERVAL_DAY,
+    FATIGUE_INTERVAL_NIGHT,
+    FATIGUE_PER_STEP,
+    GROUND,
+    GROUND_DAY_RECOVERY,
+    GROUND_NIGHT_RECOVERY,
+    HUNGRY_WAKE_FOOD,
+    MIN_SLEEP_FATIGUE,
+    RESPAWN_FATIGUE,
+    TIRED_FATIGUE,
+)
+
 from .events import TickEvents
 from .exceptions import ObjectNotFoundError
 from .items import BED
@@ -25,49 +41,8 @@ from .types import SleepIntent, WakeIntent, is_same_or_adjacent
 
 logger = structlog.get_logger()
 
-# --- Fatigue ---------------------------------------------------------------
-
-# One point of fatigue every N ticks awake. Nights are tiring.
-FATIGUE_PER_STEP = 1
-FATIGUE_INTERVAL_DAY = 4
-FATIGUE_INTERVAL_NIGHT = 3
-
-# At or above TIRED_FATIGUE a settler works slower and stops regenerating.
-TIRED_FATIGUE = 60
-# A respawned settler comes back part-rested.
-RESPAWN_FATIGUE = 30
-# A collapsed sleeper wakes once fatigue has fallen back to this.
-COLLAPSE_WAKE_FATIGUE = 70
-
-# --- Recovery --------------------------------------------------------------
-
-# Fatigue recovered per sleeping tick, as (points, ticks): "`points` fatigue
-# every `ticks` ticks". A bed is strictly faster than the ground in both
-# periods, and every period is fast enough that a settler need not lie down
-# for most of the daylight: before the 2026-09-20 retunes the ground was 1 per
-# 2 at night and 1 per 4 by day, and 31-45% of all settler-ticks were asleep.
-BED_NIGHT_RECOVERY = (1, 1)
-BED_DAY_RECOVERY = (2, 3)
-GROUND_NIGHT_RECOVERY = (2, 3)
-GROUND_DAY_RECOVERY = (1, 2)
-
-# `Entity.sleeping_on` when the sleeper lies on the bare ground.
-GROUND = ""
-
-# --- Hunger and sleep ------------------------------------------------------
-
-# One rule, read both ways: a settler will not lie down at or below this much
-# food, and a sleeper that falls to it wakes. Waking ends the sleep, so it
-# happens at most once per sleep. Before 2026-09-20 the line was food 0, and a
-# settler slept from food 39 through the night and died four ticks after waking.
-HUNGRY_WAKE_FOOD = 20
-
-# --- How tired you have to be to lie down --------------------------------
-
-# A settler will not fall asleep below this much fatigue. Before 2026-09-20 the
-# floor was 1, and one settler took ten sleeps of one or two ticks at fatigue
-# 1. Collapse is unaffected: it happens at max fatigue, whatever this says.
-MIN_SLEEP_FATIGUE = 20
+# The fatigue, recovery, hunger and sleep-floor numbers are
+# `bobgame_rules.body`; they are re-exported above for the rest of `world`.
 
 # --- Wake reasons ----------------------------------------------------------
 

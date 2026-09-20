@@ -4,6 +4,20 @@ import structlog
 
 from typing import Mapping
 
+from bobgame_rules.body import (
+    FOOD_INTERVAL_TICKS,
+    FOOD_PER_TICK,
+    REGEN_AMOUNT,
+    REGEN_FOOD_THRESHOLD,
+    REGEN_INTERVAL_TICKS,
+    RESPAWN_DELAY_TICKS,
+    RESPAWN_FOOD,
+    RESPAWN_RING_DISTANCES,
+    RESPAWN_SAFE_DISTANCE,
+    STARVATION_DAMAGE,
+    STARVATION_INTERVAL_TICKS,
+)
+
 from .combat import WOLF_TYPE, apply_damage
 from .events import RespawnEvent, TickEvents
 from .exceptions import ObjectNotFoundError
@@ -20,25 +34,10 @@ from .types import (
 
 logger = structlog.get_logger()
 
-# Food drops one point every FOOD_INTERVAL_TICKS ticks. At a 2 s tick a
-# full stomach (100) lasts ~13 minutes before starvation damage begins.
-FOOD_PER_TICK = 1
-FOOD_INTERVAL_TICKS = 4
-STARVATION_INTERVAL_TICKS = 4
-STARVATION_DAMAGE = 1
-REGEN_INTERVAL_TICKS = 5
-REGEN_AMOUNT = 1
-REGEN_FOOD_THRESHOLD = 50
-RESPAWN_DELAY_TICKS = 10
-RESPAWN_FOOD = 50
-
+# The numbers are `bobgame_rules.body`; only this module's own search
+# geometry lives here.
 # Maximum ring radius searched by find_free_tile before giving up.
 FREE_TILE_SEARCH_RADIUS = 64
-# Respawning settlers keep this far from every living wolf when they can. It is
-# wider than the wolves' chase radius (8), so a wolf camping the settlement
-# does not notice them arrive.
-RESPAWN_SAFE_DISTANCE = 10
-RESPAWN_RING_DISTANCES = (12, 24)
 RESPAWN_RING_DIRECTIONS = (
     (0, -1),
     (1, 0),

@@ -1,9 +1,11 @@
 """The floor codes are a wire format shared with the viewer.
 
-`world/src/world/terrain_types.py` is the Python source of truth and
-`viewer/src/terrain/TerrainConfig.ts` repeats the numbers for the browser.
-Parsing the TypeScript here makes a drift between the two fail CI instead of
-painting the island with the wrong tiles.
+`bobgame_rules.terrain` is the Python source of truth and
+`viewer/src/generated/rules.ts` is written from it by
+`tools/generate_rules_ts.py`. Parsing the generated TypeScript here makes a
+drift between the two fail CI instead of painting the island with the wrong
+tiles; `tools/tests/test_generate_rules_ts.py` catches the generator not having
+been run at all.
 """
 
 import re
@@ -13,12 +15,8 @@ import pytest
 
 from world.terrain_types import FLOOR_TYPE_BY_CODE, FloorType
 
-TERRAIN_CONFIG_TS = (
-    Path(__file__).resolve().parents[2]
-    / "viewer"
-    / "src"
-    / "terrain"
-    / "TerrainConfig.ts"
+VIEWER_RULES_TS = (
+    Path(__file__).resolve().parents[2] / "viewer" / "src" / "generated" / "rules.ts"
 )
 
 _ENUM_BLOCK = re.compile(r"export const FloorType = \{(.*?)\} as const;", re.DOTALL)
@@ -27,17 +25,17 @@ _ENTRY = re.compile(r"^\s*([A-Z_]+):\s*(\d+),\s*$", re.MULTILINE)
 
 def _viewer_floor_codes() -> dict[str, int]:
     """The `FloorType` map the viewer compiles, as {NAME: code}."""
-    source = TERRAIN_CONFIG_TS.read_text(encoding="utf-8")
+    source = VIEWER_RULES_TS.read_text(encoding="utf-8")
     block = _ENUM_BLOCK.search(source)
     if block is None:
         raise AssertionError(
-            f"No `export const FloorType = {{...}} as const;` in {TERRAIN_CONFIG_TS}"
+            f"No `export const FloorType = {{...}} as const;` in {VIEWER_RULES_TS}"
         )
     return {name: int(code) for name, code in _ENTRY.findall(block.group(1))}
 
 
 @pytest.mark.skipif(
-    not TERRAIN_CONFIG_TS.exists(), reason="viewer source is not checked out"
+    not VIEWER_RULES_TS.exists(), reason="viewer source is not checked out"
 )
 def test_viewer_floor_codes_match_the_enum() -> None:
     assert _viewer_floor_codes() == {

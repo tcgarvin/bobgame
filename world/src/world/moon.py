@@ -17,6 +17,14 @@ from .conversations import close_all_conversations
 from .events import TickEvents
 from .items import BED
 from .sleep import GROUND
+from bobgame_rules.clock import (
+    NEW_MOON_CONVERSATION_REASON,
+    NEW_MOON_SAVE_OFFSET,
+    NEW_MOON_SLEEP_REASON,
+    NEW_MOON_STILL_TICKS,
+    NEW_MOON_WAKE_REFUSAL,
+)
+
 from .state import WOLF_ENTITY_TYPE, Entity, World, night_start_tick
 from .types import Position
 
@@ -35,18 +43,7 @@ __all__ = [
     "wolves_lie_low",
 ]
 
-# Ticks from the forced sleep during which nothing wakes anyone.
-NEW_MOON_STILL_TICKS = 6
-
-# The save is taken this many ticks into the still window.
-NEW_MOON_SAVE_OFFSET = 3
-
-# What the forced sleep and a refused wake are called in events.
-NEW_MOON_SLEEP_REASON = "new moon"
-NEW_MOON_WAKE_REFUSAL = "new moon"
-
-# End reason recorded when a conversation is closed by the new moon.
-NEW_MOON_CONVERSATION_REASON = "new_moon"
+# The new-moon constants are `bobgame_rules.clock`, re-exported above.
 
 
 # --- Pure helpers ----------------------------------------------------------
