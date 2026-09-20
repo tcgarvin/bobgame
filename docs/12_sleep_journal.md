@@ -26,8 +26,9 @@ Markdown, exactly six `## ` headings, in this order:
   closing note of a conversation append one `- ` bullet each; a rewrite folds
   them into the five sections above and clears them.
 - A missing file is created on the first read or append, seeded with
-  `Story so far` = "<id> woke up on a large, wild island with eleven other
-  people and no memory of how they got there." and the rest empty.
+  `Story so far` = "<id> woke up on a large, wild island with the others
+  who woke there, and no memory of how they got there." (no count: the settler
+  count reaches the prompts through `--settlers`) and the rest empty.
 - `read_memory` (planner) and `read_notes` (conversation) return the rendered
   journal, scratch included, so the planner still sees everything.
 

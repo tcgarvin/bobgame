@@ -132,8 +132,8 @@ def truncate_to_tokens(text: str, limit: int, counter: TokenCounter) -> str:
 def seed_story(entity_id: str) -> str:
     """The `Story so far` a settler starts with, before it has lived a day."""
     return (
-        f"{entity_id} woke up on a large, wild island with eleven other people "
-        "and no memory of how they got there."
+        f"{entity_id} woke up on a large, wild island with the others "
+        "who woke there, and no memory of how they got there."
     )
 
 

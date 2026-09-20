@@ -138,7 +138,8 @@ def test_a_missing_journal_is_seeded_with_the_premise(tmp_path: Path) -> None:
     journal = Journal.load(path, "ada")
 
     assert journal.story_so_far.startswith("ada woke up on a large, wild island")
-    assert "eleven other people" in journal.story_so_far
+    assert "with the others who woke there" in journal.story_so_far
+    assert "eleven" not in journal.story_so_far
     assert journal.me == journal.others == journal.learnings == journal.tomorrow == ""
     assert journal.scratch == []
     assert path.exists(), "the seed is written out, not only returned"
