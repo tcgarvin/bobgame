@@ -67,11 +67,13 @@ class FakeJournalWriter:
         )
         self.error = error
         self.calls: list[tuple[str, str]] = []
+        self.clock_facts: list[str] = []
 
     async def rewrite(
-        self, journal: Journal, day_log: str, entity_id: str
+        self, journal: Journal, day_log: str, entity_id: str, clock_fact: str = ""
     ) -> JournalRewrite:
         self.calls.append((day_log, entity_id))
+        self.clock_facts.append(clock_fact)
         if self.error is not None:
             raise self.error
         return finish_rewrite(

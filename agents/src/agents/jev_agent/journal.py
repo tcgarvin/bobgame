@@ -300,6 +300,30 @@ class DayLog:
         """Put a failed rewrite's snapshot back in front of what came since."""
         self.entries = list(entries) + self.entries
 
+    def to_payload(self) -> list[dict[str, Any]]:
+        """The log as JSON-safe data, for an agent snapshot (docs/14)."""
+        return [
+            {
+                "tick": entry.tick,
+                "kind": entry.kind,
+                "text": entry.text,
+                "tool": entry.tool,
+            }
+            for entry in self.entries
+        ]
+
+    def load_payload(self, payload: Sequence[Mapping[str, Any]]) -> None:
+        """Replace the log with what `to_payload` produced."""
+        self.entries = [
+            DayLogEntry(
+                tick=int(row["tick"]),
+                kind=str(row["kind"]),
+                text=str(row["text"]),
+                tool=str(row["tool"]),
+            )
+            for row in payload
+        ]
+
 
 def _keep_entries(entries: Sequence[DayLogEntry]) -> list[DayLogEntry]:
     """Drop the entries that only repeat what another entry already says.
@@ -451,9 +475,13 @@ class JournalWriter(Protocol):
     """The language-model half of the journal."""
 
     async def rewrite(
-        self, journal: Journal, day_log: str, entity_id: str
+        self, journal: Journal, day_log: str, entity_id: str, clock_fact: str = ""
     ) -> JournalRewrite:
-        """Rewrite the five sections from the journal and the day's log."""
+        """Rewrite the five sections from the journal and the day's log.
+
+        `clock_fact` is what the world clock says about the new moon, so a
+        `Tomorrow` section can be written around it (docs/14 section 1).
+        """
 
 
 def over_limit_message(overruns: Mapping[str, int], limit: int) -> str:
@@ -467,16 +495,19 @@ def over_limit_message(overruns: Mapping[str, int], limit: int) -> str:
     )
 
 
-def build_journal_prompt(journal: Journal, day_log: str, entity_id: str) -> str:
+def build_journal_prompt(
+    journal: Journal, day_log: str, entity_id: str, clock_fact: str = ""
+) -> str:
     """The user message for one rewrite."""
-    return "\n\n".join(
-        [
-            f"You are {entity_id}.",
-            "Your journal as it stands:\n" + journal.render().strip(),
-            "This day's log:\n" + (day_log.strip() or "(nothing was recorded)"),
-            "Write your journal now: all five sections.",
-        ]
-    )
+    parts = [
+        f"You are {entity_id}.",
+        "Your journal as it stands:\n" + journal.render().strip(),
+        "This day's log:\n" + (day_log.strip() or "(nothing was recorded)"),
+    ]
+    if clock_fact:
+        parts.append(clock_fact)
+    parts.append("Write your journal now: all five sections.")
+    return "\n\n".join(parts)
 
 
 class ModelJournalWriter:
@@ -519,10 +550,12 @@ class ModelJournalWriter:
         return output
 
     async def rewrite(
-        self, journal: Journal, day_log: str, entity_id: str
+        self, journal: Journal, day_log: str, entity_id: str, clock_fact: str = ""
     ) -> JournalRewrite:
         """Ask the model for the five sections, then enforce the token limit."""
-        result = await self.agent.run(build_journal_prompt(journal, day_log, entity_id))
+        result = await self.agent.run(
+            build_journal_prompt(journal, day_log, entity_id, clock_fact)
+        )
         usage = usage_from_messages(result.new_messages())
         return finish_rewrite(
             journal, result.output.as_mapping(), self.count, usage, self.model_name

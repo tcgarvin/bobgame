@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from .. import world_pb2 as pb
 from . import items
@@ -60,6 +60,12 @@ class WorldClock:
     tick_of_day: int = 0
     day_length: int = items.DEFAULT_DAY_LENGTH
     night: bool = False
+    # docs/14_new_moon_and_saves.md: whether tonight is a new-moon night, the
+    # 0-based day the next one falls on (-1 when the world has none), and the
+    # tick a save is being taken on (0 on every other tick).
+    new_moon_tonight: bool = False
+    next_new_moon_day: int = -1
+    save_tick: int = 0
 
     def as_text(self) -> str:
         """`"day 2 212/300 night"`, the form every tick line uses."""
@@ -67,6 +73,20 @@ class WorldClock:
             f"day {self.day} {self.tick_of_day}/{self.day_length} "
             f"{'night' if self.night else 'day'}"
         )
+
+    def moon_text(self) -> str:
+        """What the clock says about the new moon, or `""` when it says nothing.
+
+        `"new moon tonight (everyone falls asleep at tick-of-day 200)"` on the
+        day itself, `"next new moon: night of day 5"` otherwise, and nothing at
+        all in a world that has no new moon.
+        """
+        if self.new_moon_tonight:
+            start = items.night_start_tick(self.day_length)
+            return f"new moon tonight (everyone falls asleep at tick-of-day {start})"
+        if self.next_new_moon_day >= 0:
+            return f"next new moon: night of day {self.next_new_moon_day}"
+        return ""
 
 
 @dataclass(frozen=True)
@@ -380,6 +400,10 @@ class TickDigest:
     # note path as `sign_notes`. Independent of `read_board`: it fires just by
     # being in view, `read_board` only clears the `look` "(new)" marker.
     board_notes: list[str] = field(default_factory=list)
+    # True when the world re-delivered a tick this model had already folded in
+    # (docs/14 section 4): nothing in here happened now, it happened before the
+    # snapshot this agent was restored from.
+    repeated: bool = False
 
 
 def _parse_counts(raw: str) -> dict[str, int]:
@@ -470,6 +494,10 @@ class WorldModel:
         # else is announced once, not on every tick it stays in view.
         self._board_notes_notified: dict[str, dict[int, int]] = {}
         self.last_digest = TickDigest()
+        # The tick of the last observation folded in; -1 before the first one.
+        # An observation for that same tick is a re-delivery (docs/14 section
+        # 4) and is folded as a refresh rather than as a second tick.
+        self.last_observed_tick = -1
         # Position indexes rebuilt once per update() so that pathfinding's
         # walkability checks are O(1) instead of scanning every known object.
         self._blocked_positions: set[Coord] = set()
@@ -511,9 +539,18 @@ class WorldModel:
     # -- updating -----------------------------------------------------------
 
     def update(self, observation: pb.Observation) -> TickDigest:
-        """Fold one observation into memory and return what changed."""
+        """Fold one observation into memory and return what changed.
+
+        An observation for the tick already folded in is a re-delivery: the
+        world sends tick `T` again to a resumed agent (docs/14 section 4). Its
+        events have already been lived through, so they are skipped and the
+        digest comes back empty and marked `repeated`; only the picture of the
+        world is refreshed.
+        """
+        repeated = observation.tick_id == self.last_observed_tick
         self.tick = observation.tick_id
-        digest = TickDigest(tick=observation.tick_id)
+        self.last_observed_tick = observation.tick_id
+        digest = TickDigest(tick=observation.tick_id, repeated=repeated)
 
         self.self_info = _entity_info(observation.self, observation.tick_id)
         self.clock = _world_clock(observation.clock)
@@ -533,7 +570,8 @@ class WorldModel:
 
         self._refresh_objects(observation, digest)
         self._refresh_entities(observation)
-        self._apply_events(observation, digest)
+        if not repeated:
+            self._apply_events(observation, digest)
         self._read_signs_in_view(digest)
         self._check_boards_in_view(digest)
         self._rebuild_position_indexes()
@@ -1007,6 +1045,100 @@ class WorldModel:
         """The last `count` things the actor heard."""
         return list(self.heard)[-count:]
 
+    # -- saving and restoring (docs/14 section 3) ---------------------------
+
+    def to_payload(self) -> dict[str, Any]:
+        """Everything this model remembers, as JSON-safe data.
+
+        The derived position indexes and `last_digest` are left out: they are
+        rebuilt from the rest by `from_payload`. Tiles are the bulk of a
+        settled model (10^5 of them), so they go in parallel arrays with the
+        floor types interned rather than as one dict per tile.
+        """
+        return {
+            "entity_id": self.entity_id,
+            "tick": self.tick,
+            "last_observed_tick": self.last_observed_tick,
+            "tiles": _tiles_payload(self.tiles),
+            "objects": [_object_payload(obj) for obj in self.objects.values()],
+            "entities": [_entity_payload(info) for info in self.entities.values()],
+            "self_info": _entity_payload(self.self_info),
+            "settlement": list(self.settlement),
+            "settlement_known": self.settlement_known,
+            "clock": _clock_payload(self.clock),
+            "history": [[entry.tick, entry.text] for entry in self.history],
+            "heard": [_heard_payload(heard) for heard in self.heard],
+            "damage_log": [
+                [hit.tick, hit.amount, hit.attacker_id] for hit in self.damage_log
+            ],
+            "deaths_seen": [
+                [death.entity_id, death.entity_type, death.tick, death.killer_id]
+                for death in self.deaths_seen
+            ],
+            "entity_types": dict(self._entity_types),
+            "conversation_lines": {
+                conversation_id: [
+                    [line.tick, line.speaker, line.text] for line in lines
+                ]
+                for conversation_id, lines in self.conversation_lines.items()
+            },
+            "sign_texts_read": dict(self.sign_texts_read),
+            "board_notes_read": _board_payload(self.board_notes_read),
+            "board_notes_notified": _board_payload(self._board_notes_notified),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "WorldModel":
+        """Rebuild a model from `to_payload`, derived indexes and all."""
+        model = cls(str(payload["entity_id"]))
+        model.tick = int(payload["tick"])
+        model.last_observed_tick = int(payload["last_observed_tick"])
+        model.tiles = _tiles_from_payload(payload["tiles"])
+        model.objects = {
+            obj.object_id: obj
+            for obj in (_object_from_payload(row) for row in payload["objects"])
+        }
+        model.entities = {
+            info.entity_id: info
+            for info in (_entity_from_payload(row) for row in payload["entities"])
+        }
+        model.self_info = _entity_from_payload(payload["self_info"])
+        settlement = payload["settlement"]
+        model.settlement = (int(settlement[0]), int(settlement[1]))
+        model.settlement_known = bool(payload["settlement_known"])
+        model.clock = _clock_from_payload(payload["clock"])
+        model.history.extend(
+            HistoryEntry(int(tick), str(text)) for tick, text in payload["history"]
+        )
+        model.heard.extend(_heard_from_payload(row) for row in payload["heard"])
+        model.damage_log.extend(
+            DamageTaken(int(tick), int(amount), str(attacker))
+            for tick, amount, attacker in payload["damage_log"]
+        )
+        model.deaths_seen.extend(
+            DeathSeen(str(entity_id), str(entity_type), int(tick), str(killer))
+            for entity_id, entity_type, tick, killer in payload["deaths_seen"]
+        )
+        model._entity_types = {
+            str(key): str(value) for key, value in payload["entity_types"].items()
+        }
+        model.conversation_lines = {
+            str(conversation_id): [
+                TranscriptLine(int(tick), str(speaker), str(text))
+                for tick, speaker, text in lines
+            ]
+            for conversation_id, lines in payload["conversation_lines"].items()
+        }
+        model.sign_texts_read = {
+            str(key): str(value) for key, value in payload["sign_texts_read"].items()
+        }
+        model.board_notes_read = _board_from_payload(payload["board_notes_read"])
+        model._board_notes_notified = _board_from_payload(
+            payload["board_notes_notified"]
+        )
+        model._rebuild_position_indexes()
+        return model
+
 
 def _entity_info(entity: pb.Entity, tick: int) -> EntityInfo:
     return EntityInfo(
@@ -1038,7 +1170,201 @@ def _world_clock(clock: pb.WorldClock) -> WorldClock:
         tick_of_day=clock.tick_of_day,
         day_length=clock.day_length,
         night=clock.night,
+        new_moon_tonight=clock.new_moon_tonight,
+        next_new_moon_day=clock.next_new_moon_day,
+        save_tick=clock.save_tick,
     )
+
+
+# --- payload helpers (docs/14 "Agent snapshot contents") --------------------
+
+# Bit positions packed into one integer per tile, so a 10^5-tile model does not
+# spend two JSON booleans on every one of them.
+_TILE_WALKABLE_BIT = 1
+_TILE_OPAQUE_BIT = 2
+
+
+def _tiles_payload(tiles: Mapping[Coord, TileInfo]) -> dict[str, Any]:
+    """Tiles as parallel arrays with the floor types interned."""
+    floors: list[str] = []
+    floor_index: dict[str, int] = {}
+    xs: list[int] = []
+    ys: list[int] = []
+    floor_of: list[int] = []
+    flags: list[int] = []
+    last_seen: list[int] = []
+    for (x, y), tile in tiles.items():
+        index = floor_index.get(tile.floor_type, -1)
+        if index < 0:
+            index = len(floors)
+            floor_index[tile.floor_type] = index
+            floors.append(tile.floor_type)
+        xs.append(x)
+        ys.append(y)
+        floor_of.append(index)
+        flags.append(
+            (_TILE_WALKABLE_BIT if tile.walkable else 0)
+            | (_TILE_OPAQUE_BIT if tile.opaque else 0)
+        )
+        last_seen.append(tile.last_seen)
+    return {
+        "floors": floors,
+        "floor_of": floor_of,
+        "x": xs,
+        "y": ys,
+        "flags": flags,
+        "last_seen": last_seen,
+    }
+
+
+def _tiles_from_payload(payload: Mapping[str, Any]) -> dict[Coord, TileInfo]:
+    """The inverse of `_tiles_payload`."""
+    floors = [str(name) for name in payload["floors"]]
+    tiles: dict[Coord, TileInfo] = {}
+    for x, y, floor, flag, seen in zip(
+        payload["x"],
+        payload["y"],
+        payload["floor_of"],
+        payload["flags"],
+        payload["last_seen"],
+    ):
+        position = (int(x), int(y))
+        tiles[position] = TileInfo(
+            position=position,
+            walkable=bool(int(flag) & _TILE_WALKABLE_BIT),
+            opaque=bool(int(flag) & _TILE_OPAQUE_BIT),
+            floor_type=floors[int(floor)],
+            last_seen=int(seen),
+        )
+    return tiles
+
+
+def _object_payload(obj: ObjectInfo) -> dict[str, Any]:
+    return {
+        "object_id": obj.object_id,
+        "object_type": obj.object_type,
+        "position": list(obj.position),
+        "state": dict(obj.state),
+        "last_seen": obj.last_seen,
+    }
+
+
+def _object_from_payload(payload: Mapping[str, Any]) -> ObjectInfo:
+    position = payload["position"]
+    return ObjectInfo(
+        object_id=str(payload["object_id"]),
+        object_type=str(payload["object_type"]),
+        position=(int(position[0]), int(position[1])),
+        state={str(key): str(value) for key, value in payload["state"].items()},
+        last_seen=int(payload["last_seen"]),
+    )
+
+
+def _entity_payload(info: EntityInfo) -> dict[str, Any]:
+    return {
+        "entity_id": info.entity_id,
+        "entity_type": info.entity_type,
+        "position": list(info.position),
+        "health": info.health,
+        "max_health": info.max_health,
+        "food": info.food,
+        "max_food": info.max_food,
+        "wielded": info.wielded,
+        "alive": info.alive,
+        "inventory": dict(info.inventory),
+        "last_seen": info.last_seen,
+        "fatigue": info.fatigue,
+        "max_fatigue": info.max_fatigue,
+        "asleep": info.asleep,
+        "sleeping_on": info.sleeping_on,
+        "collapsed": info.collapsed,
+    }
+
+
+def _entity_from_payload(payload: Mapping[str, Any]) -> EntityInfo:
+    position = payload["position"]
+    return EntityInfo(
+        entity_id=str(payload["entity_id"]),
+        entity_type=str(payload["entity_type"]),
+        position=(int(position[0]), int(position[1])),
+        health=int(payload["health"]),
+        max_health=int(payload["max_health"]),
+        food=int(payload["food"]),
+        max_food=int(payload["max_food"]),
+        wielded=str(payload["wielded"]),
+        alive=bool(payload["alive"]),
+        inventory={
+            str(kind): int(count) for kind, count in payload["inventory"].items()
+        },
+        last_seen=int(payload["last_seen"]),
+        fatigue=int(payload["fatigue"]),
+        max_fatigue=int(payload["max_fatigue"]),
+        asleep=bool(payload["asleep"]),
+        sleeping_on=str(payload["sleeping_on"]),
+        collapsed=bool(payload["collapsed"]),
+    )
+
+
+def _clock_payload(clock: WorldClock) -> dict[str, Any]:
+    return {
+        "day": clock.day,
+        "tick_of_day": clock.tick_of_day,
+        "day_length": clock.day_length,
+        "night": clock.night,
+        "new_moon_tonight": clock.new_moon_tonight,
+        "next_new_moon_day": clock.next_new_moon_day,
+        # Deliberately not carried: the save tick belongs to the tick the
+        # snapshot was taken on, and the resumed world re-delivers it as 0.
+    }
+
+
+def _clock_from_payload(payload: Mapping[str, Any]) -> WorldClock:
+    return WorldClock(
+        day=int(payload["day"]),
+        tick_of_day=int(payload["tick_of_day"]),
+        day_length=int(payload["day_length"]),
+        night=bool(payload["night"]),
+        new_moon_tonight=bool(payload["new_moon_tonight"]),
+        next_new_moon_day=int(payload["next_new_moon_day"]),
+    )
+
+
+def _heard_payload(heard: HeardUtterance) -> list[Any]:
+    return [
+        heard.tick,
+        heard.speaker_id,
+        heard.channel,
+        heard.text,
+        list(heard.position),
+        heard.conversation_id,
+    ]
+
+
+def _heard_from_payload(row: Sequence[Any]) -> HeardUtterance:
+    tick, speaker, channel, text, position, conversation_id = row
+    return HeardUtterance(
+        tick=int(tick),
+        speaker_id=str(speaker),
+        channel=str(channel),
+        text=str(text),
+        position=(int(position[0]), int(position[1])),
+        conversation_id=str(conversation_id),
+    )
+
+
+def _board_payload(boards: Mapping[str, Mapping[int, int]]) -> dict[str, Any]:
+    """Board read-tracking, with the integer slots as JSON's string keys."""
+    return {
+        board_id: {str(slot): tick for slot, tick in slots.items()}
+        for board_id, slots in boards.items()
+    }
+
+
+def _board_from_payload(payload: Mapping[str, Any]) -> dict[str, dict[int, int]]:
+    return {
+        str(board_id): {int(slot): int(tick) for slot, tick in slots.items()}
+        for board_id, slots in payload.items()
+    }
 
 
 def _delta_name(delta: Coord) -> str:

@@ -257,6 +257,20 @@ class ReflexWatch:
         self.last_end_tick = tick
         self._clear_ticks = 0
 
+    def to_payload(self) -> dict[str, Any]:
+        """The brief and the counters, for an agent snapshot (docs/14)."""
+        return {
+            "brief": self.brief.as_payload(),
+            "last_end_tick": self.last_end_tick,
+            "clear_ticks": self._clear_ticks,
+        }
+
+    def load_payload(self, payload: Mapping[str, Any]) -> None:
+        """Continue from what `to_payload` recorded."""
+        self.brief = reflex_from_payload(payload["brief"])
+        self.last_end_tick = int(payload["last_end_tick"])
+        self._clear_ticks = int(payload["clear_ticks"])
+
 
 def reflex_report_line(
     start_tick: int,

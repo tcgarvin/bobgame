@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 
 import structlog
 
@@ -62,10 +63,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"(default {DEFAULT_SETTLER_COUNT})"
         ),
     )
+    parser.add_argument(
+        "--resume-from",
+        default="",
+        help=(
+            "a save directory (runs/<run>/saves/tick-<T>) to restore this "
+            "settler from before connecting (docs/14_new_moon_and_saves.md)"
+        ),
+    )
     parser.add_argument("--log-level", default="info", help="debug, info, warning")
     args = parser.parse_args(argv)
     if args.settlers < 1:
         parser.error(f"--settlers must be at least 1, got {args.settlers}")
+    if args.resume_from and not Path(args.resume_from).is_dir():
+        parser.error(f"--resume-from is not a directory: {args.resume_from}")
     return args
 
 
@@ -94,6 +105,7 @@ async def _main_async(args: argparse.Namespace) -> None:
             jev_model=args.jev_model,
             journal_model=args.journal_model,
             settler_count=args.settlers,
+            resume_from=Path(args.resume_from) if args.resume_from else None,
         )
     )
     for signal_name in (signal.SIGINT, signal.SIGTERM):

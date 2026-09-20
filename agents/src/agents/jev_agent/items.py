@@ -434,6 +434,11 @@ HUNGRY_WAKE_FOOD = 20
 # Fatigue below which the world refuses a `sleep` (`world/sleep.py`,
 # `MIN_SLEEP_FATIGUE`). Collapse at MAX_FATIGUE is unaffected.
 MIN_SLEEP_FATIGUE = 20
+# The new moon (docs/14_new_moon_and_saves.md section 1). How long after the
+# forced sleep nothing at all wakes a sleeper; mirrors the world's
+# `NEW_MOON_STILL_TICKS`. How often a new moon falls is *not* a constant: it is
+# world config, and the clock reports it.
+NEW_MOON_STILL_TICKS = 6
 
 FRESH = "fresh"
 TIRED = "tired"
@@ -503,6 +508,11 @@ def fatigue_word(fatigue: int) -> str:
     if fatigue >= TIRED_FATIGUE:
         return TIRED
     return FRESH
+
+
+def night_start_tick(day_length: int = DEFAULT_DAY_LENGTH) -> int:
+    """The tick of day night begins on, the same arithmetic the world uses."""
+    return int(day_length * NIGHT_START_FRACTION)
 
 
 def sleep_recovery_text(on_bed: bool, night: bool) -> str:

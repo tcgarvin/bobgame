@@ -382,6 +382,10 @@ def _facts(model: WorldModel) -> list[str]:
     enclosed = enclosed_fact(model)
     if enclosed:
         facts.append(enclosed)
+    # Only on the day itself: what the clock says about a new moon weeks away
+    # is nothing Jev can act on this tick (docs/14 section 1).
+    if model.clock.new_moon_tonight:
+        facts.append(model.clock.moon_text())
     return facts
 
 

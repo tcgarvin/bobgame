@@ -680,24 +680,29 @@ async def test_a_sleeping_agent_submits_nothing_and_asks_nobody(
     assert not jev.calls
 
 
-async def test_a_stint_resumes_on_the_tick_the_settler_wakes(tmp_path: Path) -> None:
+async def test_falling_asleep_ends_the_stint_instead_of_holding_the_turn(
+    tmp_path: Path,
+) -> None:
+    """A sleeper submits nothing, so the stint (and the tool call) ends there."""
     jev = FakeJevClient(default_action="move_E")
     world = FakeWorldClient(sleeping_observations([2, 3], 5))
     agent = build_agent(world, jev, tmp_path)
+    reports: list[str] = []
 
     async def plan() -> None:
-        await agent.run_stint(
+        report = await agent.run_stint(
             Brief(instruction="Walk east", success_condition="never", max_ticks=10)
         )
+        reports.append(report.end_reason)
         await asyncio.sleep(3600)
 
     agent.planner.run = plan  # type: ignore[method-assign]
     await agent.run()
 
-    # Ticks 1, 4 and 5 act; 2 and 3 are slept through.
-    assert len(jev.calls) == 3
-    assert len(world.submitted) == 3
-    assert agent.mode == MODE_STINT
+    # Only tick 1 is Jev's: the stint ends the tick the body falls asleep.
+    assert len(jev.calls) == 1
+    assert reports == ["asleep"]
+    assert agent.mode == MODE_PLANNING
 
 
 async def test_the_sleep_and_the_wake_are_traced_with_the_reason(
@@ -1085,13 +1090,15 @@ class FakeJournalWriter:
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
         self.calls: list[tuple[str, str]] = []
+        self.clock_facts: list[str] = []
         self.gate = asyncio.Event()
         self.gate.set()
 
     async def rewrite(
-        self, journal: Journal, day_log: str, entity_id: str
+        self, journal: Journal, day_log: str, entity_id: str, clock_fact: str = ""
     ) -> JournalRewrite:
         self.calls.append((day_log, entity_id))
+        self.clock_facts.append(clock_fact)
         await self.gate.wait()
         if self.error is not None:
             raise self.error

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,7 @@ from .conversation import (
     ModelConverser,
     hailed_target,
     joined_conversation,
+    sleep_end_reason,
 )
 from .jevclient import JevClient, TypeSafeJevClient
 from .journal import (
@@ -79,10 +81,21 @@ from .reflex import (
     ReflexWatch,
     reflex_report_line,
 )
+from .snapshot import (
+    AgentSnapshot,
+    SleepSnapshot,
+    capture,
+    read_snapshot,
+    restore,
+    snapshot_path,
+    write_snapshot,
+)
 from .stint import (
     INTERRUPTED_BY_CONVERSATION,
     INTERRUPTED_BY_REFLEX,
+    END_ASLEEP,
     END_JOINED_CONVERSATION,
+    END_NEW_MOON,
     END_PREEMPTED_BY_REFLEX,
     STINT_KIND_REFLEX,
     Brief,
@@ -93,7 +106,7 @@ from .stint import (
     never_ends,
 )
 from .pricing import CostLedger, LedgerJevClient, pricing_payload
-from .tracelog import AgentTrace, resolve_log_root
+from .tracelog import RUN_DIR_ENV, AgentTrace, resolve_log_root
 from .worldmodel import TickDigest, WorldModel
 
 logger = structlog.get_logger(__name__)
@@ -144,6 +157,39 @@ ASLEEP_REJECTION = "failed: asleep"
 # What the planner is told happened to its body, so it can drop its history.
 LIFE_WOKE = "woke"
 LIFE_RESPAWNED = "respawned"
+
+# --- saving (docs/14_new_moon_and_saves.md section 3) ------------------------
+
+# Where a run's saves live, under the run directory the world made.
+SAVES_DIR_NAME = "saves"
+# How long to wait for the settler to drain before giving up on the save. The
+# world waits `save_wait_seconds` (180 by default) for the file, so this has to
+# be a little under that: an agent that gives up first can say why in its log,
+# where an agent the world gave up on cannot.
+SAVE_WAIT_ENV = "BOBGAME_SAVE_WAIT_SECONDS"
+DEFAULT_SAVE_WAIT_SECONDS = 170.0
+SAVE_POLL_SECONDS = 0.1
+
+
+@dataclass(frozen=True)
+class DrainState:
+    """Whether the settler is drained, and if not, what is still outstanding.
+
+    Drained is the precondition for a snapshot (docs/14 section 2): everything
+    the agent was doing has finished, so there is nothing left that a file
+    could only half describe.
+    """
+
+    drained: bool
+    reason: str = ""
+
+    @classmethod
+    def busy(cls, reason: str) -> "DrainState":
+        """Not drained, because of `reason`."""
+        return cls(drained=False, reason=reason)
+
+
+DRAINED = DrainState(drained=True)
 
 
 @dataclass(frozen=True)
@@ -348,6 +394,12 @@ class JevAgent:
         self._background: set[asyncio.Task[None]] = set()
         # The journal rewrite in flight, if any: exactly one at a time.
         self._journal_task: asyncio.Task[None] | None = None
+        # Closing converser calls still running, counted rather than held: the
+        # save waits for them (docs/14 section 2).
+        self._closing_conversations = 0
+        # True once the sleep the body is in has been drained through, so the
+        # drain runs once per sleep rather than once per sleeping tick.
+        self._drained_this_sleep = False
         self._pending_thought = ""
         self._last_status = ("", "", "", "", "")
         self._running = False
@@ -367,6 +419,11 @@ class JevAgent:
     def reflex(self) -> ReflexBrief:
         """The brief code runs when a wolf is close or the actor is bitten."""
         return self._reflex_watch.brief
+
+    @property
+    def reflex_watch(self) -> ReflexWatch:
+        """The reflex trigger and its counters, which a snapshot carries."""
+        return self._reflex_watch
 
     def set_reflex(self, brief: ReflexBrief) -> None:
         """Register (or replace) the reflex brief and persist it."""
@@ -393,6 +450,10 @@ class JevAgent:
         notes = list(queue)
         queue.clear()
         return notes
+
+    def pending_notes(self, *, for_prompt: bool = False) -> list[str]:
+        """The same notes, read without taking them: a snapshot must not consume."""
+        return list(self._notes_for_prompt if for_prompt else self._notes_for_tools)
 
     def _note_for_planner(self, text: str) -> None:
         """Queue one note for the next tool result and the next turn prompt."""
@@ -572,10 +633,16 @@ class JevAgent:
             self._note_for_planner(note)
         for note in digest.board_notes:
             self._note_for_planner(note)
-        self._note_life_transitions(digest)
-        self._note_sleep_transitions(digest)
+        # A re-delivered tick is one this settler has already lived through
+        # (docs/14 section 4): its deaths, respawns and sleeps are history.
+        if not digest.repeated:
+            self._note_life_transitions(digest)
+            self._note_sleep_transitions(digest)
         if self._body_is_active():
             self._release_active_waiters()
+        clock = self._model.clock
+        if clock.save_tick and clock.save_tick == self._model.tick:
+            await self._maybe_save(clock.save_tick)
         if self._model.self_info.asleep:
             await self._sleeping_tick(observation, digest)
             return
@@ -782,7 +849,10 @@ class JevAgent:
         try:
             journal = Journal.load(path, self.entity_id)
             rewrite = await self.journal_writer.rewrite(
-                journal, render_day_log(entries), self.entity_id
+                journal,
+                render_day_log(entries),
+                self.entity_id,
+                self._model.clock.moon_text(),
             )
             rewrite.journal.save(path)
         except asyncio.CancelledError:
@@ -896,11 +966,16 @@ class JevAgent:
                 self._note_for_planner(
                     SLEEP_NOTE.format(tick=self._model.tick, where=self._sleep_place)
                 )
+            # Everything the body was doing is over before the turn is ended
+            # and the journal is written, so the closing note of a conversation
+            # reaches the same day's rewrite where it can.
+            self._drain_for_sleep(digest)
             self.planner.end_turn_now()
             self._start_journal_rewrite(TRIGGER_SLEEP)
             return
         if info.asleep or self._asleep_since < 0:
             return
+        self._drained_this_sleep = False
         record = SleepRecord(
             start_tick=self._asleep_since,
             end_tick=self._model.tick,
@@ -928,6 +1003,37 @@ class JevAgent:
         self.planner.day_log.add(self._model.tick, KIND_EVENT, record.to_text())
         self.planner.note_life_event(LIFE_WOKE)
         self._release_wake_waiters(record.to_text())
+
+    def _drain_for_sleep(self, digest: TickDigest) -> None:
+        """Finish everything holding the body, because it has fallen asleep.
+
+        A sleeper submits nothing, so a stint, a reflex stint or a conversation
+        seat that outlived the sleep would hold the planner's tool call - and
+        with it the turn `end_turn_now` has just ended - for the whole night.
+        Each one is therefore finished here and reported as usual. The world
+        chooses this sleep on a new-moon night (docs/14 section 1) and the
+        settler chooses it otherwise; the end reason says which.
+        """
+        if self._drained_this_sleep:
+            return
+        self._drained_this_sleep = True
+        reason = END_NEW_MOON if self._model.clock.new_moon_tonight else END_ASLEEP
+        # The action that put the body to sleep is this tick's own action, so
+        # it is answered before the rest of the queue is refused.
+        self._resolve_awaiting_direct(digest)
+        self._refuse_direct_requests(ASLEEP_REJECTION)
+        reflex_stint = self._reflex_stint
+        if reflex_stint is not None:
+            reflex_stint.finish(reason)
+            self._finish_reflex()
+        stint = self._active_stint
+        if stint is not None:
+            stint.finish(reason)
+            self._finish_stint()
+        session = self._conversation
+        if session is not None:
+            session.finish(sleep_end_reason(self._model))
+            self._finish_conversation()
 
     def _release_wake_waiters(self, text: str) -> None:
         """Answer every parked `sleep` tool with this sleep (or with nothing)."""
@@ -1107,6 +1213,7 @@ class JevAgent:
             conversation_id=session.conversation_id,
             reason=session.end_reason,
         )
+        self._closing_conversations += 1
         self._spawn(self._report_conversation(session))
 
     async def _report_conversation(self, session: ConversationSession) -> None:
@@ -1117,7 +1224,12 @@ class JevAgent:
         started by hailing this actor - has no such owner, so the report is
         queued as a note like a reflex line.
         """
-        report = await session.write_report()
+        try:
+            report = await session.write_report()
+        finally:
+            # Counted down whatever happened, so a failed closing call cannot
+            # leave the settler looking busy forever (docs/14 section 2).
+            self._closing_conversations -= 1
         text = report.to_text()
         delivered = self._held_stint is not None
         self._release_held_stint(text)
@@ -1233,6 +1345,171 @@ class JevAgent:
         if held is not None and not held.request.future.done():
             held.request.future.set_result(held.report)
 
+    # -- saving and resuming (docs/14) --------------------------------------
+
+    def drained(self) -> DrainState:
+        """Whether a snapshot of this settler would be a whole truth.
+
+        Drained means the body is asleep or dead, nothing holds it (no stint,
+        reflex stint or conversation), no model call is in flight behind the
+        agent's back, the planner has parked itself on `await_active`, and no
+        queue holds a request.
+
+        A `sleep` tool parked on `await_wake` is deliberately not counted: it
+        is what a settler that chose to sleep looks like all night, and the
+        snapshot carries no futures, so a resumed settler simply takes a fresh
+        turn when it wakes.
+        """
+        info = self._model.self_info
+        if info.alive and not info.asleep:
+            return DrainState.busy("the body is awake")
+        if self._reflex_stint is not None:
+            return DrainState.busy("a reflex stint is running")
+        if self._active_stint is not None:
+            return DrainState.busy("a stint is running")
+        if self._held_stint is not None:
+            return DrainState.busy("a stint report is held back")
+        if not self._stint_requests.empty():
+            return DrainState.busy("a stint is queued")
+        if self._conversation is not None:
+            return DrainState.busy("a conversation seat is held")
+        if self._closing_conversations:
+            return DrainState.busy("a conversation closing note is in flight")
+        journal = self._journal_task
+        if journal is not None and not journal.done():
+            return DrainState.busy("the journal rewrite is in flight")
+        if self._awaiting_direct is not None or not self._direct_requests.empty():
+            return DrainState.busy("a single-tick action is in flight")
+        if self._conversation_waiters:
+            return DrainState.busy("a tool is waiting for a conversation")
+        if not self._active_waiters:
+            return DrainState.busy("the planner turn has not ended yet")
+        return DRAINED
+
+    def sleep_snapshot(self) -> SleepSnapshot:
+        """The tick loop's sleep bookkeeping, for a snapshot."""
+        last = self._last_sleep
+        return SleepSnapshot(
+            asleep_since=self._asleep_since,
+            fatigue_before=self._sleep_fatigue_before,
+            where=self._sleep_place,
+            last_sleep_recorded=last is not None,
+            last_start_tick=0 if last is None else last.start_tick,
+            last_end_tick=0 if last is None else last.end_tick,
+            last_reason="" if last is None else last.reason,
+            last_fatigue_before=0 if last is None else last.fatigue_before,
+            last_fatigue_after=0 if last is None else last.fatigue_after,
+            last_where=GROUND_SLEEP_PLACE if last is None else last.where,
+            last_food_after=0 if last is None else last.food_after,
+        )
+
+    def load_snapshot(self, snapshot: AgentSnapshot) -> None:
+        """Put a snapshot's state into this agent, before it connects.
+
+        Called once, on a process started with `--resume-from`; the world then
+        re-delivers the snapshot's own tick, which `WorldModel.update` folds as
+        a refresh rather than as a second tick.
+        """
+        self._model = WorldModel.from_payload(snapshot.world_model)
+        self.planner.load_payload(snapshot.planner)
+        self.ledger.load_payload(snapshot.cost_ledger)
+        self._reflex_watch.load_payload(snapshot.reflex_watch)
+        sleep = snapshot.sleep
+        self._asleep_since = sleep.asleep_since
+        self._sleep_fatigue_before = sleep.fatigue_before
+        self._sleep_place = sleep.where
+        self._last_sleep = (
+            SleepRecord(
+                start_tick=sleep.last_start_tick,
+                end_tick=sleep.last_end_tick,
+                reason=sleep.last_reason,
+                fatigue_before=sleep.last_fatigue_before,
+                fatigue_after=sleep.last_fatigue_after,
+                where=sleep.last_where,
+                food_after=sleep.last_food_after,
+            )
+            if sleep.last_sleep_recorded
+            else None
+        )
+        self._notes_for_tools = list(snapshot.notes_for_tools)
+        self._notes_for_prompt = list(snapshot.notes_for_prompt)
+        # The sleep it was saved in has already been drained through; doing it
+        # again would refuse requests nobody made and end nothing.
+        self._drained_this_sleep = self._asleep_since >= 0
+        logger.info(
+            "snapshot_restored",
+            entity_id=self.entity_id,
+            tick=snapshot.tick,
+            turn=self.planner.turn,
+        )
+
+    def save_directory(self, tick: int) -> Path:
+        """`<run dir>/saves/tick-<T>`, the directory the world made for the save."""
+        run_dir = os.environ.get(RUN_DIR_ENV, "")
+        root = Path(run_dir) if run_dir else self.log_root.parent
+        return root / SAVES_DIR_NAME / f"tick-{tick}"
+
+    async def _maybe_save(self, tick: int) -> None:
+        """Write this settler's snapshot for the save the world is waiting on.
+
+        The world has paused and is waiting for one file per settler, so
+        blocking the tick loop here costs nothing; the lease renewal is its own
+        task and keeps running. A settler that has not drained inside the wait
+        writes nothing at all rather than a partial truth, and says why.
+        """
+        deadline = time.monotonic() + save_wait_seconds()
+        state = self.drained()
+        while not state.drained and time.monotonic() < deadline:
+            await asyncio.sleep(SAVE_POLL_SECONDS)
+            state = self.drained()
+        if not state.drained:
+            logger.error(
+                "save_skipped_not_drained",
+                entity_id=self.entity_id,
+                tick=tick,
+                reason=state.reason,
+            )
+            self.trace.planner.write(
+                {
+                    "event": "save_skipped",
+                    "entity_id": self.entity_id,
+                    "tick": tick,
+                    "reason": state.reason,
+                }
+            )
+            return
+        path = snapshot_path(self.save_directory(tick), self.entity_id)
+        try:
+            write_snapshot(path, capture(self))
+        except OSError as error:
+            logger.error(
+                "save_write_failed",
+                entity_id=self.entity_id,
+                tick=tick,
+                path=str(path),
+                error=str(error),
+            )
+            self.trace.planner.write(
+                {
+                    "event": "save_failed",
+                    "entity_id": self.entity_id,
+                    "tick": tick,
+                    "path": str(path),
+                    "error": str(error),
+                }
+            )
+            return
+        logger.info("save_written", entity_id=self.entity_id, tick=tick, path=str(path))
+        self.trace.planner.write(
+            {
+                "event": "save_written",
+                "entity_id": self.entity_id,
+                "tick": tick,
+                "path": str(path),
+                "bytes": path.stat().st_size,
+            }
+        )
+
     # -- status -------------------------------------------------------------
 
     async def _report_status(self) -> None:
@@ -1265,6 +1542,27 @@ class JevAgent:
             logger.debug("status_report_failed", details=error.details())
 
 
+def save_wait_seconds() -> float:
+    """How long to wait for the settler to drain, from the environment.
+
+    `BOBGAME_SAVE_WAIT_SECONDS` is what the world was configured with, minus
+    its own margin; a value that is not a positive number is ignored and said
+    so, rather than silently turning the wait off.
+    """
+    raw = os.environ.get(SAVE_WAIT_ENV, "")
+    if not raw:
+        return DEFAULT_SAVE_WAIT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        logger.warning("save_wait_not_a_number", value=raw)
+        return DEFAULT_SAVE_WAIT_SECONDS
+    if seconds <= 0:
+        logger.warning("save_wait_not_positive", value=raw)
+        return DEFAULT_SAVE_WAIT_SECONDS
+    return seconds
+
+
 def _drain(queue: "asyncio.Queue[_T]") -> list[_T]:
     items: list[_T] = []
     while not queue.empty():
@@ -1281,10 +1579,15 @@ async def run_agent(
     jev_model: str = "",
     journal_model: str = "",
     settler_count: int = DEFAULT_SETTLER_COUNT,
+    resume_from: Path | None = None,
 ) -> None:
-    """Build every piece and run one actor until it is interrupted."""
-    import os
+    """Build every piece and run one actor until it is interrupted.
 
+    `resume_from` is a save directory (`runs/<run>/saves/tick-<T>`): the agent
+    is built as usual, restored from that save, and only then connected, so
+    the re-delivered observation for tick `T` lands on a model that has
+    already seen it (docs/14 section 4).
+    """
     world = WorldClient(server_address, entity_id)
     jev = TypeSafeJevClient(jev_model or os.environ.get("JEV_MODEL", "jev-latest"))
     agent = JevAgent(
@@ -1296,6 +1599,8 @@ async def run_agent(
         journal_model=journal_model,
         settler_count=settler_count,
     )
+    if resume_from is not None:
+        restore(agent, read_snapshot(snapshot_path(resume_from, entity_id), entity_id))
     try:
         await agent.run()
     finally:

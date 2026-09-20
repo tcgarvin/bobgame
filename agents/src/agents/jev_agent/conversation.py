@@ -79,6 +79,22 @@ END_LEFT = "left"
 END_REMOVED = "removed"
 END_DIED = "died"
 END_NOBODY_JOINED = "nobody joined"
+# The actor fell asleep with a seat: the body is gone from the conversation
+# until it wakes, so the session ends here. On a new-moon night the world puts
+# everyone to sleep and closes every conversation on the same tick
+# (docs/14 section 1), which is the reason the planner is given.
+END_ASLEEP = "asleep"
+END_NEW_MOON = "new_moon"
+
+# What each of those two reasons means, added to the report so the planner is
+# told the physics rather than left with a word.
+SLEEP_END_TEXT: Mapping[str, str] = {
+    END_ASLEEP: "You fell asleep, so your seat ended.",
+    END_NEW_MOON: (
+        "The new moon put everyone to sleep and closed every conversation on "
+        "the island on the same tick."
+    ),
+}
 
 # How the actor came to hold its seat, as the `conversation_start` trace says
 # it. The hailed settler's `via`; the hailer's is `hail`, the world's own word.
@@ -342,6 +358,15 @@ class ModelConverser:
         )
 
 
+def sleep_end_reason(model: WorldModel) -> str:
+    """Why a seat ended when the body fell asleep holding it.
+
+    The world closes every conversation on the tick a new moon puts everyone
+    to sleep, so that night has its own reason (docs/14 section 1).
+    """
+    return END_NEW_MOON if model.clock.new_moon_tonight else END_ASLEEP
+
+
 @dataclass
 class ConversationReport:
     """What the planner reads once the conversation has ended."""
@@ -370,6 +395,11 @@ class ConversationReport:
             f"  ticks: {self.start_tick}-{self.end_tick}",
             f"  participants: {', '.join(self.participants) or 'nobody else'}",
             f"  ended because: {self.end_reason}",
+        ]
+        explanation = SLEEP_END_TEXT.get(self.end_reason, "")
+        if explanation:
+            lines.append(f"  {explanation}")
+        lines += [
             f"  you said you would: {self.commitment or '(none)'}",
             f"  agreed or learned: {self.agreed or '(none)'}",
         ]
@@ -853,6 +883,8 @@ class ConversationSession:
     def _end_reason(self, conversation: ConversationInfo | None) -> str:
         if not self.model.self_info.alive:
             return END_DIED
+        if self.model.self_info.asleep:
+            return sleep_end_reason(self.model)
         if conversation is None:
             if not self._seen_object:
                 if self.model.tick - self.start_tick < OBJECT_GRACE_TICKS:

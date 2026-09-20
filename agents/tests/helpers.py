@@ -120,15 +120,28 @@ def make_observation(
 
 
 def make_clock(
-    tick: int, day_length: int = 300, night_start: int = 200
+    tick: int,
+    day_length: int = 300,
+    night_start: int = 200,
+    *,
+    new_moon_tonight: bool = False,
+    next_new_moon_day: int = -1,
+    save_tick: int = 0,
 ) -> pb.WorldClock:
-    """The world clock for `tick`, with the settlement day length."""
+    """The world clock for `tick`, with the settlement day length.
+
+    `next_new_moon_day` is -1 by default, the world's value for "this world has
+    no new moon" (docs/14 section 1).
+    """
     tick_of_day = tick % day_length
     return pb.WorldClock(
         day=tick // day_length,
         tick_of_day=tick_of_day,
         day_length=day_length,
         night=tick_of_day >= night_start,
+        new_moon_tonight=new_moon_tonight,
+        next_new_moon_day=next_new_moon_day,
+        save_tick=save_tick,
     )
 
 

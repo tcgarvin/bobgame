@@ -95,8 +95,9 @@ the still window.
 5. The world resumes tick `T` normally.
 
 On timeout the save is abandoned: the world logs `save_abandoned` at error
-level naming the entities that did not report, removes the partial directory
-and carries on. A run is never blocked by a save.
+level naming the entities that did not report, renames the directory to
+`tick-<T>.abandoned` (whatever the agents did write is kept, for working out
+who was late) and carries on. A run is never blocked by a save.
 
 ### World snapshot contents
 
@@ -158,3 +159,180 @@ truth.
   sleep path.
 - Tools: `analyze_run.py` and the replay server read a run whose first tick is
   not 0 and show its parent.
+
+## 6. Implementation notes (world)
+
+Where the contract lives in code, and the few places the implementation had to
+decide something the contract left open.
+
+### Modules
+
+- `world/src/world/moon.py` - the physics. Pure helpers (`is_new_moon_day`,
+  `next_new_moon_day`, `in_still_window`, `save_tick_of_day`) plus the
+  world-level predicates `is_forced_sleep_tick`, `is_still` and
+  `wolves_lie_low`, and `apply_new_moon`, which does the forced sleep and
+  closes every conversation. `tick.py` calls it once, right after the ordinary
+  sleep phase; `sleep.py`, `stats.py` and `wolves.py` each consult one
+  predicate.
+- `world/src/world/snapshot.py` - writing, guarding and loading a save.
+- `world/src/world/save_coordinator.py` - `SaveSettings` (everything a save
+  needs that the world does not carry) and `SaveCoordinator`, which decides
+  when a save is due, waits for the settlers and writes the world's half. The
+  tick loop holds one and calls two methods, so the pause is testable on its
+  own with a tmp_path and a fake agent.
+- `World.new_moon_every_days` carries the setting, so `World.clock` can fill
+  `new_moon_tonight` and `next_new_moon_day` without a lookup into config.
+
+### Decisions
+
+- **`next_new_moon_day` is today when today is a new moon.** It is the first
+  day at or after the current one with a new-moon night, so a settler reading
+  the clock on the day never sees a date in the past.
+- **Wolves still despawn during the quiet night.** Lying low means no spawn
+  and no intent; a wolf that has wandered 50 tiles away is still culled, which
+  consumes no randomness and keeps the entity list honest.
+- **The intent window is restarted after the pause.** The tick's deadline was
+  set when the tick began, and a save takes as long as the settlers need.
+  After the save the deadline is pushed out by one `intent_deadline_ms`, so
+  tick `T` runs normally rather than rejecting every intent as late.
+- **The save directory is `tick-<T>` from the start**, not `tick-<T>.partial`:
+  the agents write into it before the world writes anything. Atomicity is per
+  file (`world.json.partial` and `objects.jsonl.gz.partial`, each renamed) plus
+  `complete.json` last.
+- **An abandoned save is renamed, not deleted** (see section 3).
+- **`ObservationService._last_result` starts empty on a resume.** The first
+  observation at `T` therefore replays no events from tick `T-1`. That tick's
+  events were already delivered in the run being resumed, and the agent folds
+  the repeated observation as a refresh, so nothing is lost.
+- **The wolf RNG state is JSON as `[version, [ints...], gauss|null]`** and is
+  restored through `random.Random.setstate`. `WolfSimulator` grew
+  `rng_state`/`restore_rng_state` and `id_counter`/`set_id_counter` so nothing
+  outside reaches into its privates; `World` grew `object_id_seq`/
+  `set_object_id_seq` and `add_entity_unplaced` (a dead settler holds no tile,
+  and two of them may share the coordinates they died on).
+
+### The interface the agents use
+
+- Each agent learns the run directory from `$BOBGAME_RUN_DIR`, as it always
+  has, and the save tick from `WorldClock.save_tick` on the observation.
+- It writes `"$BOBGAME_RUN_DIR"/saves/tick-<save_tick>/agents/<entity_id>.json.gz`.
+  The directory (including `agents/`) exists before observation `T` is pushed.
+- On a resume, `runner` appends `--resume-from <save dir>` to every agent
+  command. `<save dir>` is an absolute path to the **parent** run's
+  `saves/tick-<T>`; each agent reads its own `agents/<entity_id>.json.gz` from
+  it. `dev.sh --resume` copies the parent's `memory.md` and `reflex.json` into
+  the new run directory first, so the journal is where the agent expects it.
+  The runner also accepts `$BOBGAME_RESUME_FROM`, which is what `dev.sh` sets.
+
+## 7. Implementation notes (agents)
+
+### Modules
+
+- `agents/.../worldmodel.py` — `WorldClock` parses `new_moon_tonight`,
+  `next_new_moon_day` and `save_tick`, and `moon_text()` renders the one line
+  every surface shows. `WorldModel.to_payload()/from_payload()` serialise
+  everything the model remembers; the derived position indexes are rebuilt on
+  load and `last_digest` is not carried. `update()` folds an observation for
+  the tick it has already seen as a **refresh**: tiles, objects, entities,
+  self and clock are taken, the events are not, and the digest comes back
+  empty with `repeated=True`.
+- `agents/.../snapshot.py` (new) — the versioned pydantic `AgentSnapshot`,
+  `capture`, `restore`, `write_snapshot` (gzip JSON via `.partial` + rename),
+  `read_snapshot` (explicit `SnapshotError` on a bad version, a bad file or
+  another settler) and `snapshot_path`. Every component serialises itself
+  (`WorldModel`, `Planner`, `CostLedger`, `ReflexWatch`, `DayLog` all gained
+  `to_payload`/`from_payload`|`load_payload`); this module only assembles.
+- `agents/.../agent.py` — `JevAgent.drained() -> DrainState`, the forced-sleep
+  drain, `load_snapshot`, `save_directory` and `_maybe_save`, plus the
+  `--resume-from` path through `run_agent`.
+- `agents/.../items.py` — `NEW_MOON_STILL_TICKS` (6) and
+  `night_start_tick(day_length)`. The **period** is deliberately not mirrored:
+  it is world config and reaches the settlers only through the clock.
+
+### What the settlers are told
+
+The planner's narrative states the rule in the sleep section, in terms of "the
+night of a new moon" with the tick of day, the still window, the conversation
+close and the wolves; the concrete day comes from the clock. `turn_clock_line`
+(every tool result) and `describe_world` (the turn prompt) append
+`; new moon tonight (everyone falls asleep at tick-of-day 200)` or
+`; next new moon: night of day D`, and nothing at all when
+`next_new_moon_day` is -1. Jev's `facts` carry the line only on the day
+itself. The journal writer's `rewrite` gained a `clock_fact` argument, shown
+above "Write your journal now".
+
+### Draining, and one bug it found
+
+Falling asleep now ends everything that holds the body, whatever caused the
+sleep (`JevAgent._drain_for_sleep`, run once per sleep): the in-flight
+single-tick action is resolved from the world's own event and the rest of the
+queue is refused `failed: asleep`, an active stint and a reflex stint are
+finished (`asleep`, or `new_moon` on a new-moon night, with a factual
+`end_note`), and a conversation seat is closed the same way
+(`conversation.END_ASLEEP` / `END_NEW_MOON`, each with a sentence of physics in
+the report). It happens before `end_turn_now` and the journal rewrite, so a
+conversation's closing note still reaches the day it belongs to.
+
+**This is a behaviour change beyond the new moon, and it fixes a bug.** A stint
+used to be suspended for the whole sleep and resumed on the tick the settler
+woke (`test_a_stint_resumes_on_the_tick_the_settler_wakes`, now rewritten).
+But falling asleep already spends the planner's tool budget so the turn ends —
+and the turn cannot end while `start_stint` is parked on a stint that will not
+report until morning. A collapse therefore stranded the planner for the whole
+night, and the brief it resumed was written for yesterday, before the journal
+rewrite and the history reset. Ending the stint is both what `drained` needs
+and what the sleep contract in docs/12 always implied.
+
+### Two deviations from section 2
+
+- A `sleep` tool parked on `await_wake` does **not** stop a settler being
+  drained, although section 2 says no waiter queue may hold an entry. It is
+  what a settler that chose to sleep looks like all night, so the rule as
+  written would abandon the save for anyone who went to bed early. The
+  snapshot carries no futures: a resumed settler simply takes a fresh
+  journal-fed turn when it wakes, one reflection short of what the
+  uninterrupted run would have written.
+- "the history reset pending" is not checked, because it is never pending
+  while asleep: the reset reason is set at the *wake*. The snapshot stores no
+  message history at all, which is the same state by another route.
+
+Everything else is checked exactly: body asleep or dead, no stint (active,
+held or queued), no conversation seat, no closing converser call, no journal
+rewrite, no single-tick action, no conversation waiter, and the planner parked
+on `await_active`.
+
+### The save and the resume
+
+On the tick whose clock carries `save_tick == tick`, `_maybe_save` polls
+`drained()` every 100 ms up to `BOBGAME_SAVE_WAIT_SECONDS` (default 170 s,
+under the world's 180 s) and then writes
+`$BOBGAME_RUN_DIR/saves/tick-<T>/agents/<entity_id>.json.gz`. Blocking the
+tick loop there is safe: the world is paused, and lease renewal is its own
+task. A settler that has not drained writes nothing and says why, at error
+level and as a `save_skipped` line in `planner.jsonl.gz`; a written save is a
+`save_written` line carrying the path and the byte count.
+
+`python -m agents.jev_agent --resume-from <save dir>` builds the agent as
+usual, restores it, and only then connects, so the re-delivered observation
+for tick `T` lands on a model that has already seen it. `_handle_tick` skips
+the life and sleep transitions for a repeated tick, so nothing is traced,
+logged or day-logged twice. The cost ledger and the turn counter continue; the
+trace files are fresh files in the new run directory.
+
+### Size
+
+Tiles are the bulk of a settled model, so they are stored as parallel arrays
+with the floor types interned and the two booleans packed into one integer.
+Measured (`test_a_hundred_thousand_tiles_fit_in_a_small_file`): **102,400 tiles
+cost 180 KB gzipped** (1.9 MB before compression); the test asserts under 3 MB.
+
+### Tests
+
+`agents/tests/test_new_moon_and_saves.py` (31 tests): the clock's wording, the
+tool-result line, Jev's facts on the day only, the narrative's rule; forced
+sleep mid-stint, mid-turn, mid-conversation and mid-reflex; the drained
+predicate and its reasons; `WorldModel` round-trip equality and rebuilt
+indexes; every scalar through a written and re-read file; the size bound; a
+repeated observation; version and entity-id mismatches; a resumed settler
+waking into a journal-fed turn; the save written where the world waits; and a
+settler that is not drained writing nothing.

@@ -133,6 +133,32 @@ class CostLedger:
         """Everything spent so far."""
         return self.planner_usd + self.converser_usd + self.journal_usd + self.jev_usd
 
+    def to_payload(self) -> dict[str, Any]:
+        """The ledger as JSON-safe data, for an agent snapshot (docs/14).
+
+        Unrounded, unlike `as_json`: a resumed run keeps counting from exactly
+        where it left off.
+        """
+        return {
+            "planner_usd": self.planner_usd,
+            "converser_usd": self.converser_usd,
+            "journal_usd": self.journal_usd,
+            "jev_usd": self.jev_usd,
+            "planner_turns": self.planner_turns,
+            "journal_rewrites": self.journal_rewrites,
+            "jev_calls": self.jev_calls,
+        }
+
+    def load_payload(self, payload: Mapping[str, Any]) -> None:
+        """Continue from the totals `to_payload` recorded."""
+        self.planner_usd = float(payload["planner_usd"])
+        self.converser_usd = float(payload["converser_usd"])
+        self.journal_usd = float(payload["journal_usd"])
+        self.jev_usd = float(payload["jev_usd"])
+        self.planner_turns = int(payload["planner_turns"])
+        self.journal_rewrites = int(payload["journal_rewrites"])
+        self.jev_calls = int(payload["jev_calls"])
+
     def as_json(self) -> str:
         """The ledger as the JSON the status report carries."""
         return json.dumps(

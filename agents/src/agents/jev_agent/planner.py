@@ -223,6 +223,15 @@ The day and sleep:
   food falls to {items.HUNGRY_WAKE_FOOD}, when the bed under you is removed, or on `wake`. It is
   the same number both ways: you cannot lie down that hungry, and if you get
   that hungry while asleep you are woken.
+- On the night of a new moon, at tick-of-day {items.night_start_tick()}, every one of you falls
+  asleep where you stand: in a free bed you are standing next to if there is
+  one, otherwise on the ground. It is not a collapse, and the usual refusals
+  (fatigue, food) do not apply. Every open conversation closes on that tick.
+  For the next {items.NEW_MOON_STILL_TICKS} ticks nothing wakes a sleeper - not damage, not hunger,
+  not losing the bed - and `wake` is refused; after that the ordinary wake
+  rules apply again. Wolves do not hunt from that tick until dawn, and none
+  arrive. Every tool result says whether tonight is a new moon, and otherwise
+  which day the next one falls on.
 
 Wolves and fighting:
 - Wolves roam the island and keep coming for the whole game, a few at a time.
@@ -579,12 +588,14 @@ def turn_clock_line(model: WorldModel, turn_start_tick: int) -> str:
     """
     elapsed = max(0, model.tick - turn_start_tick)
     info = model.self_info
+    moon = model.clock.moon_text()
     return (
         f"[tick {model.tick} · {model.clock.as_text()}; "
         f"this turn has cost {elapsed} ticks so far; "
         f"food {info.food}/{info.max_food}, "
         f"health {info.health}/{info.max_health}, "
-        f"fatigue {info.fatigue}/{info.max_fatigue}]"
+        f"fatigue {info.fatigue}/{info.max_fatigue}"
+        f"{'; ' + moon if moon else ''}]"
     )
 
 
@@ -1248,8 +1259,10 @@ def describe_world(model: WorldModel) -> str:
         ", ".join(f"{kind} x{count}" for kind, count in sorted(info.inventory.items()))
         or "empty"
     )
+    moon = model.clock.moon_text()
     lines = [
-        f"tick {model.tick} · {model.clock.as_text()}, you are "
+        f"tick {model.tick} · {model.clock.as_text()}"
+        f"{'; ' + moon if moon else ''}, you are "
         f"{model.entity_id} at {info.position}",
         f"health {info.health}/{info.max_health}, food {info.food}/{info.max_food}"
         f", fatigue {info.fatigue}/{info.max_fatigue} ({info.fatigue_word})"
@@ -2775,6 +2788,9 @@ class Planner:
         # since the current turn started; both drop the history at turn end.
         self._history_reset_reason = ""
         self.reports: list[StintReport] = []
+        # The last report's rendered text when it came from a snapshot rather
+        # than from a stint this process ran (docs/14 section 4).
+        self._restored_report_text = ""
         self.last_thought = ""
         # The journal as the last prompt saw it, traced with `turn_start`.
         self.journal_sections: dict[str, str] = {}
@@ -2786,6 +2802,45 @@ class Planner:
         """Remember a finished stint so the next turn's prompt can mention it."""
         self.reports.append(report)
         del self.reports[:-STINT_REPORTS_KEPT]
+        self._restored_report_text = ""
+
+    def last_report_text(self) -> str:
+        """The most recent stint report as the prompt shows it, or `""`.
+
+        After a resume there is no `StintReport` object to render, only the
+        text the snapshot carried, so both sources answer here.
+        """
+        if self.reports:
+            return self.reports[-1].to_text()
+        return self._restored_report_text
+
+    def to_payload(self) -> dict[str, Any]:
+        """What a resumed planner needs to carry on (docs/14 section 3).
+
+        No message history: a drained planner's turn is over, and the next turn
+        after a wake starts from the journal with the history dropped anyway.
+        """
+        return {
+            "turn": self.turn,
+            "last_thought": self.last_thought,
+            "last_report_text": self.last_report_text(),
+            "journal_sections": dict(self.journal_sections),
+            "history_reset_reason": self._history_reset_reason,
+            "day_log": self.day_log.to_payload(),
+        }
+
+    def load_payload(self, payload: Mapping[str, Any]) -> None:
+        """Continue from what `to_payload` recorded."""
+        self.turn = int(payload["turn"])
+        self.last_thought = str(payload["last_thought"])
+        self.reports = []
+        self._restored_report_text = str(payload["last_report_text"])
+        self.journal_sections = {
+            str(name): str(body) for name, body in payload["journal_sections"].items()
+        }
+        self._history_reset_reason = str(payload["history_reset_reason"])
+        self.day_log.load_payload(payload["day_log"])
+        self.history = []
 
     async def build_prompt(self) -> str:
         """The user message for the next planner turn.
@@ -2804,8 +2859,9 @@ class Planner:
         # them rather than on a `look` the model has to read first.
         parts.extend(body_alerts(model))
         parts.append(describe_world(model))
-        if self.reports:
-            parts.append("Most recent stint:\n" + self.reports[-1].to_text())
+        last_report = self.last_report_text()
+        if last_report:
+            parts.append("Most recent stint:\n" + last_report)
         parts.extend(self.bridge.drain_notes(for_prompt=True))
         parts.append(self.bridge.reflex.prompt_line())
         # Read once: the prompt gets the rendered journal, the trace its

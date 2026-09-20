@@ -95,6 +95,22 @@ END_TICKS = "ticks_exhausted"
 END_DEATH = "death"
 END_REPEATED_FAILURE = "repeated_failure"
 END_CANCELLED = "cancelled"
+# The body fell asleep, so nothing the stint asks for can reach the world. A
+# new-moon night is the case where the world chose it rather than the settler
+# (docs/14 section 1).
+END_ASLEEP = "asleep"
+END_NEW_MOON = "new_moon"
+SLEEP_END_EXPLANATIONS: Mapping[str, str] = {
+    END_ASLEEP: (
+        "The body fell asleep at tick {tick}, so this stint ended there; a "
+        "sleeper submits nothing."
+    ),
+    END_NEW_MOON: (
+        "The new moon put everyone on the island to sleep at tick {tick}, so "
+        "this stint ended there; a sleeper submits nothing."
+    ),
+}
+
 # A reflex stint pre-empted this one (docs/09 section 4.2).
 END_PREEMPTED_BY_REFLEX = "reflex"
 # The actor took a seat in a conversation, which owns the body from now on.
@@ -878,6 +894,9 @@ class Stint:
             return
         self.finished = True
         self.end_reason = reason
+        explanation = SLEEP_END_EXPLANATIONS.get(reason, "")
+        if explanation:
+            self._end_note = explanation.format(tick=self.model.tick)
         self._flush_finished_record()
         logger.info(
             "stint_finished",
