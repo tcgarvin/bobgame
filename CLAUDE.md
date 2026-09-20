@@ -85,6 +85,16 @@ optional one) shown only to the settler that started the conversation; the
 closing note is now two fields (what was agreed/learned, what this settler
 said it would do), both reaching the journal and the planner's report.
 Contract: docs/09 section 11.
+**Hamlet scenario (2026-09-20)**: `hamlet` is a smaller settlement variant —
+six settlers (ada, bram, cleo, dov, esme, finn) and a single wolf that arrives
+30 to 45 tiles out instead of three at 20 to 40. The wolf tunables are world
+config now (`max_wolves`, `wolf_spawn_min_distance`, `wolf_spawn_max_distance`,
+validated at load and defaulting to the settlement values), and the settler
+count reaches the prompts through `python -m agents.jev_agent --settlers N`,
+which `runner/configs/hamlet.toml` passes. The planner's goal paragraph now
+names the shelter: a settlement that lasts, where every one of you has a
+shelter of your own to sleep in, and where food, safety and rest are things you
+can count on tomorrow. `settlement` and `settlement_peaceful` are unchanged.
 **In progress**: milestone 7, run recording & replay — every run is recorded to `runs/<run_id>/` as gzip JSONL (not Parquet) and a replay server serves it to the viewer with seeking, playback and deep links. Contract: [docs/07_replay.md](docs/07_replay.md).
 **Not done**: milestone 8 (LLM agents) is superseded by `agents.jev_agent`.
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)
@@ -114,6 +124,7 @@ bobgame/
 ```bash
 ./dev.sh settlement   # 12 planner+Jev settlers on the island, wolves on (needs .env keys)
 ./dev.sh settlement_peaceful   # same, wolves off: watch them build undisturbed
+./dev.sh hamlet       # 6 settlers, one wolf that spawns further out
 ./dev.sh              # Uses 'island' config (4000x4000 procedural island, generated on first run)
 ./dev.sh foraging     # 10x10 world, alice + bob competing for berries
 ./dev.sh default      # Minimal config (single entity, no objects)
@@ -172,6 +183,7 @@ cd viewer && npm run dev
 
 **Configs** are in `world/configs/`:
 - `settlement.toml` - loads the island, spawns 12 settlers at a resource-rich site, wolves on, 2 s ticks
+- `hamlet.toml` - the same island and site with 6 settlers and one wolf spawning 30-45 tiles out
 - `island.toml` - 4000x4000 procedural island, saved to `saves/island.npz` after first generation
 - `island_small.toml` - 500x500 island for quick testing
 - `foraging.toml` - 10x10 world with alice (2,2), bob (8,8), and 3 bushes

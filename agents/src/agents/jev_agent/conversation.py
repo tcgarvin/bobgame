@@ -123,10 +123,15 @@ NO_MOVE_ACTION = ""
 _GAVE_PATTERN = re.compile(r"^gave (?P<amount>\d+) (?P<kind>\S+) to (?P<target>\S+)$")
 
 
-CONVERSER_NARRATIVE = f"""\
-You are one of twelve people who woke up together on a large, wild island with
+def converser_narrative(
+    settler_count: int = items.DEFAULT_SETTLER_COUNT,
+) -> str:
+    """The converser's system prompt for a scenario with this many settlers."""
+    return f"""\
+You are one of {items.settler_count_word(settler_count)} people who woke up together on a large, wild island with
 nothing but your hands. The others are real agents like you. Together, build a
-civilization. You are in a
+civilization that lasts: a shelter of your own each, and food, safety and rest
+you can count on tomorrow. You are in a
 conversation with some of them right now, and this is your turn to act in it.
 
 How a conversation works:
@@ -156,6 +161,11 @@ How a conversation works:
 Answer with one move: the action, the text if you are speaking, the target,
 item kind and amount if you are giving, and the item kind if you are eating.
 """
+
+
+# The default-sized scenario's prompt, for tests and for anything that reads
+# the narrative without building an agent.
+CONVERSER_NARRATIVE = converser_narrative()
 
 NOTE_INSTRUCTION = (
     "The conversation is over. Answer with two short fields, either of which "
@@ -290,23 +300,30 @@ class ModelConverser:
     neither can touch the world.
     """
 
-    def __init__(self, model_name: str = "", ledger: CostLedger = CostLedger()) -> None:
+    def __init__(
+        self,
+        model_name: str = "",
+        ledger: CostLedger = CostLedger(),
+        settler_count: int = items.DEFAULT_SETTLER_COUNT,
+    ) -> None:
         self.model_name = resolve_model_name(model_name)
         # As in `Planner`: the agent passes its own ledger, the default is a
         # sink for tests.
         self.ledger = ledger
+        self.settler_count = settler_count
+        narrative = converser_narrative(settler_count)
         settings = planner_model_settings(self.model_name)
         self.move_agent: Agent[None, ConverserMove] = Agent(
             self.model_name,
             output_type=ConverserMove,
-            system_prompt=CONVERSER_NARRATIVE,
+            system_prompt=narrative,
             model_settings=settings,
             retries=2,
         )
         self.note_agent: Agent[None, ClosingNote] = Agent(
             self.model_name,
             output_type=ClosingNote,
-            system_prompt=CONVERSER_NARRATIVE,
+            system_prompt=narrative,
             model_settings=settings,
             retries=1,
         )

@@ -189,8 +189,19 @@ set -a; . ../.env; set +a          # TYPESAFE_API_KEY, OPENROUTER_API_KEY
 uv run python -m agents.jev_agent --entity ada --server localhost:50051
 ```
 
-Flags: `--log-root`, `--planner-model`, `--jev-model`, `--log-level`. Logs go to
-stderr; the trace files go under `<log_root>/agent-<id>/`.
+Flags: `--log-root`, `--planner-model`, `--jev-model`, `--journal-model`,
+`--settlers`, `--log-level`. Logs go to stderr; the trace files go under
+`<log_root>/agent-<id>/`.
+
+`--settlers N` (default `items.DEFAULT_SETTLER_COUNT`, 12) is how many settlers
+the scenario started with. It reaches the planner, converser and journal
+prompts, which open with "You are one of <N spelled out> people ..."
+(`settlement_narrative()`, `converser_narrative()`, `journal_narrative()`; the
+module constants `SETTLEMENT_NARRATIVE`, `CONVERSER_NARRATIVE` and
+`JOURNAL_NARRATIVE` are those functions at the default). A runner config passes
+it per scenario: `runner/configs/hamlet.toml` has `args = ["--settlers", "6"]`.
+Nothing else in the agent depends on the count, so it is a prompt fact, not a
+world fact.
 
 ### Trace files and the log root
 
@@ -510,8 +521,10 @@ What Jev may choose (`options.py`):
   `HEARD_SHOUT_MAX_AGE_TICKS` after hearing it, whatever it said.
   `jevstate.py` adds a `threat` block with wolf counts and wolf physics (no
   tactics) whenever a wolf is in view.
-- **Tools, not rules**: the planner prompt (`SETTLEMENT_NARRATIVE`) gives the
-  setting, the goal "build a civilization", the physics with numbers, and how
+- **Tools, not rules**: the planner prompt (`settlement_narrative()`) gives the
+  setting, the goal (a civilization that lasts: a shelter of your own each, and
+  food, safety and rest you can count on tomorrow), the physics with numbers,
+  and how
   to operate Jev. It gives no strategy or etiquette; those are meant to
   emerge. Keep advice out of option descriptions and alerts too. The wolf
   numbers in `items.py` mirror `world/wolves.py` and `world/items.py`.

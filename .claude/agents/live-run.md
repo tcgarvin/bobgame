@@ -1,6 +1,6 @@
 ---
 name: live-run
-description: Runs a live bobgame scenario (world + 12 LLM settlers) detached for a fixed time, watches it, and reports what the settlers did. Use when a change needs checking in the real game rather than in pytest. Tell it the config (settlement or settlement_peaceful), the duration in seconds, and what to look for.
+description: Runs a live bobgame scenario (world + its LLM settlers) detached for a fixed time, watches it, and reports what the settlers did. Use when a change needs checking in the real game rather than in pytest. Tell it the config (settlement, settlement_peaceful or hamlet), the duration in seconds, and what to look for.
 model: haiku
 tools: Bash, Read
 ---
@@ -26,10 +26,11 @@ script starts the run detached, and the run stops itself after `<seconds>`.
 
 ## Inputs you should have been given
 
-- `config`: usually `settlement` (wolves on) or `settlement_peaceful` (wolves
-  off). If none was given, use `settlement_peaceful`.
+- `config`: usually `settlement` (12 settlers, wolves on),
+  `settlement_peaceful` (12 settlers, wolves off) or `hamlet` (6 settlers, one
+  wolf). If none was given, use `settlement_peaceful`.
 - `seconds`: how long to run. If none was given, use 1500 (25 minutes, about
-  700 ticks at 2 s per tick). Never exceed 3600.
+  700 ticks at 2 s per tick). Never exceed 14400.
 - What to look for. If nothing was given, report the standard numbers below.
 
 Each run spends real money on LLM calls. Start exactly one run per request
@@ -46,9 +47,10 @@ unless you were told to do more. Never restart a run that ended normally.
 2. `tools/live_run.sh wait-ticks` (give the Bash call a timeout of 200000 ms).
    It blocks until the world is ticking, at most 3 minutes.
    - `TICKING`: run `tools/live_run.sh status`. Healthy looks like
-     `state: RUNNING`, a `== world: ticks 0..N` line, `agent_processes` of 12
-     or more, and `none` under real errors. Agents may take another 30 seconds
-     to appear; that is fine.
+     `state: RUNNING`, a `== world: ticks 0..N` line, `agent_processes` equal
+     to the config's settler count (12 for `settlement` and
+     `settlement_peaceful`, 6 for `hamlet`), and `none` under real errors.
+     Agents may take another 30 seconds to appear; that is fine.
    - `NO TICKS AFTER 3 MINUTES` or `ENDED BEFORE TICKING`: go to "When
      something is wrong".
 3. Loop until the run ends: run `tools/live_run.sh wait` (it blocks up to 9

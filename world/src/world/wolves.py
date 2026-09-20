@@ -6,6 +6,7 @@ intent per wolf through the same `TickContext` the gRPC agents use.
 """
 
 import random
+from dataclasses import dataclass
 from typing import Mapping
 
 import structlog
@@ -32,6 +33,8 @@ WOLF_TYPE = WOLF_ENTITY_TYPE
 WOLF_MAX_HEALTH = 16
 
 SPAWN_INTERVAL_TICKS = 40
+# Scenario-tunable defaults; a world config may override all three
+# (`max_wolves`, `wolf_spawn_min_distance`, `wolf_spawn_max_distance`).
 MAX_WOLVES = 3
 SPAWN_MIN_DISTANCE = 20
 SPAWN_MAX_DISTANCE = 40
@@ -55,11 +58,26 @@ def is_wolf(entity: Entity) -> bool:
     return entity.entity_type == WOLF_TYPE
 
 
+@dataclass(frozen=True)
+class WolfSettings:
+    """How many wolves a world keeps, and how far out they arrive.
+
+    The defaults are the tuned settlement values; `WorldConfig` builds one of
+    these from `max_wolves`, `wolf_spawn_min_distance` and
+    `wolf_spawn_max_distance` and validates the three together.
+    """
+
+    max_wolves: int = MAX_WOLVES
+    spawn_min_distance: int = SPAWN_MIN_DISTANCE
+    spawn_max_distance: int = SPAWN_MAX_DISTANCE
+
+
 class WolfSimulator:
     """Spawns, despawns and steers wolves with a deterministic seeded RNG."""
 
-    def __init__(self, seed: int = 1337):
+    def __init__(self, seed: int = 1337, settings: WolfSettings = WolfSettings()):
         self.rng = random.Random(seed)
+        self.settings = settings
         self._id_counter = 0
 
     # --- public API -------------------------------------------------------
@@ -132,7 +150,7 @@ class WolfSimulator:
             return
         if not players:
             return
-        if len(self._living_wolves(world)) >= MAX_WOLVES:
+        if len(self._living_wolves(world)) >= self.settings.max_wolves:
             return
 
         position = self._find_spawn_position(world, players)
@@ -162,9 +180,11 @@ class WolfSimulator:
     def _find_spawn_position(
         self, world: World, players: list[Entity]
     ) -> Position | None:
+        minimum = self.settings.spawn_min_distance
+        maximum = self.settings.spawn_max_distance
         for _ in range(SPAWN_ATTEMPTS):
             anchor = self.rng.choice(players).position
-            radius = self.rng.randint(SPAWN_MIN_DISTANCE, SPAWN_MAX_DISTANCE)
+            radius = self.rng.randint(minimum, maximum)
             dx = self.rng.randint(-radius, radius)
             dy = self.rng.randint(-radius, radius)
             # Force the sample onto the ring of the chosen radius.
@@ -181,7 +201,7 @@ class WolfSimulator:
             if nearest is None:
                 continue
             distance = nearest[1]
-            if SPAWN_MIN_DISTANCE <= distance <= SPAWN_MAX_DISTANCE:
+            if minimum <= distance <= maximum:
                 return candidate
         return None
 

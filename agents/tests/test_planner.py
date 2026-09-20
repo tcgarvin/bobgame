@@ -34,6 +34,7 @@ from agents.jev_agent.build import BuildExecutor
 from agents.jev_agent.items import RECIPES
 from agents.jev_agent.planner import (
     SETTLEMENT_NARRATIVE,
+    settlement_narrative,
     Planner,
     _direction_value as direction_value,
     PlannerDeps,
@@ -47,11 +48,14 @@ from agents.jev_agent.planner import (
 )
 from agents.jev_agent.conversation import (
     CONVERSER_NARRATIVE,
+    converser_narrative,
     ApproachDriver,
     ConversationReport,
 )
 from agents.jev_agent.journal import (
     ALL_SECTIONS,
+    JOURNAL_NARRATIVE,
+    journal_narrative,
     SECTION_SCRATCH,
     SECTION_STORY,
     SECTION_TOMORROW,
@@ -1665,8 +1669,41 @@ def test_the_prompt_lists_the_four_channels_with_their_purpose() -> None:
 
 def test_the_prompt_gives_the_settler_a_place_of_its_own_to_find() -> None:
     assert (
-        "Each of you also\nhas to find your place in it: what you do, whom you work "
-        "with, and what you are\nknown for." in SETTLEMENT_NARRATIVE
+        "Each of you also has to find your place in it: what you do, whom you work "
+        "with,\nand what you are known for." in SETTLEMENT_NARRATIVE
+    )
+
+
+def test_the_goal_names_a_shelter_of_your_own_and_a_dependable_tomorrow() -> None:
+    assert (
+        "Together, build a civilization: a settlement that\nlasts, where every one "
+        "of you has a shelter of your own to sleep in, and where\nfood, safety and "
+        "rest are things you can count on tomorrow and not only today."
+        in SETTLEMENT_NARRATIVE
+    )
+
+
+def test_the_settler_count_comes_from_the_scenario() -> None:
+    assert SETTLEMENT_NARRATIVE.startswith("You are one of twelve people")
+    assert settlement_narrative(6).startswith("You are one of six people")
+    assert settlement_narrative(2).startswith("You are one of two people")
+    # Outside the spelled range the digits are used rather than a wrong word.
+    assert settlement_narrative(20).startswith("You are one of 20 people")
+    # Nothing but the count changes.
+    assert settlement_narrative(6).replace("six", "twelve", 1) == (SETTLEMENT_NARRATIVE)
+
+
+def test_the_converser_and_journal_prompts_take_the_same_count() -> None:
+    assert converser_narrative(6).startswith("You are one of six people")
+    assert journal_narrative(6).startswith("You are one of six people")
+    assert CONVERSER_NARRATIVE.startswith("You are one of twelve people")
+    assert JOURNAL_NARRATIVE.startswith("You are one of twelve people")
+
+
+def test_the_converser_prompt_states_the_goal_once_and_briefly() -> None:
+    assert (
+        "Together, build a\ncivilization that lasts: a shelter of your own each, and "
+        "food, safety and rest\nyou can count on tomorrow." in CONVERSER_NARRATIVE
     )
 
 

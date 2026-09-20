@@ -170,6 +170,25 @@ cd ../agents
 uv run python -m agents.random_agent --entity bob
 ```
 
+### Wolf tunables in the world config
+
+`[world]` carries four wolf settings, all validated when the config loads
+(`world/src/world/config.py`):
+
+- `wolves` (bool) - whether the world simulates wolves at all.
+- `max_wolves` (default 3, must be >= 0) - how many live at once.
+- `wolf_spawn_min_distance` (default 20, must be >= 1)
+- `wolf_spawn_max_distance` (default 40, must be > the minimum and below
+  `wolves.DESPAWN_DISTANCE` = 50, or a wolf would be culled on arrival).
+
+The defaults are the `wolves.py` module constants, so a config that says
+nothing behaves exactly as before. `WorldConfig.wolf_settings()` bundles the
+three into a frozen `WolfSettings`, which travels
+`run_server` -> `WorldServer` -> `TickLoop` -> `WolfSimulator`. Nothing reads
+`MAX_WOLVES` / `SPAWN_MIN_DISTANCE` / `SPAWN_MAX_DISTANCE` at spawn time any
+more; the simulator reads `self.settings`. `hamlet.toml` is the first config to
+override them (one wolf, 30-45 tiles).
+
 ## Gotchas & Learnings
 
 ### Observation Timing Model

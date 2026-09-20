@@ -12,6 +12,7 @@ import sys
 import structlog
 
 from .agent import run_agent
+from .items import DEFAULT_SETTLER_COUNT
 from .tracelog import RUN_DIR_ENV, resolve_log_root
 
 
@@ -52,8 +53,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="override JOURNAL_MODEL; defaults to the planner's model",
     )
+    parser.add_argument(
+        "--settlers",
+        type=int,
+        default=DEFAULT_SETTLER_COUNT,
+        help=(
+            "how many settlers the scenario starts with; the prompts say so "
+            f"(default {DEFAULT_SETTLER_COUNT})"
+        ),
+    )
     parser.add_argument("--log-level", default="info", help="debug, info, warning")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.settlers < 1:
+        parser.error(f"--settlers must be at least 1, got {args.settlers}")
+    return args
 
 
 def check_environment() -> None:
@@ -80,6 +93,7 @@ async def _main_async(args: argparse.Namespace) -> None:
             planner_model=args.planner_model,
             jev_model=args.jev_model,
             journal_model=args.journal_model,
+            settler_count=args.settlers,
         )
     )
     for signal_name in (signal.SIGINT, signal.SIGTERM):

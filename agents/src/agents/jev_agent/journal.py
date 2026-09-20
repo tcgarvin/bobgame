@@ -27,6 +27,7 @@ import structlog
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry
 
+from . import items
 from .llm import journal_model_settings, resolve_journal_model_name
 from .pricing import usage_from_messages
 
@@ -370,8 +371,12 @@ def render_day_log(
 # --------------------------------------------------------------------------
 
 
-JOURNAL_NARRATIVE = f"""\
-You are one of twelve people who woke up together on a large, wild island with
+def journal_narrative(
+    settler_count: int = items.DEFAULT_SETTLER_COUNT,
+) -> str:
+    """The journal writer's system prompt for a scenario of this size."""
+    return f"""\
+You are one of {items.settler_count_word(settler_count)} people who woke up together on a large, wild island with
 nothing but your hands. The others are real agents like you; they hear what you
 say and read what you write.
 
@@ -402,6 +407,11 @@ Each section must fit in about {SECTION_TOKEN_LIMIT} tokens; you will be asked t
 runs over. `Today's notes`, the scratch lines at the end of the journal, are
 yours to fold into the sections above: they are cleared once you have written.
 """
+
+
+# The default-sized scenario's prompt, for tests and for anything that reads
+# the narrative without building a writer.
+JOURNAL_NARRATIVE = journal_narrative()
 
 
 class JournalSections(BaseModel):
@@ -485,13 +495,15 @@ class ModelJournalWriter:
         planner_model_name: str = "",
         *,
         token_counter: TokenCounter = count_tokens,
+        settler_count: int = items.DEFAULT_SETTLER_COUNT,
     ) -> None:
         self.model_name = resolve_journal_model_name(model_name, planner_model_name)
         self.count = token_counter
+        self.settler_count = settler_count
         self.agent: Agent[None, JournalSections] = Agent(
             self.model_name,
             output_type=JournalSections,
-            system_prompt=JOURNAL_NARRATIVE,
+            system_prompt=journal_narrative(settler_count),
             model_settings=journal_model_settings(self.model_name),
             retries=1,
         )

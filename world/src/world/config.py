@@ -3,10 +3,17 @@
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from .state import DEFAULT_DAY_LENGTH_TICKS, Entity, WorldObject
 from .types import Position
+from .wolves import (
+    DESPAWN_DISTANCE,
+    MAX_WOLVES,
+    SPAWN_MAX_DISTANCE,
+    SPAWN_MIN_DISTANCE,
+    WolfSettings,
+)
 
 
 VALID_SPAWN_MODES = frozenset({"positions", "settlement"})
@@ -54,8 +61,49 @@ class WorldConfig(BaseModel):
     intent_deadline_ms: int | None = None
     # Whether the world simulates wolves.
     wolves: bool = False
+    # How many wolves live in the world at once.
+    max_wolves: int = MAX_WOLVES
+    # How far from a settler a new wolf appears, in tiles. Both bounds must
+    # stay under the despawn distance, or a wolf would be culled on arrival.
+    wolf_spawn_min_distance: int = SPAWN_MIN_DISTANCE
+    wolf_spawn_max_distance: int = SPAWN_MAX_DISTANCE
     # Ticks in one day/night cycle (docs/10_metal_and_sleep.md).
     day_length_ticks: int = DEFAULT_DAY_LENGTH_TICKS
+
+    @field_validator("max_wolves")
+    @classmethod
+    def _check_max_wolves(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(f"max_wolves must be zero or more, got {value}")
+        return value
+
+    @model_validator(mode="after")
+    def _check_wolf_distances(self) -> "WorldConfig":
+        minimum = self.wolf_spawn_min_distance
+        maximum = self.wolf_spawn_max_distance
+        if minimum < 1:
+            raise ValueError(
+                f"wolf_spawn_min_distance must be at least 1, got {minimum}"
+            )
+        if maximum <= minimum:
+            raise ValueError(
+                "wolf_spawn_max_distance must be greater than "
+                f"wolf_spawn_min_distance, got {maximum} <= {minimum}"
+            )
+        if maximum >= DESPAWN_DISTANCE:
+            raise ValueError(
+                "wolf_spawn_max_distance must be below the despawn distance "
+                f"({DESPAWN_DISTANCE}), got {maximum}"
+            )
+        return self
+
+    def wolf_settings(self) -> WolfSettings:
+        """The wolf tunables as the simulator takes them."""
+        return WolfSettings(
+            max_wolves=self.max_wolves,
+            spawn_min_distance=self.wolf_spawn_min_distance,
+            spawn_max_distance=self.wolf_spawn_max_distance,
+        )
 
     @field_validator("day_length_ticks")
     @classmethod

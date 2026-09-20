@@ -76,7 +76,7 @@ from .types import (
     WithdrawIntent,
     WriteNoteIntent,
 )
-from .wolves import WolfSimulator
+from .wolves import WolfSettings, WolfSimulator
 
 logger = structlog.get_logger()
 
@@ -455,13 +455,14 @@ class TickLoop:
         on_tick_start: TickStartCallback | None = None,
         wolves_enabled: bool = False,
         wolf_seed: int = 1337,
+        wolf_settings: WolfSettings = WolfSettings(),
     ):
         self.world = world
         self.config = config or TickConfig()
         self.on_tick_complete = on_tick_complete
         self.on_tick_start = on_tick_start
         self.wolves_enabled = wolves_enabled
-        self.wolf_simulator = WolfSimulator(seed=wolf_seed)
+        self.wolf_simulator = WolfSimulator(seed=wolf_seed, settings=wolf_settings)
 
         self._running = False
         self._current_context: TickContext | None = None

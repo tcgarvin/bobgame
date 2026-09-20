@@ -436,3 +436,29 @@ fresh, and the heavy files would cost more than they are worth.
   immediately, before the first `replay_status` arrives.
 - Viewer: `tick` is written to the address bar only in replay mode, so
   reloading a live session never turns into a replay by accident.
+
+## `tools/settlement_progress.py`
+
+A second reader over the same recording, aimed at one question: how far has
+the settlement got, and has it plateaued?
+`python tools/settlement_progress.py [run_dir] [--json] [--bucket-ticks N]
+[--viewer-url URL]` defaults to `runs/latest`, reuses `analyze_run.py`'s
+truncation-tolerant `iter_jsonl` and `load_layout` (so it works on a run that
+is still going), and prints four things: a per-bucket timeline (bucket =
+`meta.day_length_ticks`) of cumulative placements by kind alongside per-bucket
+dismantles, crafts, deaths, wolf kills, ticks asleep on a bed vs the ground,
+conversations and mean food/health; what stands at the last recorded tick with
+its bounding box; the enclosed "rooms" the standing walls and doors make, each
+with a deep link; and a headline `rooms: N (with bed: M, distinct owners: K) /
+settlers: S` plus the number of buckets since anything new was built or a new
+tool tier or station first appeared. Room detection floods free tiles
+**4-connected**: the world moves 8-connected but refuses a diagonal step unless
+both orthogonal components are passable (`world/movement.py`), so reachability
+is exactly 4-connected and a corner-touching wall ring still counts as closed.
+A fill that reaches the padded bounding box's edge, or grows past 100 tiles, is
+the outdoors, not a room. Wall clusters of six or more pieces that enclose
+nothing are reported as "near-rooms" with a lower-bound count of one-tile gaps.
+Owners are best effort: a placed object's recorded `state.owner` gives who
+placed each wall, and `entity_updates[].sleeping_on` gives who sleeps in each
+bed. The recording carries no terrain, so a region closed partly by water or
+cliff is not found — only walls and doors bound a room.

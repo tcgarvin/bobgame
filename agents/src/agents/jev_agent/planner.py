@@ -146,12 +146,18 @@ SLEEP_NOTE = (
 )
 
 
-SETTLEMENT_NARRATIVE = f"""\
-You are one of twelve people who woke up together on a large, wild island with
+def settlement_narrative(
+    settler_count: int = items.DEFAULT_SETTLER_COUNT,
+) -> str:
+    """The planner's system prompt for a scenario with this many settlers."""
+    return f"""\
+You are one of {items.settler_count_word(settler_count)} people who woke up together on a large, wild island with
 nothing but your hands. The others are real agents like you; they hear what you
-say and read what you write. Together, build a civilization. Each of you also
-has to find your place in it: what you do, whom you work with, and what you are
-known for.
+say and read what you write. Together, build a civilization: a settlement that
+lasts, where every one of you has a shelter of your own to sleep in, and where
+food, safety and rest are things you can count on tomorrow and not only today.
+Each of you also has to find your place in it: what you do, whom you work with,
+and what you are known for.
 
 What follows is how this world works and how you act in it. What to do with it
 is up to you and the others.
@@ -421,6 +427,11 @@ What Jev sees, and how to write for it:
 - End every turn with one short paragraph saying what you just did and what you
   intend next. That paragraph is shown to the humans watching.
 """
+
+
+# The default-sized scenario's prompt, for tests and for anything that reads
+# the narrative without building an agent.
+SETTLEMENT_NARRATIVE = settlement_narrative()
 
 
 class AgentBridge(Protocol):
@@ -1047,14 +1058,16 @@ def describe_world(model: WorldModel) -> str:
     return "\n".join(lines)
 
 
-def build_planner_agent(model_name: str) -> Agent[PlannerDeps, str]:
+def build_planner_agent(
+    model_name: str, settler_count: int = items.DEFAULT_SETTLER_COUNT
+) -> Agent[PlannerDeps, str]:
     """Create the pydantic-ai agent with every planner tool registered."""
     tools: FunctionToolset[PlannerDeps] = FunctionToolset()
     agent: Agent[PlannerDeps, str] = Agent(
         model_name,
         deps_type=PlannerDeps,
         output_type=str,
-        system_prompt=SETTLEMENT_NARRATIVE,
+        system_prompt=settlement_narrative(settler_count),
         retries=PLANNER_TOOL_RETRIES,
         model_settings=planner_model_settings(model_name),
         toolsets=[BudgetedToolset(tools)],
@@ -2040,8 +2053,10 @@ class Planner:
         model_name: str = "",
         trace: AgentTrace,
         ledger: CostLedger = CostLedger(),
+        settler_count: int = items.DEFAULT_SETTLER_COUNT,
     ) -> None:
         self.model_name = resolve_model_name(model_name)
+        self.settler_count = settler_count
         # The agent always passes its own ledger; the default is a sink for
         # tests and scripts that build a planner on its own.
         self.ledger = ledger
@@ -2049,7 +2064,7 @@ class Planner:
         self.entity_id = entity_id
         self.trace = trace
         self.memory_path = trace.memory_path
-        self.agent = build_planner_agent(self.model_name)
+        self.agent = build_planner_agent(self.model_name, settler_count)
         self.day_log = DayLog()
         self.deps = PlannerDeps(
             bridge=bridge, memory_path=self.memory_path, day_log=self.day_log

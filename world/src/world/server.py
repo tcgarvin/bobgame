@@ -26,6 +26,7 @@ from .settlement import find_settlement_site, nearest_free_walkable
 from .state import DEFAULT_DAY_LENGTH_TICKS, Entity, World, WorldObject
 from .tick import TickConfig, TickContext, TickLoop, TickResult
 from .types import Position
+from .wolves import WolfSettings
 
 logger = structlog.get_logger()
 
@@ -47,6 +48,7 @@ class WorldServer:
         ws_port: int = DEFAULT_WS_PORT,
         tick_config: TickConfig | None = None,
         recorder: RunRecorder | None = None,
+        wolf_settings: WolfSettings = WolfSettings(),
     ):
         self.world = world
         self.port = port
@@ -61,6 +63,7 @@ class WorldServer:
             config=self.tick_config,
             on_tick_complete=self._on_tick_complete,
             on_tick_start=self._on_tick_start,
+            wolf_settings=wolf_settings,
         )
 
         # gRPC services
@@ -283,6 +286,7 @@ async def run_server(
     spawn_mode: str = "positions",
     intent_deadline_ms: int | None = None,
     wolves: bool = False,
+    wolf_settings: WolfSettings = WolfSettings(),
     run_dir: Path | None = None,
     run_id: str = "",
     config_name: str = "default",
@@ -305,6 +309,7 @@ async def run_server(
             (place every entity near the computed settlement centre)
         intent_deadline_ms: Intent deadline within a tick; defaults to half the tick
         wolves: Whether the world simulates wolves
+        wolf_settings: How many wolves the world keeps and how far out they spawn
         run_dir: Directory to record the run into; None disables recording
         run_id: Run id for the recording (generated when empty)
         config_name: Config name, recorded in meta.json
@@ -340,7 +345,12 @@ async def run_server(
         logger.info("run_dir", path=str(run_dir), run_id=recorder.run_id)
 
     server = WorldServer(
-        world, port=port, ws_port=ws_port, tick_config=config, recorder=recorder
+        world,
+        port=port,
+        ws_port=ws_port,
+        tick_config=config,
+        recorder=recorder,
+        wolf_settings=wolf_settings,
     )
 
     # The mechanics track owns the wolf simulation; it reads this flag off the
@@ -371,6 +381,9 @@ async def run_server(
         intent_deadline_ms=config.intent_deadline_ms,
         spawn_mode=spawn_mode,
         wolves=wolves,
+        max_wolves=wolf_settings.max_wolves,
+        wolf_spawn_min_distance=wolf_settings.spawn_min_distance,
+        wolf_spawn_max_distance=wolf_settings.spawn_max_distance,
         entities=len(entities) if entities else 0,
         objects=len(objects) if objects else 0,
     )
@@ -646,6 +659,7 @@ def main() -> None:
             spawn_mode=config.world.spawn_mode,
             intent_deadline_ms=config.world.intent_deadline_ms,
             wolves=config.world.wolves,
+            wolf_settings=config.world.wolf_settings(),
             run_dir=run_dir,
             run_id=run_id,
             config_name=config_name,

@@ -34,6 +34,7 @@ import structlog
 
 from .. import world_pb2 as pb
 from .client import WorldClient
+from .items import DEFAULT_SETTLER_COUNT
 from .conversation import (
     ACTION_HAIL,
     ACTION_JOIN,
@@ -260,6 +261,7 @@ class JevAgent:
         journal_model: str = "",
         converser: Converser | None = None,
         journal_writer: JournalWriter | None = None,
+        settler_count: int = DEFAULT_SETTLER_COUNT,
     ) -> None:
         self.world = world
         self.ledger = CostLedger()
@@ -272,20 +274,26 @@ class JevAgent:
         self._model = WorldModel(entity_id)
 
         self.mode = MODE_IDLE
+        self.settler_count = settler_count
         self.planner = Planner(
             self,
             entity_id,
             model_name=planner_model,
             trace=self.trace,
             ledger=self.ledger,
+            settler_count=settler_count,
         )
         self.converser: Converser = (
-            ModelConverser(planner_model, self.ledger)
+            ModelConverser(planner_model, self.ledger, settler_count)
             if converser is None
             else converser
         )
         self.journal_writer: JournalWriter = (
-            ModelJournalWriter(journal_model, self.planner.model_name)
+            ModelJournalWriter(
+                journal_model,
+                self.planner.model_name,
+                settler_count=settler_count,
+            )
             if journal_writer is None
             else journal_writer
         )
@@ -1225,6 +1233,7 @@ async def run_agent(
     planner_model: str = "",
     jev_model: str = "",
     journal_model: str = "",
+    settler_count: int = DEFAULT_SETTLER_COUNT,
 ) -> None:
     """Build every piece and run one actor until it is interrupted."""
     import os
@@ -1238,6 +1247,7 @@ async def run_agent(
         log_root=log_root,
         planner_model=planner_model,
         journal_model=journal_model,
+        settler_count=settler_count,
     )
     try:
         await agent.run()

@@ -12,6 +12,7 @@ from world.wolves import (
     SPAWN_INTERVAL_TICKS,
     SPAWN_MAX_DISTANCE,
     SPAWN_MIN_DISTANCE,
+    WolfSettings,
     WolfSimulator,
 )
 
@@ -56,6 +57,51 @@ class TestSpawning:
         distance = chebyshev_distance(wolves[0].position, Position(x=50, y=50))
         assert SPAWN_MIN_DISTANCE <= distance <= SPAWN_MAX_DISTANCE
         assert events.entities_spawned[0].entity_id == wolves[0].entity_id
+
+    def test_settings_default_to_the_module_constants(self) -> None:
+        settings = WolfSettings()
+        assert settings.max_wolves == MAX_WOLVES
+        assert settings.spawn_min_distance == SPAWN_MIN_DISTANCE
+        assert settings.spawn_max_distance == SPAWN_MAX_DISTANCE
+        assert WolfSimulator(seed=1).settings == settings
+
+    def test_spawns_in_the_ring_the_settings_ask_for(self) -> None:
+        settings = WolfSettings(
+            max_wolves=1, spawn_min_distance=30, spawn_max_distance=45
+        )
+        for seed in range(6):
+            world = _world_with_player()
+            world.tick = SPAWN_INTERVAL_TICKS
+            WolfSimulator(seed=seed, settings=settings).step(
+                world, _context(world), TickEvents()
+            )
+
+            wolves = [
+                e for e in world.all_entities().values() if e.entity_type == "wolf"
+            ]
+            assert len(wolves) == 1
+            distance = chebyshev_distance(wolves[0].position, Position(x=50, y=50))
+            assert 30 <= distance <= 45
+
+    def test_a_one_wolf_world_never_gets_a_second(self) -> None:
+        settings = WolfSettings(max_wolves=1)
+        world = _world_with_player()
+        sim = WolfSimulator(seed=1, settings=settings)
+        for step in range(1, 6):
+            world.tick = SPAWN_INTERVAL_TICKS * step
+            sim.step(world, _context(world), TickEvents())
+
+        wolves = [e for e in world.all_entities().values() if e.entity_type == "wolf"]
+        assert len(wolves) == 1
+
+    def test_max_wolves_zero_spawns_nothing(self) -> None:
+        world = _world_with_player()
+        world.tick = SPAWN_INTERVAL_TICKS
+        WolfSimulator(seed=1, settings=WolfSettings(max_wolves=0)).step(
+            world, _context(world), TickEvents()
+        )
+
+        assert world.entity_count() == 1
 
     def test_no_spawn_off_interval(self) -> None:
         world = _world_with_player()

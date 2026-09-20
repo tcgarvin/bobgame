@@ -275,6 +275,30 @@ SLEEP_RECOVERY_TICKS: Mapping[tuple[bool, bool], int] = {
 }
 
 
+# How many settlers a scenario starts with. `settlement.toml` has twelve;
+# `hamlet.toml` has six and passes `--settlers 6` to every agent process.
+DEFAULT_SETTLER_COUNT = 12
+
+_NUMBER_WORDS: Mapping[int, str] = {
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+    11: "eleven",
+    12: "twelve",
+}
+
+
+def settler_count_word(count: int) -> str:
+    """`"six"` for 6; counts outside 2..12 are spelled with digits."""
+    return _NUMBER_WORDS.get(count, str(count))
+
+
 def wield_damage_text() -> str:
     """`"sword +3, iron_sword +5, ..."`: every wielded weapon's damage bonus."""
     return ", ".join(f"{kind} +{bonus}" for kind, bonus in WIELD_DAMAGE_BONUS.items())

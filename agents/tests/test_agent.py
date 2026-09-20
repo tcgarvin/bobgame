@@ -19,6 +19,8 @@ from agents.jev_agent.agent import (
     JevAgent,
 )
 from agents.jev_agent.client import IntentResult
+from agents.jev_agent.conversation import ModelConverser
+from agents.jev_agent.items import DEFAULT_SETTLER_COUNT
 from agents.jev_agent.options import Option
 from agents.jev_agent.pricing import JEV_USD_PER_MILLION_INPUT_TOKENS
 from agents.jev_agent.journal import (
@@ -30,6 +32,7 @@ from agents.jev_agent.journal import (
     SECTION_TOMORROW,
     Journal,
     JournalRewrite,
+    ModelJournalWriter,
     finish_rewrite,
 )
 from agents.jev_agent.reflex import ReflexBrief
@@ -1366,3 +1369,44 @@ async def test_a_waking_or_respawning_body_tells_the_planner_to_start_over(
     await asyncio.gather(*list(agent._background))
 
     assert agent.planner._history_reset_reason == "respawned"
+
+
+# --- the scenario's settler count (world/configs/hamlet.toml) ---------------
+
+
+def test_the_settlers_flag_defaults_to_twelve() -> None:
+    from agents.jev_agent.__main__ import parse_args
+
+    assert parse_args(["--entity", "ada"]).settlers == DEFAULT_SETTLER_COUNT
+
+
+def test_the_settlers_flag_reaches_every_prompt(tmp_path: Path) -> None:
+    from agents.jev_agent.__main__ import parse_args
+
+    args = parse_args(["--entity", "ada", "--settlers", "6"])
+    assert args.settlers == 6
+
+    agent = JevAgent(
+        FakeWorldClient([]),  # type: ignore[arg-type]
+        FakeJevClient([]),
+        "ada",
+        log_root=tmp_path,
+        planner_model="test",
+        journal_model="test",
+        settler_count=args.settlers,
+    )
+    converser = agent.converser
+    writer = agent.journal_writer
+    assert isinstance(converser, ModelConverser)
+    assert isinstance(writer, ModelJournalWriter)
+    assert agent.settler_count == 6
+    assert agent.planner.settler_count == 6
+    assert converser.settler_count == 6
+    assert writer.settler_count == 6
+
+
+def test_a_settler_count_below_one_is_refused() -> None:
+    from agents.jev_agent.__main__ import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["--entity", "ada", "--settlers", "0"])
