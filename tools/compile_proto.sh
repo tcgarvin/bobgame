@@ -40,3 +40,12 @@ uv run python -m grpc_tools.protoc \
     "$PROTO_DIR/world.proto"
 
 echo "Done!"
+
+# grpc_tools writes an absolute "import world_pb2"; the generated modules live
+# inside packages, so make it relative.
+echo "Fixing generated imports..."
+for pkg in world/src/world runner/src/runner agents/src/agents; do
+    sed -i 's/^import world_pb2 as world__pb2$/from . import world_pb2 as world__pb2/' \
+        "$PROJECT_ROOT/$pkg/world_pb2_grpc.py"
+done
+

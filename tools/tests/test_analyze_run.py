@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import analyze_run  # noqa: E402
+from runlib import agenttrace, cost, report, runio, social, worldscan  # noqa: E402
 
 RUN_ID = "20260917-143000-settlement"
 
@@ -247,6 +248,17 @@ def analyse(run_dir: Path, *args: str) -> dict:
     return json.loads(buffer.getvalue())
 
 
+def traces_for(layout: "runio.RunLayout", agent_ids: list[str]):
+    """Every agent's trace files, read the way the CLI reads them."""
+    return agenttrace.load_all_traces(layout, agent_ids)
+
+
+def scan_world_ticks(path: Path):
+    """The four pieces of a world scan the tests assert on."""
+    scan = worldscan.scan_world(path)
+    return scan.facts, scan.moments, scan.conversations, scan.giving
+
+
 def moments_by_kind(payload: dict) -> dict[str, list[dict]]:
     grouped: dict[str, list[dict]] = {}
     for moment in payload["moments"]:
@@ -345,44 +357,6 @@ def test_truncated_gzip_is_tolerated(run_dir: Path) -> None:
     assert payload["agents"][0]["stint_ticks"] >= 0
 
 
-def test_legacy_logs_layout(tmp_path: Path) -> None:
-    logs = tmp_path / "logs"
-    agent_dir = logs / "agent-bob"
-    agent_dir.mkdir(parents=True)
-    (agent_dir / "stints.jsonl").write_text(
-        json.dumps(
-            {
-                "entity_id": "bob",
-                "tick": 1,
-                "action": "wait",
-                "top": [["wait", 0.9]],
-                "eject": 0.1,
-                "danger": 0.0,
-                "latency_ms": 100,
-                "input_tokens": 500,
-                "intent_result": "accepted",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (logs / "agent-bob.log").write_text(
-        "[info] planner_turn_started entity_id=bob\n"
-        "[info] planner_tool_call tool=look entity_id=bob\n"
-        "[info] planner_thought text=looking around\n",
-        encoding="utf-8",
-    )
-    payload = analyse(logs)
-    assert payload["meta"] == {}
-    assert payload["world"] is None
-    assert payload["moments"] == []
-    bob = payload["agents"][0]
-    assert bob["stint_ticks"] == 1
-    assert bob["planner_turns"] == 1
-    assert bob["tools"] == {"look": 1}
-    assert bob["last_thought"] == "looking around"
-
-
 def _action(entity: str, action_type: str, details: str) -> dict:
     return {
         "entity_id": entity,
@@ -427,7 +401,7 @@ def test_building_actions_are_counted_and_only_firsts_become_moments(
         ],
     )
 
-    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, moments, _conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.crafts == {"plank": 1, "workshop_table": 1, "bed": 1}
     assert facts.workshop_crafts == 1
@@ -482,7 +456,7 @@ def test_conversation_and_give_world_facts(tmp_path: Path) -> None:
         ],
     )
 
-    facts, moments, conversations, giving = analyze_run.scan_world_ticks(ticks)
+    facts, moments, conversations, giving = scan_world_ticks(ticks)
 
     assert set(conversations) == {"conv_1", "conv_2"}
     conv1 = conversations["conv_1"]
@@ -499,7 +473,7 @@ def test_conversation_and_give_world_facts(tmp_path: Path) -> None:
     assert conv2.end_tick == -1
 
     assert giving == [
-        analyze_run.GiveEvent(
+        worldscan.GiveEvent(
             tick=3, giver="theo", receiver="mira", kind="stone", amount=2
         )
     ]
@@ -563,7 +537,7 @@ def test_hails_are_counted_with_their_refusals(tmp_path: Path) -> None:
         ],
     )
 
-    facts, moments, conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, moments, conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.hails_succeeded == 1
     assert facts.hail_failures == {"hail cooldown": 1, "target asleep": 1}
@@ -571,7 +545,6 @@ def test_hails_are_counted_with_their_refusals(tmp_path: Path) -> None:
     conv = conversations["conv_9"]
     assert conv.opened_by == "theo"
     assert conv.via_hail is True
-    assert conv.via_invitation is False
     assert conv.participants == {"mira", "theo"}
     assert conv.joins == [], "the hailed settler is not a joiner"
 
@@ -581,17 +554,16 @@ def test_hails_are_counted_with_their_refusals(tmp_path: Path) -> None:
     assert "mira" in hail_moment.text and "conv_9" in hail_moment.text
     assert "conversation_joined" not in {m.kind for m in moments}
 
-    layout = analyze_run.RunLayout(
+    layout = runio.RunLayout(
         run_id="r",
         root=tmp_path,
         agents_dir=tmp_path / "agents",
         ticks_path=ticks,
         meta={},
     )
-    summary = analyze_run.summarise_conversations(
+    summary = social.summarise_conversations(
         conversations,
-        ["mira", "theo"],
-        layout,
+        traces_for(layout, ["mira", "theo"]),
         "http://localhost:5173",
         "r",
         hails_succeeded=facts.hails_succeeded,
@@ -601,74 +573,6 @@ def test_hails_are_counted_with_their_refusals(tmp_path: Path) -> None:
     assert summary["hails_succeeded"] == 1
     assert summary["hails_attempted"] == 3
     assert summary["hail_failures"] == {"hail cooldown": 1, "target asleep": 1}
-
-
-def test_invitation_said_and_accepted(tmp_path: Path) -> None:
-    """docs/09 section 8: a flagged `say` and an `accept` of it.
-
-    The inviter's own action for an accept is "join conv_N" (same text as an
-    ordinary join, section 8.2); this must not also produce a
-    `conversation_joined` moment for it.
-    """
-    ticks = tmp_path / "ticks.jsonl.gz"
-    write_gz_jsonl(
-        ticks,
-        [
-            tick_record(
-                1,
-                utterances=[
-                    _local_utterance("mira", "anyone want to talk?", open_to_talk=True)
-                ],
-            ),
-            tick_record(
-                2,
-                actions=[
-                    _action("theo", "converse", "accept conv_5 mira"),
-                    _action("mira", "converse", "join conv_5"),
-                ],
-            ),
-            tick_record(3, objects_removed=["conv_5"]),
-        ],
-    )
-
-    facts, moments, conversations, _giving = analyze_run.scan_world_ticks(ticks)
-
-    assert facts.invitations_said == 1
-
-    assert set(conversations) == {"conv_5"}
-    conv = conversations["conv_5"]
-    assert conv.opened_by == "mira"
-    assert conv.via_invitation is True
-    assert conv.participants == {"mira", "theo"}
-    # The inviter's own "join conv_5" action must not be counted as a joiner.
-    assert conv.joins == []
-
-    kinds = {m.kind for m in moments}
-    assert "invitation_accepted" in kinds
-    assert "conversation_joined" not in kinds
-    accepted_moment = next(m for m in moments if m.kind == "invitation_accepted")
-    assert accepted_moment.tick == 2
-    assert accepted_moment.entity_id == "theo"
-    assert "mira" in accepted_moment.text
-    assert "conv_5" in accepted_moment.text
-
-    layout = analyze_run.RunLayout(
-        run_id="r",
-        root=tmp_path,
-        agents_dir=tmp_path / "agents",
-        ticks_path=ticks,
-        meta={},
-    )
-    summary = analyze_run.summarise_conversations(
-        conversations,
-        ["mira", "theo"],
-        layout,
-        "http://localhost:5173",
-        "r",
-        invitations_said=facts.invitations_said,
-    )
-    assert summary["invitations_said"] == 1
-    assert summary["opened_by_invitation"] == 1
 
 
 def test_summarise_conversations_and_giving(tmp_path: Path) -> None:
@@ -685,9 +589,9 @@ def test_summarise_conversations_and_giving(tmp_path: Path) -> None:
             tick_record(20, objects_removed=["conv_9"]),
         ],
     )
-    _facts, _moments, conversations, giving = analyze_run.scan_world_ticks(ticks)
+    _facts, _moments, conversations, giving = scan_world_ticks(ticks)
 
-    layout = analyze_run.RunLayout(
+    layout = runio.RunLayout(
         run_id="r",
         root=tmp_path,
         agents_dir=tmp_path / "agents",
@@ -735,8 +639,11 @@ def test_summarise_conversations_and_giving(tmp_path: Path) -> None:
         ],
     )
 
-    summary = analyze_run.summarise_conversations(
-        conversations, ["mira", "theo"], layout, "http://localhost:5173", "r"
+    summary = social.summarise_conversations(
+        conversations,
+        traces_for(layout, ["mira", "theo"]),
+        "http://localhost:5173",
+        "r",
     )
     assert summary["opened"] == 1
     assert summary["joined"] == 1
@@ -754,17 +661,17 @@ def test_summarise_conversations_and_giving(tmp_path: Path) -> None:
     assert summary["longest"][0]["conversation_id"] == "conv_9"
     assert summary["longest"][0]["link"].startswith("http://localhost:5173/?run=r")
 
-    giving_summary = analyze_run.summarise_giving(giving)
+    giving_summary = social.summarise_giving(giving)
     assert giving_summary == {"count": 0, "kinds": {}, "pairs": {}}
 
 
 def test_summarise_giving_aggregates_kinds_and_pairs() -> None:
     events = [
-        analyze_run.GiveEvent(1, "mira", "theo", "stone", 2),
-        analyze_run.GiveEvent(2, "mira", "theo", "wood", 1),
-        analyze_run.GiveEvent(3, "theo", "mira", "stone", 1),
+        worldscan.GiveEvent(1, "mira", "theo", "stone", 2),
+        worldscan.GiveEvent(2, "mira", "theo", "wood", 1),
+        worldscan.GiveEvent(3, "theo", "mira", "stone", 1),
     ]
-    summary = analyze_run.summarise_giving(events)
+    summary = social.summarise_giving(events)
     assert summary["count"] == 3
     assert summary["kinds"] == {"stone": 3, "wood": 1}
     assert summary["pairs"] == {"mira->theo": 3, "theo->mira": 1}
@@ -775,8 +682,8 @@ def test_summarise_giving_aggregates_kinds_and_pairs() -> None:
 # --------------------------------------------------------------------------
 
 
-def _reflex_layout(tmp_path: Path) -> "analyze_run.RunLayout":
-    return analyze_run.RunLayout(
+def _reflex_layout(tmp_path: Path) -> "runio.RunLayout":
+    return runio.RunLayout(
         run_id="r",
         root=tmp_path,
         agents_dir=tmp_path / "agents",
@@ -893,7 +800,7 @@ def test_summarise_reflexes_reports_firings_and_health_change(
         ],
     )
 
-    summary, moments = analyze_run.summarise_reflexes(["mira", "theo"], layout)
+    summary, moments = social.summarise_reflexes(traces_for(layout, ["mira", "theo"]))
 
     assert summary["agents"]["mira"]["registered_tick"] == 5
     assert "Attack the wolf" in summary["agents"]["mira"]["digest"]
@@ -927,8 +834,6 @@ def test_pre_conversation_run_reports_cleanly(run_dir: Path) -> None:
 
     assert payload["conversations"] == {
         "opened": 0,
-        "opened_by_invitation": 0,
-        "invitations_said": 0,
         "opened_by_hail": 0,
         "hails_succeeded": 0,
         "hails_attempted": 0,
@@ -1026,7 +931,7 @@ def test_metal_tier_counts_and_moments(tmp_path: Path) -> None:
         ],
     )
 
-    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, moments, _conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.smelts == {"charcoal": 1, "copper_ingot": 1, "iron_ingot": 1}
     assert facts.stations_placed == {"furnace": 1, "anvil": 1}
@@ -1062,7 +967,7 @@ def test_sleep_wake_and_collapse_counts(tmp_path: Path) -> None:
         ],
     )
 
-    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, moments, _conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.sleeps == {"bed": 1, "ground": 1}
     assert facts.wakes == {"rested": 1, "hungry": 1}
@@ -1111,7 +1016,7 @@ def test_first_death_while_asleep_moment(tmp_path: Path) -> None:
         ],
     )
 
-    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, moments, _conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.sleep_data_available is True
     asleep_death = [m for m in moments if m.kind == "milestone" and "asleep" in m.text]
@@ -1135,7 +1040,7 @@ def test_night_midpoint_asleep_counts(tmp_path: Path) -> None:
         )
     write_gz_jsonl(ticks, rows)
 
-    facts, _moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, _moments, _conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.sleep_data_available is True
     assert facts.night_midpoints == [{"day": 0, "tick": 201, "asleep": 4}]
@@ -1387,7 +1292,7 @@ def test_jev_cost_from_tokens_uses_run_price(cost_run_dir: Path) -> None:
     agents = {a["agent"]: a["cost"] for a in analyse(cost_run_dir)["agents"]}
     # theo has no pricing.json, so the module constant prices its tokens.
     assert agents["theo"]["jev_usd"] == pytest.approx(
-        2.0 * analyze_run.JEV_USD_PER_MILLION_INPUT_TOKENS
+        2.0 * cost.JEV_USD_PER_MILLION_INPUT_TOKENS
     )
     assert agents["theo"]["planner_usd"] == 0.0
     assert agents["theo"]["planner_cost_available"] is False
@@ -1396,19 +1301,19 @@ def test_jev_cost_from_tokens_uses_run_price(cost_run_dir: Path) -> None:
 
 
 def test_run_level_cost_totals_and_rates(cost_run_dir: Path) -> None:
-    cost = analyse(cost_run_dir)["totals"]["cost"]
-    jev = 0.003 + 2.0 * analyze_run.JEV_USD_PER_MILLION_INPUT_TOKENS
+    run_cost = analyse(cost_run_dir)["totals"]["cost"]
+    jev = 0.003 + 2.0 * cost.JEV_USD_PER_MILLION_INPUT_TOKENS
     total = 0.04 + 0.0007 + 0.003 + jev
-    assert cost["planner_usd"] == pytest.approx(0.04)
-    assert cost["converser_usd"] == pytest.approx(0.0007)
-    assert cost["jev_usd"] == pytest.approx(jev)
-    assert cost["journal_usd"] == pytest.approx(0.003)
-    assert cost["total_usd"] == pytest.approx(total)
-    assert cost["planner_cost_available"] is True
-    assert cost["planner_cost_is_lower_bound"] is True
-    assert cost["planner_turns"] == 3
-    assert cost["usd_per_100_ticks"] == pytest.approx(total * 100 / 200)
-    assert cost["usd_per_hour"] == pytest.approx(total)
+    assert run_cost["planner_usd"] == pytest.approx(0.04)
+    assert run_cost["converser_usd"] == pytest.approx(0.0007)
+    assert run_cost["jev_usd"] == pytest.approx(jev)
+    assert run_cost["journal_usd"] == pytest.approx(0.003)
+    assert run_cost["total_usd"] == pytest.approx(total)
+    assert run_cost["planner_cost_available"] is True
+    assert run_cost["planner_cost_is_lower_bound"] is True
+    assert run_cost["planner_turns"] == 3
+    assert run_cost["usd_per_100_ticks"] == pytest.approx(total * 100 / 200)
+    assert run_cost["usd_per_hour"] == pytest.approx(total)
 
 
 def test_cost_rates_skipped_when_meta_incomplete() -> None:
@@ -1417,15 +1322,15 @@ def test_cost_rates_skipped_when_meta_incomplete() -> None:
         "finished_at": "2026-09-18T10:00:00-04:00",
         "last_tick": 50,
     }
-    rates = analyze_run.run_cost_rates(1.0, complete)
+    rates = cost.run_cost_rates(1.0, complete)
     assert rates["usd_per_hour"] == pytest.approx(1.0)
     assert rates["usd_per_100_ticks"] == pytest.approx(2.0)
 
-    unfinished = analyze_run.run_cost_rates(
+    unfinished = cost.run_cost_rates(
         1.0, {"started_at": complete["started_at"], "finished_at": None}
     )
     assert unfinished == {}
-    assert analyze_run.run_cost_rates(1.0, {}) == {}
+    assert cost.run_cost_rates(1.0, {}) == {}
 
 
 def test_most_expensive_turn_is_a_notable_moment(cost_run_dir: Path) -> None:
@@ -1449,15 +1354,15 @@ def test_old_run_reports_planner_cost_unavailable(run_dir: Path) -> None:
     assert ada["planner_usd"] == 0.0
     assert ada["cost_missing"] is False
     assert ada["jev_usd"] == pytest.approx(
-        4_100 * analyze_run.JEV_USD_PER_MILLION_INPUT_TOKENS / 1e6
+        4_100 * cost.JEV_USD_PER_MILLION_INPUT_TOKENS / 1e6
     )
-    cost = payload["totals"]["cost"]
-    assert cost["planner_cost_available"] is False
-    assert cost["planner_cost_is_lower_bound"] is False
-    assert cost["total_usd"] == pytest.approx(ada["jev_usd"])
+    run_cost = payload["totals"]["cost"]
+    assert run_cost["planner_cost_available"] is False
+    assert run_cost["planner_cost_is_lower_bound"] is False
+    assert run_cost["total_usd"] == pytest.approx(ada["jev_usd"])
     # meta.json has no finished_at and no last_tick, so neither rate is given.
-    assert "usd_per_hour" not in cost
-    assert "usd_per_100_ticks" not in cost
+    assert "usd_per_hour" not in run_cost
+    assert "usd_per_100_ticks" not in run_cost
 
 
 def test_cost_section_prints_na_for_old_runs(
@@ -1472,10 +1377,10 @@ def test_cost_section_prints_na_for_old_runs(
 
 
 def test_dollar_formatting_switches_at_one_dollar() -> None:
-    assert analyze_run.format_usd(0.12345) == "$0.1235"
-    assert analyze_run.format_usd(0.0) == "$0.0000"
-    assert analyze_run.format_usd(1.0) == "$1.00"
-    assert analyze_run.format_usd(12.345) == "$12.35"
+    assert report.format_usd(0.12345) == "$0.1235"
+    assert report.format_usd(0.0) == "$0.0000"
+    assert report.format_usd(1.0) == "$1.00"
+    assert report.format_usd(12.345) == "$12.35"
 
 
 # --------------------------------------------------------------------------
@@ -1553,7 +1458,7 @@ def test_sign_writes_are_counted_and_become_moments(tmp_path: Path) -> None:
         ],
     )
 
-    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, moments, _conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.placements == {"sign": 1}
     assert facts.signs_written == 2
@@ -1601,7 +1506,7 @@ def test_brief_hails_and_jev_hail_choices_are_counted(tmp_path: Path) -> None:
             },
         ],
     )
-    layout = analyze_run.RunLayout(
+    layout = runio.RunLayout(
         run_id=root.name,
         root=root,
         agents_dir=root / "agents",
@@ -1609,7 +1514,7 @@ def test_brief_hails_and_jev_hail_choices_are_counted(tmp_path: Path) -> None:
         meta={},
     )
 
-    summary = analyze_run.summarise_agent("ada", layout)
+    summary = agenttrace.summarise_agent(agenttrace.load_agent_traces(layout, "ada"))
 
     assert summary["brief_hails"] == 1
     assert summary["jev_hails"] == 1
@@ -1649,7 +1554,7 @@ def test_a_wolf_dying_is_a_kill_not_a_death(tmp_path: Path) -> None:
         ],
     )
 
-    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, moments, _conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.deaths == {}
     assert facts.killers == {}
@@ -1670,7 +1575,7 @@ def test_a_settler_killed_by_a_wolf_is_counted_under_wolf(tmp_path: Path) -> Non
         ],
     )
 
-    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, moments, _conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.deaths == {"ada": 1}
     assert facts.killers == {"wolf": 1}
@@ -1699,7 +1604,7 @@ def test_an_unattributed_death_is_starvation_only_on_an_empty_stomach(
         ],
     )
 
-    facts, moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, moments, _conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.deaths == {"ada": 1, "bram": 1}
     assert facts.killers == {"starvation": 1, "unknown": 1}
@@ -1722,7 +1627,7 @@ def test_a_wolf_is_recognised_from_its_spawn_record_without_entity_types(
         ],
     )
 
-    facts, _moments, _conversations, _giving = analyze_run.scan_world_ticks(ticks)
+    facts, _moments, _conversations, _giving = scan_world_ticks(ticks)
 
     assert facts.deaths == {}
     assert facts.wolf_kills == {"dov": 1}
@@ -1735,3 +1640,60 @@ def test_the_world_section_separates_deaths_from_wolf_kills(
     printed = capsys.readouterr().out
     assert "deaths: 1 settlers by={'wolf': 1}" in printed
     assert "wolf kills: 0 by={}" in printed
+
+
+# -- the legacy `hunger` stat key, and directories that are not runs ---------
+
+
+def test_a_legacy_hunger_key_is_read_as_food(tmp_path: Path) -> None:
+    """Runs before 2026-09-18 call the food stat `hunger` (docs/07_replay.md)."""
+    ticks = tmp_path / "ticks.jsonl.gz"
+    write_gz_jsonl(
+        ticks,
+        [
+            tick_record(
+                1,
+                entity_updates=[
+                    {
+                        "entity_id": "ada",
+                        "entity_type": "player",
+                        "position": {"x": 0, "y": 0},
+                        "hunger": 0,
+                        "max_hunger": 100,
+                        "asleep": False,
+                    },
+                    {
+                        "entity_id": "bram",
+                        "entity_type": "player",
+                        "position": {"x": 0, "y": 0},
+                        "hunger": 40,
+                        "max_hunger": 100,
+                        "asleep": False,
+                    },
+                ],
+                deaths=[
+                    {"entity_id": "ada", "killer_id": ""},
+                    {"entity_id": "bram", "killer_id": ""},
+                ],
+            )
+        ],
+    )
+
+    facts, _moments, _conversations, _giving = scan_world_ticks(ticks)
+
+    assert facts.killers == {"starvation": 1, "unknown": 1}
+
+
+def test_entity_food_reads_either_key() -> None:
+    assert runio.entity_food({"food": 7}) == 7
+    assert runio.entity_food({"hunger": 7}) == 7
+    assert runio.entity_food({}) == -1
+    assert runio.entity_food({}, default=0) == 0
+
+
+def test_a_directory_without_meta_json_is_an_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "agent-bob").mkdir()
+    assert analyze_run.main([str(tmp_path)]) == 1
+    assert "not a run directory" in capsys.readouterr().err

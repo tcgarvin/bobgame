@@ -55,6 +55,12 @@ message WorldClock {
   int32 tick_of_day = 2;
   int32 day_length = 3;
   bool night = 4;
+  // docs/14_new_moon_and_saves.md: tonight is a new-moon night; the 0-based
+  // day of the next one (-1 when the world has none); and, only on the tick
+  // a save is taken, that tick.
+  bool new_moon_tonight = 5;
+  int64 next_new_moon_day = 6;
+  int64 save_tick = 7;
 }
 
 message Inventory {

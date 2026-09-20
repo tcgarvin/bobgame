@@ -75,16 +75,22 @@ class Entity(_message.Message):
     def __init__(self, entity_id: _Optional[str] = ..., position: _Optional[_Union[Position, _Mapping]] = ..., entity_type: _Optional[str] = ..., tags: _Optional[_Iterable[str]] = ..., status_bits: _Optional[int] = ..., inventory: _Optional[_Union[Inventory, _Mapping]] = ..., health: _Optional[int] = ..., max_health: _Optional[int] = ..., food: _Optional[int] = ..., max_food: _Optional[int] = ..., wielded: _Optional[str] = ..., alive: bool = ..., fatigue: _Optional[int] = ..., max_fatigue: _Optional[int] = ..., asleep: bool = ..., sleeping_on: _Optional[str] = ..., collapsed: bool = ...) -> None: ...
 
 class WorldClock(_message.Message):
-    __slots__ = ("day", "tick_of_day", "day_length", "night")
+    __slots__ = ("day", "tick_of_day", "day_length", "night", "new_moon_tonight", "next_new_moon_day", "save_tick")
     DAY_FIELD_NUMBER: _ClassVar[int]
     TICK_OF_DAY_FIELD_NUMBER: _ClassVar[int]
     DAY_LENGTH_FIELD_NUMBER: _ClassVar[int]
     NIGHT_FIELD_NUMBER: _ClassVar[int]
+    NEW_MOON_TONIGHT_FIELD_NUMBER: _ClassVar[int]
+    NEXT_NEW_MOON_DAY_FIELD_NUMBER: _ClassVar[int]
+    SAVE_TICK_FIELD_NUMBER: _ClassVar[int]
     day: int
     tick_of_day: int
     day_length: int
     night: bool
-    def __init__(self, day: _Optional[int] = ..., tick_of_day: _Optional[int] = ..., day_length: _Optional[int] = ..., night: bool = ...) -> None: ...
+    new_moon_tonight: bool
+    next_new_moon_day: int
+    save_tick: int
+    def __init__(self, day: _Optional[int] = ..., tick_of_day: _Optional[int] = ..., day_length: _Optional[int] = ..., night: bool = ..., new_moon_tonight: bool = ..., next_new_moon_day: _Optional[int] = ..., save_tick: _Optional[int] = ...) -> None: ...
 
 class Inventory(_message.Message):
     __slots__ = ("items",)

@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import settlement_progress as sp  # noqa: E402
+from runlib import runio, worldscan  # noqa: E402
 
 RUN_ID = "20260920-120000-settlement"
 SETTLERS = ("ada", "bram")
@@ -353,7 +354,7 @@ def test_plateau_counts_buckets_since_the_last_new_structure(tmp_path: Path) -> 
     ]
     scan, _rooms, _near, _layout, _bucket = analyse(make_run(tmp_path, ticks))
 
-    assert sp.plateau_buckets(scan.buckets) == 2
+    assert worldscan.plateau_buckets(scan.buckets) == 2
 
 
 def test_conversations_and_item_piles_are_not_structures(tmp_path: Path) -> None:
@@ -427,3 +428,48 @@ def test_main_json_round_trips(tmp_path: Path, capsys) -> None:
     assert payload["headline"]["rooms"] == 1
     assert payload["rooms"][0]["sealed"] is True
     assert payload["standing"]["counts"] == {"wood_wall": 16}
+
+
+def test_a_legacy_hunger_key_is_read_as_food(tmp_path: Path) -> None:
+    """The same shared reader as analyze_run (docs/07_replay.md)."""
+    update = entity_update("ada", food=30)
+    update["hunger"] = update.pop("food")
+    update["max_hunger"] = update.pop("max_food")
+    ticks = [tick_record(0, entity_updates=[update])]
+    scan, _rooms, _near, _layout, _bucket = analyse(make_run(tmp_path, ticks))
+
+    assert scan.buckets[0].mean_food == 30.0
+
+
+def test_a_directory_without_meta_json_is_an_error(tmp_path: Path, capsys) -> None:
+    (tmp_path / "world").mkdir()
+    assert sp.main([str(tmp_path)]) == 1
+    assert "not a run directory" in capsys.readouterr().err
+
+
+def test_both_tools_read_the_same_scan(tmp_path: Path) -> None:
+    """One pass feeds both reports: the same deaths and the same wolf kills."""
+    ticks = [
+        tick_record(
+            0,
+            entity_updates=[entity_update("ada"), entity_update("bram")],
+            objects_added=[object_state("bed_1", "bed", 1, 1, owner="ada")],
+        ),
+        tick_record(
+            1,
+            deaths=[
+                {"entity_id": "ada", "killer_id": "wolf_1"},
+                {"entity_id": "wolf_1", "killer_id": "bram"},
+            ],
+            entities_despawned=[{"entity_id": "wolf_1", "reason": "killed"}],
+        ),
+    ]
+    run_dir = make_run(tmp_path, ticks)
+    whole = worldscan.scan_world(
+        runio.load_layout(run_dir).ticks_path,
+        worldscan.initial_objects(runio.objects_path(runio.load_layout(run_dir))),
+    )
+
+    assert whole.build.deaths == sum(whole.facts.deaths.values()) == 1
+    assert whole.build.wolf_kills == sum(whole.facts.wolf_kills.values()) == 1
+    assert whole.build.totals_placed == {"bed": 1}
