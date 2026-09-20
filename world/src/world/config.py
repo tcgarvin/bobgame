@@ -10,6 +10,7 @@ from .types import Position
 from .wolves import (
     DESPAWN_DISTANCE,
     MAX_WOLVES,
+    SPAWN_INTERVAL_TICKS,
     SPAWN_MAX_DISTANCE,
     SPAWN_MIN_DISTANCE,
     WolfSettings,
@@ -67,6 +68,9 @@ class WorldConfig(BaseModel):
     # stay under the despawn distance, or a wolf would be culled on arrival.
     wolf_spawn_min_distance: int = SPAWN_MIN_DISTANCE
     wolf_spawn_max_distance: int = SPAWN_MAX_DISTANCE
+    # Ticks between wolf spawn attempts. A longer interval means a killed
+    # wolf stays gone for longer.
+    wolf_spawn_interval_ticks: int = SPAWN_INTERVAL_TICKS
     # Ticks in one day/night cycle (docs/10_metal_and_sleep.md).
     day_length_ticks: int = DEFAULT_DAY_LENGTH_TICKS
 
@@ -75,6 +79,15 @@ class WorldConfig(BaseModel):
     def _check_max_wolves(cls, value: int) -> int:
         if value < 0:
             raise ValueError(f"max_wolves must be zero or more, got {value}")
+        return value
+
+    @field_validator("wolf_spawn_interval_ticks")
+    @classmethod
+    def _check_wolf_spawn_interval(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(
+                f"wolf_spawn_interval_ticks must be at least 1, got {value}"
+            )
         return value
 
     @model_validator(mode="after")
@@ -103,6 +116,7 @@ class WorldConfig(BaseModel):
             max_wolves=self.max_wolves,
             spawn_min_distance=self.wolf_spawn_min_distance,
             spawn_max_distance=self.wolf_spawn_max_distance,
+            spawn_interval_ticks=self.wolf_spawn_interval_ticks,
         )
 
     @field_validator("day_length_ticks")

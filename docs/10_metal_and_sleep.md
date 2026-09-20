@@ -175,12 +175,17 @@ Sleep is a state, not an action: `Entity.asleep` stays true across ticks. While
 asleep, every intent other than `wake` fails with `"asleep"` and the entity
 does not move. The world stores where it sleeps (`bed` object id or `""`).
 
-Fatigue recovery per tick while asleep:
+Fatigue recovery while asleep (`recovery_rate(on_bed, night)` returns
+`(points, ticks)`: that many points shed every that many ticks):
 
 | Where | Night | Day |
 |-------|-------|-----|
 | bed | 1 per tick | 1 per 2 ticks |
-| ground | 1 per 2 ticks | 1 per 4 ticks |
+| ground | 2 per 3 ticks | 1 per 3 ticks |
+
+The ground rates were raised on 2026-09-20 (Hamlet-run fixes, round 3): at the
+old 1-per-2/1-per-4 a bedless settler had to sleep about 233 of a day's 300
+ticks to clear the ~83 fatigue a day costs, and lost ~50 food doing it.
 
 A bed sleeper also heals 1 health every `REGEN_INTERVAL_TICKS` (5) regardless
 of food and fatigue. A ground sleeper heals only through the ordinary regen

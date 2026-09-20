@@ -39,12 +39,14 @@ COLLAPSE_WAKE_FATIGUE = 70
 
 # --- Recovery --------------------------------------------------------------
 
-# Ticks of sleep per point of fatigue recovered, by place and time of day.
-BED_NIGHT_INTERVAL = 1
-BED_DAY_INTERVAL = 2
-GROUND_NIGHT_INTERVAL = 2
-GROUND_DAY_INTERVAL = 4
-RECOVERY_PER_STEP = 1
+# Fatigue recovered per sleeping tick, as (points, ticks): "`points` fatigue
+# every `ticks` ticks". A bed is still the best place to sleep, but since
+# 2026-09-20 the ground is no longer so slow that a bedless settler has to
+# spend three quarters of the day lying down.
+BED_NIGHT_RECOVERY = (1, 1)
+BED_DAY_RECOVERY = (1, 2)
+GROUND_NIGHT_RECOVERY = (2, 3)
+GROUND_DAY_RECOVERY = (1, 3)
 
 # `Entity.sleeping_on` when the sleeper lies on the bare ground.
 GROUND = ""
@@ -76,11 +78,11 @@ def fatigue_interval(night: bool) -> int:
     return FATIGUE_INTERVAL_NIGHT if night else FATIGUE_INTERVAL_DAY
 
 
-def recovery_interval(on_bed: bool, night: bool) -> int:
-    """Ticks a sleeper takes to shed one point of fatigue."""
+def recovery_rate(on_bed: bool, night: bool) -> tuple[int, int]:
+    """Fatigue a sleeper sheds here, as (points, every this many ticks)."""
     if on_bed:
-        return BED_NIGHT_INTERVAL if night else BED_DAY_INTERVAL
-    return GROUND_NIGHT_INTERVAL if night else GROUND_DAY_INTERVAL
+        return BED_NIGHT_RECOVERY if night else BED_DAY_RECOVERY
+    return GROUND_NIGHT_RECOVERY if night else GROUND_DAY_RECOVERY
 
 
 def _has_body_clock(entity: Entity) -> bool:
@@ -259,10 +261,10 @@ def _recover_fatigue(world: World, night: bool) -> None:
     for entity in sorted(world.living_entities(), key=lambda e: e.entity_id):
         if not entity.asleep:
             continue
-        interval = recovery_interval(entity.sleeping_on != GROUND, night)
+        points, interval = recovery_rate(entity.sleeping_on != GROUND, night)
         if world.tick % interval != 0:
             continue
-        world.set_entity(entity.with_fatigue(entity.fatigue - RECOVERY_PER_STEP))
+        world.set_entity(entity.with_fatigue(entity.fatigue - points))
 
 
 def _heal_bed_sleepers(world: World) -> None:

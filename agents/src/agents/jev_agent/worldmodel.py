@@ -36,6 +36,9 @@ DEFAULT_REMAINING: Mapping[str, int] = items.DEFAULT_REMAINING
 HISTORY_LIMIT = 200
 UTTERANCE_LIMIT = 40
 DAMAGE_LOG_LIMIT = 40
+# How many observed deaths the model remembers, and how many `look` shows.
+DEATHS_SEEN_LIMIT = 20
+DEATHS_SHOWN = 4
 
 
 @dataclass(frozen=True)
@@ -325,6 +328,27 @@ def conversation_from_object(obj: ObjectInfo) -> ConversationInfo:
 
 
 @dataclass(frozen=True)
+class DeathSeen:
+    """An entity this actor watched die. `killer_id` is "" for starvation.
+
+    Wolf ids are never reused (`world/wolves.py` counts up and skips any id
+    still in the world), so a wolf id in here is dead for good. A settler id
+    is not: settlers respawn, and `WorldModel.death_of` forgets one as soon as
+    the body is seen alive again.
+    """
+
+    entity_id: str
+    entity_type: str
+    tick: int
+    killer_id: str
+
+    def fact(self) -> str:
+        """`"wolf_6 died at tick 953 (killed by esme)"`."""
+        by = f" (killed by {self.killer_id})" if self.killer_id else ""
+        return f"{self.entity_id} died at tick {self.tick}{by}"
+
+
+@dataclass(frozen=True)
 class DamageTaken:
     """One hit this actor took; `attacker_id` is empty for starvation."""
 
@@ -423,6 +447,14 @@ class WorldModel:
         self.history: deque[HistoryEntry] = deque(maxlen=HISTORY_LIMIT)
         self.heard: deque[HeardUtterance] = deque(maxlen=UTTERANCE_LIMIT)
         self.damage_log: deque[DamageTaken] = deque(maxlen=DAMAGE_LOG_LIMIT)
+        # Every death this actor observed, newest last. Hunting a wolf that
+        # died 1000 ticks ago cost three settlers most of a day in the
+        # 2026-09-20 hamlet run, so the model remembers.
+        self.deaths_seen: deque[DeathSeen] = deque(maxlen=DEATHS_SEEN_LIMIT)
+        # entity id -> its type, never pruned: an entity is dropped from
+        # `entities` the moment it leaves view, and a death event names only
+        # the id, so the type has to be remembered separately.
+        self._entity_types: dict[str, str] = {}
         # Everything this actor heard inside a conversation, kept per
         # conversation: `heard` is a short shared window, and a converser needs
         # the whole exchange it sat through.
@@ -545,6 +577,7 @@ class WorldModel:
 
         for entity in observation.visible_entities:
             self.entities[entity.entity_id] = _entity_info(entity, observation.tick_id)
+            self._entity_types[entity.entity_id] = entity.entity_type
 
     def _apply_events(self, observation: pb.Observation, digest: TickDigest) -> None:
         tick = observation.tick_id
@@ -598,6 +631,7 @@ class WorldModel:
             elif kind == "entity_died":
                 died = event.entity_died
                 digest.deaths.append(died.entity_id)
+                self._record_death(died, tick)
                 if died.entity_id == self.entity_id:
                     digest.self_died = True
                     self.history.append(
@@ -804,6 +838,53 @@ class WorldModel:
             key=lambda entity: (chebyshev(entity.position, centre), entity.entity_id)
         )
         return matches
+
+    def _record_death(self, died: pb.EntityDied, tick: int) -> None:
+        """Remember a death this actor observed, replacing any earlier one."""
+        self._forget_death(died.entity_id)
+        self.deaths_seen.append(
+            DeathSeen(
+                entity_id=died.entity_id,
+                entity_type=self._entity_types.get(died.entity_id, ""),
+                tick=tick,
+                killer_id=died.killer_id,
+            )
+        )
+
+    def _forget_death(self, entity_id: str) -> None:
+        """Drop any remembered death of `entity_id`, for a body seen alive again."""
+        remaining = [
+            death for death in self.deaths_seen if death.entity_id != entity_id
+        ]
+        if len(remaining) == len(self.deaths_seen):
+            return
+        self.deaths_seen.clear()
+        self.deaths_seen.extend(remaining)
+
+    def death_of(self, entity_id: str) -> DeathSeen | None:
+        """The remembered death of `entity_id`, or None if it may still be alive.
+
+        A settler that has been observed alive since it died has respawned, so
+        its death is forgotten; a wolf id is never reused and stays dead.
+        """
+        for death in reversed(self.deaths_seen):
+            if death.entity_id != entity_id:
+                continue
+            seen = self.entities.get(entity_id)
+            if seen is not None and seen.alive and seen.last_seen > death.tick:
+                self._forget_death(entity_id)
+                return None
+            return death
+        return None
+
+    def recent_deaths(self, limit: int = DEATHS_SHOWN) -> list[DeathSeen]:
+        """The last `limit` deaths this actor saw that are still deaths."""
+        found = [
+            death
+            for death in reversed(self.deaths_seen)
+            if self.death_of(death.entity_id) is not None
+        ]
+        return list(reversed(found[:limit]))
 
     def nearest_wolf(self) -> EntityInfo | None:
         """The closest living wolf the actor knows about, if any."""

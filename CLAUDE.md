@@ -137,6 +137,22 @@ lists your own standing pieces by 8-connected cluster; and the world wakes a
 sleeper at `HUNGRY_WAKE_FOOD` (20), which is also the level below which it
 refuses to lie down. Details: "Hamlet-run fixes, round 2" in
 [agents/CLAUDE.md](agents/CLAUDE.md).
+**Hamlet-run fixes, round 3 (2026-09-20)**: sleeping on the ground now
+recovers 2 fatigue per 3 ticks at night and 1 per 3 by day (was 1 per 2 and 1
+per 4; bed numbers unchanged), because days 4-6 of
+`runs/20260920-030501-hamlet` were 41% asleep. `wolf_spawn_interval_ticks` is a
+world-config setting (default 40, `hamlet.toml` sets 120) so a killed wolf
+stays gone. `travel_to(x, y)` lost its `max_ticks` and runs to arrival, no
+route, danger or hunger on a code-computed budget. The tick loop now waits out
+the world's own intent deadline for the planner, so a single-tick tool can cost
+one tick instead of two. `place` crafts the piece when the pack holds the
+inputs. The world model remembers deaths it witnessed: `look` lists wolves seen
+die and wolves merely out of sight, `start_stint`/`set_reflex` refuse a dead id
+with the fact, and the journal's day log records it. The journal writer's
+prompt now opens with the same goal sentences as the planner's
+(`items.island_opening`). Contracts:
+[docs/10_metal_and_sleep.md](docs/10_metal_and_sleep.md),
+[docs/05_jev_agents_design.md](docs/05_jev_agents_design.md).
 **In progress**: milestone 7, run recording & replay — every run is recorded to `runs/<run_id>/` as gzip JSONL (not Parquet) and a replay server serves it to the viewer with seeking, playback and deep links. Contract: [docs/07_replay.md](docs/07_replay.md).
 **Not done**: milestone 8 (LLM agents) is superseded by `agents.jev_agent`.
 **Implementation Plan**: [docs/03_implementation_plan.md](docs/03_implementation_plan.md)

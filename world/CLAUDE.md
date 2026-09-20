@@ -172,7 +172,7 @@ uv run python -m agents.random_agent --entity bob
 
 ### Wolf tunables in the world config
 
-`[world]` carries four wolf settings, all validated when the config loads
+`[world]` carries five wolf settings, all validated when the config loads
 (`world/src/world/config.py`):
 
 - `wolves` (bool) - whether the world simulates wolves at all.
@@ -180,14 +180,18 @@ uv run python -m agents.random_agent --entity bob
 - `wolf_spawn_min_distance` (default 20, must be >= 1)
 - `wolf_spawn_max_distance` (default 40, must be > the minimum and below
   `wolves.DESPAWN_DISTANCE` = 50, or a wolf would be culled on arrival).
+- `wolf_spawn_interval_ticks` (default 40, must be >= 1) - ticks between spawn
+  attempts, so a killed wolf stays gone for at least that long.
 
 The defaults are the `wolves.py` module constants, so a config that says
 nothing behaves exactly as before. `WorldConfig.wolf_settings()` bundles the
-three into a frozen `WolfSettings`, which travels
+four into a frozen `WolfSettings`, which travels
 `run_server` -> `WorldServer` -> `TickLoop` -> `WolfSimulator`. Nothing reads
-`MAX_WOLVES` / `SPAWN_MIN_DISTANCE` / `SPAWN_MAX_DISTANCE` at spawn time any
-more; the simulator reads `self.settings`. `hamlet.toml` is the first config to
-override them (one wolf, 30-45 tiles).
+`MAX_WOLVES` / `SPAWN_MIN_DISTANCE` / `SPAWN_MAX_DISTANCE` /
+`SPAWN_INTERVAL_TICKS` at spawn time any more; the simulator reads
+`self.settings`. `hamlet.toml` is the only config that overrides them (one
+wolf, 30-45 tiles, 120 ticks between spawn attempts - the 2026-09-20 run had a
+wolf alive essentially always). No agent-facing text states the interval.
 
 ## Gotchas & Learnings
 
@@ -493,6 +497,17 @@ sleeper still ignores hunger entirely. The old line was food 0 both ways, and
 a settler slept from food 39 through 156 ticks and died four ticks after
 waking. The agent mirror is `agents/.../items.py: HUNGRY_WAKE_FOOD`, which
 feeds the planner prompt's sleep physics and Jev's `sleep:` option text.
+
+**Ground sleep retune (2026-09-20, hamlet round 3).** Recovery is now a rate,
+not an interval: `sleep.recovery_rate(on_bed, night)` returns
+`(points, ticks)` from `BED_NIGHT_RECOVERY` (1, 1), `BED_DAY_RECOVERY` (1, 2),
+`GROUND_NIGHT_RECOVERY` (2, 3) and `GROUND_DAY_RECOVERY` (1, 3), and
+`_recover_fatigue` sheds `points` on every tick divisible by `ticks`. The bed
+numbers are unchanged; the ground was 1 per 2 at night and 1 per 4 by day,
+which made a bedless settler sleep ~233 of a 300-tick day (41% of settler-ticks
+in the run were spent asleep, and a long ground sleep cost ~50 food). The
+agent mirror is `items.SLEEP_RECOVERY` / `items.sleep_recovery_text`, which
+every prompt and option string is generated from.
 
 `is_tired(entity)` (fatigue >= 60) is the one predicate other modules use:
 `stats.process_health_regen` skips the tired, and extraction and combat apply

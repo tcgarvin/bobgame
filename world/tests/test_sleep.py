@@ -285,12 +285,12 @@ class TestRecovery:
         [
             ("bed_1", 201, 39),  # bed at night: one per tick
             ("bed_1", 202, 39),
-            ("", 201, 40),  # ground at night: one per two ticks
-            ("", 202, 39),
+            ("", 201, 38),  # ground at night: two per three ticks
+            ("", 202, 40),
             ("bed_1", 101, 40),  # bed by day: one per two ticks
             ("bed_1", 102, 39),
-            ("", 102, 40),  # ground by day: one per four ticks
-            ("", 104, 39),
+            ("", 102, 39),  # ground by day: one per three ticks
+            ("", 104, 40),
         ],
     )
     def test_recovery_rates(self, sleeping_on: str, tick: int, expected: int) -> None:
@@ -461,9 +461,10 @@ class TestCollapse:
     def test_collapsed_sleeper_wakes_at_seventy(self) -> None:
         world = _world()
         _with_settler(
-            world, fatigue=COLLAPSE_WAKE_FATIGUE + 1, asleep=True, collapsed=True
+            world, fatigue=COLLAPSE_WAKE_FATIGUE + 2, asleep=True, collapsed=True
         )
-        world.tick = 202
+        # Ground, at night: two fatigue shed on every third tick.
+        world.tick = 201
         events = TickEvents()
         process_fatigue_phase(world, events)
         bob = world.get_entity("bob")

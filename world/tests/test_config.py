@@ -12,6 +12,7 @@ from world.config import (
 from world.wolves import (
     DESPAWN_DISTANCE,
     MAX_WOLVES,
+    SPAWN_INTERVAL_TICKS,
     SPAWN_MAX_DISTANCE,
     SPAWN_MIN_DISTANCE,
 )
@@ -27,6 +28,8 @@ class TestWolfTunables:
         assert settings.max_wolves == MAX_WOLVES
         assert settings.spawn_min_distance == SPAWN_MIN_DISTANCE
         assert settings.spawn_max_distance == SPAWN_MAX_DISTANCE
+        assert config.wolf_spawn_interval_ticks == SPAWN_INTERVAL_TICKS
+        assert settings.spawn_interval_ticks == SPAWN_INTERVAL_TICKS
 
     def test_settings_carry_the_configured_values(self) -> None:
         settings = WorldConfig(
@@ -36,6 +39,14 @@ class TestWolfTunables:
         ).wolf_settings()
         assert (settings.max_wolves, settings.spawn_min_distance) == (1, 30)
         assert settings.spawn_max_distance == 45
+        slow = WorldConfig(wolf_spawn_interval_ticks=120).wolf_settings()
+        assert slow.spawn_interval_ticks == 120
+
+    def test_a_spawn_interval_below_one_is_refused(self) -> None:
+        with pytest.raises(
+            ValidationError, match="wolf_spawn_interval_ticks must be at least 1"
+        ):
+            WorldConfig(wolf_spawn_interval_ticks=0)
 
     def test_no_wolves_at_all_is_allowed(self) -> None:
         assert WorldConfig(max_wolves=0).wolf_settings().max_wolves == 0
@@ -77,6 +88,7 @@ class TestShippedConfigs:
         assert settings.max_wolves == 1
         assert settings.spawn_min_distance == 30
         assert settings.spawn_max_distance == 45
+        assert settings.spawn_interval_ticks == 120
 
     def test_settlement_is_unchanged(self) -> None:
         config = load_config(find_config("settlement"))

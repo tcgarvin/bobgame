@@ -350,9 +350,13 @@ is fast, cheap, and literal, while the planner is slow and expensive. Tools:
 - `start_stint(instruction, success_condition, max_ticks, notes="", check_every=1)`
   → runs the stint to completion and returns the stint report. This is the
   main tool. The tool call resolves only when the stint ends.
-- `travel_to(x, y, max_ticks)` → a stint with a preset travel target and a
-  brief of "Walk to the destination", whose `places` hold the coordinate under
-  the name `destination`, so Jev works in offsets and never sees the numbers.
+- `travel_to(x, y)` → a stint with a preset travel target and a brief of "Walk
+  to the destination", whose `places` hold the coordinate under the name
+  `destination`, so Jev works in offsets and never sees the numbers. Since
+  2026-09-20 the planner gives it no tick budget: the walk runs to
+  `arrived`/`arrived_next_to`, `no_path`, or a danger or hunger stop. Code
+  computes a backstop budget of `path_length * 2 + 20` ticks, clamped to
+  30..600 (`travel_budget` in `planner.py`).
 - Direct single-tick actions (each waits one tick and returns the result):
   `eat(kind)`, `pickup(kind, amount)`, `drop(kind, amount)`,
   `deposit(object_id, kind, amount)`, `withdraw(object_id, kind, amount)`,

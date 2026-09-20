@@ -384,6 +384,7 @@ async def run_server(
         max_wolves=wolf_settings.max_wolves,
         wolf_spawn_min_distance=wolf_settings.spawn_min_distance,
         wolf_spawn_max_distance=wolf_settings.spawn_max_distance,
+        wolf_spawn_interval_ticks=wolf_settings.spawn_interval_ticks,
         entities=len(entities) if entities else 0,
         objects=len(objects) if objects else 0,
     )

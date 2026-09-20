@@ -63,7 +63,21 @@ class TestSpawning:
         assert settings.max_wolves == MAX_WOLVES
         assert settings.spawn_min_distance == SPAWN_MIN_DISTANCE
         assert settings.spawn_max_distance == SPAWN_MAX_DISTANCE
+        assert settings.spawn_interval_ticks == SPAWN_INTERVAL_TICKS
         assert WolfSimulator(seed=1).settings == settings
+
+    def test_a_configured_spawn_interval_is_the_only_tick_that_spawns(self) -> None:
+        settings = WolfSettings(spawn_interval_ticks=120)
+        simulator = WolfSimulator(seed=1, settings=settings)
+        world = _world_with_player()
+
+        world.tick = SPAWN_INTERVAL_TICKS
+        simulator.step(world, _context(world), TickEvents())
+        assert not [e for e in world.all_entities().values() if e.entity_type == "wolf"]
+
+        world.tick = 120
+        simulator.step(world, _context(world), TickEvents())
+        assert [e for e in world.all_entities().values() if e.entity_type == "wolf"]
 
     def test_spawns_in_the_ring_the_settings_ask_for(self) -> None:
         settings = WolfSettings(

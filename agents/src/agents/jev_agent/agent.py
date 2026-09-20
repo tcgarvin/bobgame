@@ -105,6 +105,13 @@ MODE_REFLEX = "reflex"
 MODE_CONVERSATION = "conversation"
 MODE_IDLE = "idle"
 
+# How the tick loop waits for the planner inside a tick (see
+# `_await_planner_work`). The margin leaves room for the gRPC submit; the cap
+# keeps a clock skew between world and agent from stalling the loop.
+SUBMIT_MARGIN_MS = 200.0
+MAX_PLANNER_WAIT_MS = 2_000.0
+PLANNER_POLL_SECONDS = 0.02
+
 # Called with "accepted" or a rejection string once the world has answered.
 ResultSink = Callable[[str], None]
 
@@ -325,6 +332,9 @@ class JevAgent:
         self._active_stint: Stint | None = None
         self._active_request: _StintRequest | None = None
         self._awaiting_direct: _DirectRequest | None = None
+        # Absolute wall-clock ms by which the world wants this tick's intent,
+        # as the observation reports it. 0.0 until the first observation.
+        self._deadline_ms = 0.0
         self._held_stint: _HeldStint | None = None
         self._conversation: ConversationSession | None = None
         self._conversation_waiters: list[_ConversationWaiter] = []
@@ -559,6 +569,7 @@ class JevAgent:
 
     async def _handle_tick(self, observation: pb.Observation) -> None:
         digest = self._model.update(observation)
+        self._deadline_ms = float(observation.deadline_ms)
         # A sign pushes its line at whoever walks past, so the planner is told
         # through the same note path as a reflex line (docs/08_building.md).
         for note in digest.sign_notes:
@@ -657,6 +668,8 @@ class JevAgent:
         if stint is not None and stint.finished:
             self._finish_stint()
 
+        await self._await_planner_work()
+
         if self._active_stint is None and not self._stint_requests.empty():
             stint = self._begin_stint(self._stint_requests.get_nowait())
             intent = await stint.decide(digest)
@@ -666,6 +679,38 @@ class JevAgent:
             return intent, stint.record_intent_result
 
         return self._planning_intent()
+
+    def _submit_window_ms(self) -> float:
+        """Milliseconds left before this tick's intent deadline, minus the margin.
+
+        Zero when the world sent no deadline (fakes and tests) or when the
+        clock says the window is gone. Capped at MAX_PLANNER_WAIT_MS so a
+        clock skew between world and agent cannot stall the tick loop.
+        """
+        if self._deadline_ms <= 0.0:
+            return 0.0
+        left = self._deadline_ms - time.time() * 1000.0 - SUBMIT_MARGIN_MS
+        return min(MAX_PLANNER_WAIT_MS, max(0.0, left))
+
+    async def _await_planner_work(self) -> None:
+        """Let the planner use the rest of this tick's window to queue an action.
+
+        The future behind a single-tick tool is resolved at the top of this
+        tick, but the planner task is only *scheduled* there: without this
+        wait the tick loop went on to choose and submit this tick's intent
+        without yielding, so the planner's next action could not go out until
+        the tick after, and every single-tick tool cost two ticks (one to act,
+        one to wait). An action that comes back inside the world's own
+        deadline now goes out on this tick.
+        """
+        if self._awaiting_direct is not None or self._pending_thought:
+            return
+        if not self._body_is_active() or self.mode != MODE_PLANNING:
+            return
+        while self._direct_requests.empty() and self._stint_requests.empty():
+            if self._submit_window_ms() <= 0.0:
+                return
+            await asyncio.sleep(PLANNER_POLL_SECONDS)
 
     def _planning_intent(self) -> tuple[pb.Intent, ResultSink | None]:
         if self._awaiting_direct is None and not self._direct_requests.empty():
@@ -700,6 +745,12 @@ class JevAgent:
         note queue, and its budget is spent so it writes its reflection and
         stops.
         """
+        for entity_id in digest.deaths:
+            if entity_id == self.entity_id:
+                continue
+            death = self._model.death_of(entity_id)
+            if death is not None:
+                self.planner.day_log.add(self._model.tick, KIND_EVENT, death.fact())
         if digest.self_died:
             tick = self._model.tick
             self.planner.day_log.add(tick, KIND_EVENT, f"you died at tick {tick}")

@@ -17,6 +17,8 @@ wolves = true
 max_wolves = 1
 wolf_spawn_min_distance = 30
 wolf_spawn_max_distance = 45
+# A killed wolf stays gone for a while: 120 ticks between spawn attempts.
+wolf_spawn_interval_ticks = 120
 tick_duration_ms = 2000
 intent_deadline_ms = 1200
 # A day is 300 ticks = 10 minutes at 2 s ticks; nights start at tick 200.

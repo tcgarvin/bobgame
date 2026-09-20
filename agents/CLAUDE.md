@@ -550,6 +550,67 @@ rooms). New module `enclosure.py` holds the arithmetic three callers now share.
   Jev's `sleep:` option text, and `SleepRecord.to_text` spells the numbers out
   on a `hungry` wake.
 
+### Hamlet-run fixes, round 3 (2026-09-20)
+
+The third pass over `runs/20260920-030501-hamlet`, where days 4-6 were 41%
+asleep, 20% idle while the planner thought, 10% travelling and 3% actually
+gathering or building.
+
+- **Ground sleep retune** is a world change (`world/CLAUDE.md`, docs/10).
+  `items.SLEEP_RECOVERY` maps `(on_bed, night)` to `(points, ticks)` -
+  `(1, 1)`, `(1, 2)` on a bed, `(2, 3)` at night and `(1, 3)` by day on the
+  ground - and `items.sleep_recovery_text` renders `"2 fatigue per 3 ticks"`.
+  Every agent-facing sleep number (`settlement_narrative`, `jevstate.py`'s
+  fatigue physics, `options.py`'s `sleep:<bed>` and `sleep:ground`) is
+  generated from it, so nothing else had to change.
+- **`travel_to(x, y)` has no `max_ticks`.** One settler made 16 `travel_to`
+  calls inside a 10-tile radius, each re-called the moment its model-chosen
+  budget ran out, spending a whole 20-call turn and ~220 ticks. The walk now
+  runs to `arrived`/`arrived_next_to`, `no_path`, a danger stop or a food
+  stop. `planner.travel_budget(model, target)` computes a backstop of
+  `path_length * TRAVEL_TICKS_PER_STEP (2) + TRAVEL_TICK_ALLOWANCE (20)`,
+  clamped to `TRAVEL_MIN_TICKS` (30) .. `TRAVEL_MAX_TICKS` (600), falling back
+  to the straight-line distance when A* finds no route. A model that passes
+  `max_ticks` anyway gets `_FriendlyArgsValidator`'s retry
+  (`"travel_to takes: x, y"`), not a failed turn - there is a test for that.
+- **One tick for a one-tick tool.** `direct_action`'s future was already
+  resolved at the top of tick N+1 (`_resolve_awaiting_direct`), but nothing on
+  the planning path suspends between there and `submit_intent`, so the planner
+  task was only *scheduled*: tick N+1 went out as a `Wait` and the next action
+  could not leave before N+2. `JevAgent._await_planner_work` now polls
+  (`PLANNER_POLL_SECONDS`, 0.02) until a direct or stint request appears or
+  the world's own `Observation.deadline_ms` runs out, minus `SUBMIT_MARGIN_MS`
+  (200) and capped at `MAX_PLANNER_WAIT_MS` (2000) against clock skew. It only
+  runs in `MODE_PLANNING` with an active body and nothing already in flight,
+  and with no deadline (fakes, tests) it returns at once. Measured floor
+  before: 2 ticks per action, 3 for 63% of calls; the floor is now 1 whenever
+  the model round-trip fits inside the tick's `intent_deadline_ms` (1.2 s).
+- **`place` crafts what it is short of**, like `build` and `place_sign`.
+  `_stock_one_to_place` runs `_craft_chain(kind, 1)` when the pack is empty
+  and the kind has a recipe; on failure the existing shortfall plus
+  `items.source_text` lines are returned and nothing is placed. A bed is one
+  call when the planks and the fiber are in the pack.
+- **Known-dead entities.** `WorldModel.deaths_seen` is a deque of `DeathSeen`
+  (`entity_id`, `entity_type`, `tick`, `killer_id`, and `fact()` ->
+  `"wolf_6 died at tick 953 (killed by esme)"`), filled from the `entity_died`
+  observation event. Types come from `_entity_types`, an id -> type map that is
+  never pruned, because an entity leaves `entities` the moment it leaves view.
+  `death_of(id)` forgets a death once the body has been seen alive since
+  (settlers respawn; wolf ids are never reused - `wolves._next_wolf_id` counts
+  up and skips anything still in the world). `look` gains
+  `wolves you know of but cannot see:` with `last seen N ticks ago at (x, y)`
+  and `wolves you saw die: wolf_6 (tick 953)` (last `DEATHS_SHOWN`, 4);
+  `_refuse_dead_targets` raises a `ModelRetry` carrying the fact when
+  `start_stint` or `set_reflex` text names a dead id (`OBJECT_ID_PATTERN`
+  matches `wolf_6`); and `agent._note_life_transitions` writes each witnessed
+  death into the journal's `DayLog` as a `KIND_EVENT`. esme, finn and ada
+  hunted a wolf esme had killed at t953 until t2008.
+- **The journal writer knows the goal.** `items.island_opening(settler_count)`
+  holds the setting and goal paragraph; `settlement_narrative()` and
+  `journal_narrative()` both open with it, so a `Tomorrow` section is written
+  against the same goal the planner plans against. Nothing was added about
+  what to write.
+
 ### The eject question, split in three (docs/05)
 
 Jev is asked `done` ("is the success condition met right now"), `stuck` ("has

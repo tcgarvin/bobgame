@@ -75,11 +75,13 @@ from .build import (
 )
 from .enclosure import enclosed_fact, own_pieces_line
 from .geometry import NAME_TO_DIRECTION, NO_DIRECTION, Coord, chebyshev
+from .pathfinding import NO_PATH, path_length
 from .options import (
     MAX_BRIEF_HAILS,
     MAX_BRIEF_PLACES,
     MAX_BRIEF_SHOUTS,
     MAX_SHOUT_LENGTH,
+    OBJECT_ID_PATTERN,
     PLACE_NAME_PATTERN,
     WOLF_ALERT_RADIUS,
     BriefHail,
@@ -171,13 +173,7 @@ def settlement_narrative(
 ) -> str:
     """The planner's system prompt for a scenario with this many settlers."""
     return f"""\
-You are one of {items.settler_count_word(settler_count)} people who woke up together on a large, wild island with
-nothing but your hands. The others are real agents like you; they hear what you
-say and read what you write. Together, build a civilization: a settlement that
-lasts, where every one of you has a shelter of your own to sleep in, and where
-food, safety and rest are things you can count on tomorrow and not only today.
-Each of you also has to find your place in it: what you do, whom you work with,
-and what you are known for.
+{items.island_opening(settler_count)}
 
 What follows is how this world works and how you act in it. What to do with it
 is up to you and the others.
@@ -427,8 +423,10 @@ What Jev sees, and how to write for it:
   A stint that runs out of ticks hands your body back with the job half done.
   A stint that ends "lost" hands it back because Jev could not see or reach
   what you asked for.
-- `travel_to` walks you to a map position and `build` places a whole line or
-  rectangle of pieces; each is one call however many ticks it runs. Walking,
+- `travel_to` walks you to a map position and runs until you arrive, until
+  there is no way through, or until a wolf or hunger stops you; it takes no
+  tick budget from you. `build` places a whole line or rectangle of pieces.
+  Each is one call however many ticks it runs. Walking,
   fighting, chopping, mining and picking berries happen only through Jev,
   `travel_to` or `build`: you have no tool of your own for them. The
   single-tick tools cover one-off precision actions on what is already within
@@ -796,6 +794,32 @@ DESTINATION_PLACE = "destination"
 TRAVEL_ARRIVED = "arrived"
 TRAVEL_ARRIVED_NEXT_TO = "arrived_next_to"
 
+# `travel_to` has no tick budget of its own any more: it runs until it arrives,
+# gives up (`no_path`), or is stopped by danger or hunger. The budget below is
+# only the backstop that keeps a hopeless walk from running forever. It is two
+# ticks per step of the remembered path (detours, blocked tiles and fights all
+# cost ticks) plus a fixed allowance, and it is never below TRAVEL_MIN_TICKS.
+# In the 2026-09-20 hamlet run one settler spent a 20-call budget and ~220
+# ticks on 16 travel_to calls inside a 10-tile radius, each one re-called the
+# moment its model-chosen max_ticks ran out.
+TRAVEL_TICKS_PER_STEP = 2
+TRAVEL_TICK_ALLOWANCE = 20
+TRAVEL_MIN_TICKS = 30
+TRAVEL_MAX_TICKS = 600
+
+
+def travel_budget(model: WorldModel, target: Coord) -> int:
+    """Backstop tick budget for a walk from `model.position` to `target`.
+
+    Uses the remembered path when there is one, and the straight-line distance
+    when the map is not known well enough to find one.
+    """
+    steps = path_length(model, model.position, target)
+    if steps == NO_PATH:
+        steps = chebyshev(model.position, target)
+    budget = steps * TRAVEL_TICKS_PER_STEP + TRAVEL_TICK_ALLOWANCE
+    return min(TRAVEL_MAX_TICKS, max(TRAVEL_MIN_TICKS, budget))
+
 
 def travel_arrival(model: WorldModel, target: Coord) -> str:
     """`arrived`, `arrived_next_to`, or `""` while the walk is still going.
@@ -834,6 +858,26 @@ def _validated_shouts(shouts: Sequence[str]) -> tuple[str, ...]:
             f"a shout phrase is at most {MAX_SHOUT_LENGTH} characters: {too_long[0]!r}"
         )
     return phrases
+
+
+def _refuse_dead_targets(model: WorldModel, *texts: str) -> None:
+    """Retry any brief text naming an entity this actor watched die.
+
+    Only ids the actor saw die and has not seen alive since; a settler that
+    respawned is forgotten by `WorldModel.death_of`.
+    """
+    facts: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        for token in OBJECT_ID_PATTERN.findall(text):
+            if token in seen:
+                continue
+            seen.add(token)
+            death = model.death_of(token)
+            if death is not None:
+                facts.append(death.fact())
+    if facts:
+        raise ModelRetry("; ".join(facts))
 
 
 def settlers_met(model: WorldModel) -> list[str]:
@@ -990,6 +1034,38 @@ def _roster_lines(model: WorldModel) -> list[str]:
             f"  {entity.entity_id} at {entity.position} "
             f"(d{chebyshev(entity.position, model.position)}, {when}{state})"
         )
+    return lines
+
+
+def _wolf_memory_lines(model: WorldModel) -> list[str]:
+    """Wolves this actor knows of but cannot see, and the deaths it witnessed.
+
+    Three settlers in the 2026-09-20 hamlet run hunted wolf_6 for a thousand
+    ticks after watching it die, because nothing they were shown said so.
+    """
+    lines: list[str] = []
+    out_of_sight = [
+        entity
+        for entity in model.entities.values()
+        if entity.entity_type == WOLF_ENTITY_TYPE
+        and entity.alive
+        and model.death_of(entity.entity_id) is None
+        and chebyshev(entity.position, model.position) > VIEW_RADIUS
+    ]
+    for wolf in sorted(out_of_sight, key=lambda w: w.entity_id):
+        age = model.tick - wolf.last_seen
+        lines.append(f"  {wolf.entity_id} last seen {age} ticks ago at {wolf.position}")
+    if lines:
+        lines.insert(0, "wolves you know of but cannot see:")
+
+    dead = [
+        death
+        for death in model.recent_deaths()
+        if death.entity_type == WOLF_ENTITY_TYPE
+    ]
+    if dead:
+        seen = ", ".join(f"{d.entity_id} (tick {d.tick})" for d in dead)
+        lines.append(f"wolves you saw die: {seen}")
     return lines
 
 
@@ -1220,6 +1296,7 @@ def describe_world(model: WorldModel) -> str:
     else:
         lines.append("entities in view: none")
 
+    lines.extend(_wolf_memory_lines(model))
     lines.extend(_roster_lines(model))
     lines.extend(_conversation_lines(model))
 
@@ -1245,6 +1322,21 @@ async def _stock_for_build(
     if wanted > 0:
         await _craft_chain(ctx, plan.kind, wanted, tally)
     return tally
+
+
+async def _stock_one_to_place(ctx: RunContext[PlannerDeps], kind: str) -> list[str]:
+    """Craft one `kind` for `place` to put down, and say what happened.
+
+    The lines are what the model is shown: what the chain made, and, when the
+    pack is still empty afterwards, why it stopped and where the raw material
+    it lacked comes from.
+    """
+    tally = CraftTally()
+    await _craft_chain(ctx, kind, 1, tally)
+    lines = [tally.text()] if tally.text() else []
+    if _carried(ctx, kind) <= 0:
+        lines.append(tally.stopped or f"you carry no {kind} and made none")
+    return lines
 
 
 async def _run_build(
@@ -1384,6 +1476,9 @@ def build_planner_agent(
                 coordinate. Names are lowercase letters, digits and
                 underscores, at most 6 per brief.
         """
+        _refuse_dead_targets(
+            ctx.deps.bridge.model, instruction, success_condition, notes
+        )
         brief = Brief(
             instruction=instruction,
             success_condition=success_condition,
@@ -1398,20 +1493,19 @@ def build_planner_agent(
         return report.to_text()
 
     @tools.tool
-    async def travel_to(
-        ctx: RunContext[PlannerDeps], x: int, y: int, max_ticks: int
-    ) -> str:
-        """Walk to a map position, reacting to danger on the way.
+    async def travel_to(ctx: RunContext[PlannerDeps], x: int, y: int) -> str:
+        """Walk to a map position, however many ticks that takes.
 
         The walk ends the tick you stand on (x, y). If that tile cannot be
         stood on - water, a wall, a bush, another settler - it ends when you
         are next to it, which is as close as walking gets. If you are already
-        there when you call this, it returns at once and costs no tick.
+        there when you call this, it returns at once and costs no tick. It
+        also ends early if there is no way through, if a wolf is on you or if
+        you get hungry; the result says which.
 
         Args:
             x: destination map x.
             y: destination map y.
-            max_ticks: tick budget for the walk.
         """
         model = ctx.deps.bridge.model
         target = (x, y)
@@ -1422,7 +1516,7 @@ def build_planner_agent(
         brief = Brief(
             instruction="Walk to the destination.",
             success_condition="you are standing on the destination",
-            max_ticks=max(1, max_ticks),
+            max_ticks=travel_budget(model, target),
             notes="Follow the path; react to danger.",
             travel=TravelState(target=target, label=DESTINATION_PLACE),
             # Jev reasons about offsets, never coordinates, so the target is a
@@ -1832,6 +1926,9 @@ def _register_reflex_tools(tools: FunctionToolset[PlannerDeps]) -> None:
                 reflex fires; nobody can answer it.
             places: named map positions Jev may walk to, as in start_stint.
         """
+        _refuse_dead_targets(
+            ctx.deps.bridge.model, instruction, success_condition, notes
+        )
         brief = ReflexBrief(
             instruction=instruction,
             success_condition=success_condition,
@@ -2171,7 +2268,14 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
     async def place(
         ctx: RunContext[PlannerDeps], kind: str, direction: str = ""
     ) -> str:
-        """Put one carried item down as an object.
+        """Put one item down as an object, crafting it first if you need to.
+
+        If you are not carrying one but are carrying the inputs, this call
+        crafts it and then places it: one call for a bed when the planks and
+        the fiber are in your pack. A station recipe is only crafted where
+        that station already is, on or next to your tile; nothing walks. If
+        it cannot be made, nothing is placed and the result names the
+        shortfall and where the raw material comes from.
 
         For walls, floors and roads use `build` instead: one call places a
         whole line or rectangle.
@@ -2196,10 +2300,18 @@ def _register_single_tick_tools(tools: FunctionToolset[PlannerDeps]) -> None:
                 f"{kind} is a structure and needs a direction; only "
                 f"{sorted(items.GROUND_LAYER_KINDS)} go on your own tile"
             )
-        return await ctx.deps.bridge.direct_action(
-            pb.Intent(place=pb.PlaceIntent(kind=kind, direction=value)),
-            f"place {kind} {direction or 'here'}",
+        lines: list[str] = []
+        if _carried(ctx, kind) <= 0 and kind in items.RECIPES:
+            lines.extend(await _stock_one_to_place(ctx, kind))
+            if _carried(ctx, kind) <= 0:
+                return "\n".join(lines)
+        lines.append(
+            await ctx.deps.bridge.direct_action(
+                pb.Intent(place=pb.PlaceIntent(kind=kind, direction=value)),
+                f"place {kind} {direction or 'here'}",
+            )
         )
+        return "\n".join(lines)
 
     @tools.tool
     async def place_sign(

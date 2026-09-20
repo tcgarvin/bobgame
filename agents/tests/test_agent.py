@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import gzip
 import json
 from pathlib import Path
@@ -1410,3 +1411,78 @@ def test_a_settler_count_below_one_is_refused() -> None:
 
     with pytest.raises(SystemExit):
         parse_args(["--entity", "ada", "--settlers", "0"])
+
+
+async def test_a_wolf_death_you_witness_goes_into_the_day_log(
+    fake_jev: FakeJevClient, tmp_path: Path
+) -> None:
+    """The journal writer needs to know the wolf it hunted is gone (round 3)."""
+    script = [
+        make_observation(
+            1,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("wolf_6", (12, 10), entity_type="wolf")],
+        ),
+        make_observation(
+            2, make_entity("ada", (10, 10)), events=[died_event("wolf_6", "esme")]
+        ),
+    ]
+    world = FakeWorldClient(script)
+    agent = journal_agent(world, fake_jev, tmp_path, FakeJournalWriter())
+    await idle_planner(agent)
+    await agent.run()
+    agent.trace.close()
+
+    texts = [entry.text for entry in agent.planner.day_log.entries]
+    assert "wolf_6 died at tick 2 (killed by esme)" in texts
+
+
+# -- the tick loop waits for the planner inside a tick (round 3) --------------
+
+
+async def test_no_deadline_means_no_wait(
+    fake_jev: FakeJevClient, tmp_path: Path
+) -> None:
+    """Without a world deadline the loop chooses instantly, as it always did."""
+    agent = build_agent(FakeWorldClient([]), fake_jev, tmp_path)
+    agent.mode = "planning"
+    assert agent._submit_window_ms() == 0.0
+    await asyncio.wait_for(agent._await_planner_work(), timeout=0.5)
+    agent.trace.close()
+
+
+async def test_the_loop_waits_out_the_window_for_a_planner_action(
+    fake_jev: FakeJevClient, tmp_path: Path
+) -> None:
+    agent = build_agent(FakeWorldClient([]), fake_jev, tmp_path)
+    agent.mode = "planning"
+    agent._deadline_ms = time.time() * 1000.0 + 1_000.0
+
+    from agents.jev_agent.agent import _DirectRequest
+
+    async def queue_soon() -> None:
+        await asyncio.sleep(0.05)
+        await agent._direct_requests.put(
+            _DirectRequest(
+                intent=pb.Intent(wait=pb.WaitIntent()),
+                description="wait",
+                future=asyncio.get_running_loop().create_future(),
+            )
+        )
+
+    queued = asyncio.create_task(queue_soon())
+    await asyncio.wait_for(agent._await_planner_work(), timeout=2.0)
+    await queued
+    assert not agent._direct_requests.empty(), "the loop waited and found the action"
+    agent.trace.close()
+
+
+async def test_the_wait_ends_when_the_window_closes(
+    fake_jev: FakeJevClient, tmp_path: Path
+) -> None:
+    agent = build_agent(FakeWorldClient([]), fake_jev, tmp_path)
+    agent.mode = "planning"
+    agent._deadline_ms = time.time() * 1000.0 + 250.0
+    await asyncio.wait_for(agent._await_planner_work(), timeout=2.0)
+    assert agent._direct_requests.empty()
+    agent.trace.close()

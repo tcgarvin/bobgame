@@ -376,9 +376,7 @@ def journal_narrative(
 ) -> str:
     """The journal writer's system prompt for a scenario of this size."""
     return f"""\
-You are one of {items.settler_count_word(settler_count)} people who woke up together on a large, wild island with
-nothing but your hands. The others are real agents like you; they hear what you
-say and read what you write.
+{items.island_opening(settler_count)}
 
 The day is over. You are lying down, and this is the moment you write in your
 journal. You are given the journal as it stands and a log of everything this

@@ -45,6 +45,7 @@ from agents.jev_agent.planner import (
     read_memory,
     threat_alert,
     travel_arrival,
+    travel_budget,
     trim_history,
     _validated_hails as validated_hails,
 )
@@ -78,6 +79,7 @@ from agents.jev_agent.worldmodel import TranscriptLine, WorldModel
 from helpers import (
     converse_object,
     damaged_event,
+    died_event,
     make_entity,
     make_object,
     make_observation,
@@ -1167,6 +1169,9 @@ async def test_build_asks_again_when_the_shape_makes_no_sense(
 async def test_a_ground_piece_can_be_placed_without_a_direction(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
+    bridge.model.update(
+        make_observation(6, make_entity("ada", (10, 10), inventory={"road": 1}))
+    )
     agent = build_planner_agent("test")
     with agent.override(model=one_tool_call("place", {"kind": "road"})):
         await agent.run("go", deps=deps)
@@ -2139,9 +2144,7 @@ async def test_travel_to_spends_no_tick_when_you_are_already_there(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
     agent = build_planner_agent("test")
-    with agent.override(
-        model=one_tool_call("travel_to", {"x": 10, "y": 10, "max_ticks": 30})
-    ):
+    with agent.override(model=one_tool_call("travel_to", {"x": 10, "y": 10})):
         result = await agent.run("go", deps=deps)
     assert not bridge.briefs, "no stint is started for a walk already finished"
     text = _returned_text(result)[0]
@@ -2159,9 +2162,7 @@ async def test_travel_to_stops_beside_a_destination_nobody_can_stand_on(
         )
     )
     agent = build_planner_agent("test")
-    with agent.override(
-        model=one_tool_call("travel_to", {"x": 11, "y": 10, "max_ticks": 30})
-    ):
+    with agent.override(model=one_tool_call("travel_to", {"x": 11, "y": 10})):
         result = await agent.run("go", deps=deps)
     assert not bridge.briefs
     assert "(11, 10) cannot be stood on; you are next to it at (10, 10)" in (
@@ -2173,9 +2174,7 @@ async def test_travel_to_hands_the_stint_an_arrival_end_rule(
     deps: PlannerDeps, bridge: RecordingBridge
 ) -> None:
     agent = build_planner_agent("test")
-    with agent.override(
-        model=one_tool_call("travel_to", {"x": 14, "y": 10, "max_ticks": 30})
-    ):
+    with agent.override(model=one_tool_call("travel_to", {"x": 14, "y": 10})):
         await agent.run("go", deps=deps)
     end_check = bridge.end_checks[0]
     assert end_check(bridge.model) == "", "still walking where it started"
@@ -2188,9 +2187,7 @@ async def test_an_arrived_walk_says_where_the_body_ended_up(
 ) -> None:
     bridge.stint_end_reason = "arrived"
     agent = build_planner_agent("test")
-    with agent.override(
-        model=one_tool_call("travel_to", {"x": 12, "y": 10, "max_ticks": 30})
-    ):
+    with agent.override(model=one_tool_call("travel_to", {"x": 12, "y": 10})):
         result = await agent.run("go", deps=deps)
     assert "you are standing on (12, 10)" in _returned_text(result)[0]
 
@@ -2508,3 +2505,183 @@ def test_the_prompt_states_the_one_hunger_number_for_sleep() -> None:
     assert (
         f"when your\n  food falls to {items.HUNGRY_WAKE_FOOD}" in SETTLEMENT_NARRATIVE
     )
+
+
+# -- travel_to's own tick budget --------------------------------------------
+
+
+def test_travel_budget_scales_with_the_walk_and_has_a_floor(
+    world_model: WorldModel,
+) -> None:
+    """Two ticks per remembered step plus 20, never under the floor."""
+    near = travel_budget(world_model, (11, 10))
+    assert near == planner_module.TRAVEL_MIN_TICKS
+    far = travel_budget(world_model, (400, 400))
+    assert far > near
+    assert far <= planner_module.TRAVEL_MAX_TICKS
+
+
+async def test_travel_to_takes_no_tick_budget_from_the_model(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(model=one_tool_call("travel_to", {"x": 40, "y": 10})):
+        await agent.run("go", deps=deps)
+    assert bridge.briefs[0].max_ticks == travel_budget(bridge.model, (40, 10))
+
+
+async def test_travel_to_with_a_max_ticks_kwarg_is_a_retry_not_a_failure(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    """The friendly args validator names the real parameters instead of dying."""
+    agent = build_planner_agent("test")
+    model = one_tool_call("travel_to", {"x": 12, "y": 10, "max_ticks": 30})
+    with agent.override(model=model):
+        result = await agent.run("go", deps=deps)
+    retries = [
+        part.content
+        for message in result.all_messages()
+        for part in getattr(message, "parts", ())
+        if isinstance(getattr(part, "content", None), str)
+        and "travel_to takes: x, y" in part.content
+    ]
+    assert retries, "the retry should name travel_to's parameters"
+
+
+# -- place crafts what it is short of ----------------------------------------
+
+
+async def test_place_crafts_the_piece_when_the_inputs_are_in_the_pack(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    bridge.model.update(
+        make_observation(
+            6, make_entity("ada", (10, 10), inventory={"wood": 6, "stone": 4})
+        )
+    )
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=one_tool_call("place", {"kind": "chest", "direction": "N"})
+    ):
+        await agent.run("go", deps=deps)
+    kinds = [
+        intent.craft.recipe for intent, _ in bridge.actions if intent.HasField("craft")
+    ]
+    assert "chest" in kinds
+
+
+async def test_place_without_the_inputs_names_the_shortfall_and_places_nothing(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    agent = build_planner_agent("test")
+    with agent.override(
+        model=one_tool_call("place", {"kind": "chest", "direction": "N"})
+    ):
+        result = await agent.run("go", deps=deps)
+    text = _returned_text(result)[0]
+    assert "chest takes" in text
+    assert not [i for i, _ in bridge.actions if i.HasField("place")]
+
+
+# -- entities known to be dead ------------------------------------------------
+
+
+def _watch_a_wolf_die(model: WorldModel, tick: int = 7) -> None:
+    model.update(
+        make_observation(
+            tick - 1,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("wolf_6", (12, 10), entity_type="wolf")],
+        )
+    )
+    model.update(
+        make_observation(
+            tick, make_entity("ada", (10, 10)), events=[died_event("wolf_6", "esme")]
+        )
+    )
+
+
+def test_the_model_remembers_a_death_it_watched(world_model: WorldModel) -> None:
+    _watch_a_wolf_die(world_model)
+    death = world_model.death_of("wolf_6")
+    assert death is not None
+    assert death.fact() == "wolf_6 died at tick 7 (killed by esme)"
+    assert [d.entity_id for d in world_model.recent_deaths()] == ["wolf_6"]
+
+
+def test_a_settler_seen_alive_after_dying_is_no_longer_dead(
+    world_model: WorldModel,
+) -> None:
+    world_model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("bram", (12, 10))],
+        )
+    )
+    world_model.update(
+        make_observation(6, make_entity("ada", (10, 10)), events=[died_event("bram")])
+    )
+    assert world_model.death_of("bram") is not None
+    world_model.update(
+        make_observation(
+            20,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("bram", (12, 10))],
+        )
+    )
+    assert world_model.death_of("bram") is None
+
+
+def test_look_lists_the_wolves_you_saw_die(world_model: WorldModel) -> None:
+    _watch_a_wolf_die(world_model)
+    assert "wolves you saw die: wolf_6 (tick 7)" in describe_world(world_model)
+
+
+def test_look_ages_a_wolf_that_is_only_out_of_sight(world_model: WorldModel) -> None:
+    world_model.update(
+        make_observation(
+            5,
+            make_entity("ada", (10, 10)),
+            entities=[make_entity("wolf_9", (14, 10), entity_type="wolf")],
+        )
+    )
+    world_model.update(make_observation(25, make_entity("ada", (30, 30))))
+    text = describe_world(world_model)
+    assert "wolves you know of but cannot see:" in text
+    assert "wolf_9 last seen 20 ticks ago" in text
+
+
+async def test_start_stint_naming_a_dead_wolf_is_refused_with_the_fact(
+    deps: PlannerDeps, bridge: RecordingBridge
+) -> None:
+    _watch_a_wolf_die(bridge.model)
+    agent = build_planner_agent("test")
+    model = one_tool_call(
+        "start_stint",
+        {
+            "instruction": "Kill wolf_6.",
+            "success_condition": "wolf_6 is dead",
+            "max_ticks": 30,
+        },
+    )
+    with agent.override(model=model):
+        result = await agent.run("go", deps=deps)
+    assert not bridge.briefs
+    assert any(
+        "wolf_6 died at tick 7" in part.content
+        for message in result.all_messages()
+        for part in getattr(message, "parts", ())
+        if isinstance(getattr(part, "content", None), str)
+    )
+
+
+# -- the journal writer knows the goal ---------------------------------------
+
+
+def test_the_journal_writer_opens_with_the_planner_goal() -> None:
+    from agents.jev_agent.journal import journal_narrative
+
+    opening = items.island_opening(6)
+    assert settlement_narrative(6).startswith(opening)
+    assert journal_narrative(6).startswith(opening)

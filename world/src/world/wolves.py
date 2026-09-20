@@ -33,8 +33,9 @@ WOLF_TYPE = WOLF_ENTITY_TYPE
 WOLF_MAX_HEALTH = 16
 
 SPAWN_INTERVAL_TICKS = 40
-# Scenario-tunable defaults; a world config may override all three
-# (`max_wolves`, `wolf_spawn_min_distance`, `wolf_spawn_max_distance`).
+# Scenario-tunable defaults; a world config may override all four
+# (`max_wolves`, `wolf_spawn_min_distance`, `wolf_spawn_max_distance`,
+# `wolf_spawn_interval_ticks`).
 MAX_WOLVES = 3
 SPAWN_MIN_DISTANCE = 20
 SPAWN_MAX_DISTANCE = 40
@@ -63,13 +64,15 @@ class WolfSettings:
     """How many wolves a world keeps, and how far out they arrive.
 
     The defaults are the tuned settlement values; `WorldConfig` builds one of
-    these from `max_wolves`, `wolf_spawn_min_distance` and
-    `wolf_spawn_max_distance` and validates the three together.
+    these from `max_wolves`, `wolf_spawn_min_distance`,
+    `wolf_spawn_max_distance` and `wolf_spawn_interval_ticks`, and validates
+    them together.
     """
 
     max_wolves: int = MAX_WOLVES
     spawn_min_distance: int = SPAWN_MIN_DISTANCE
     spawn_max_distance: int = SPAWN_MAX_DISTANCE
+    spawn_interval_ticks: int = SPAWN_INTERVAL_TICKS
 
 
 class WolfSimulator:
@@ -146,7 +149,7 @@ class WolfSimulator:
     def _maybe_spawn(
         self, world: World, players: list[Entity], events: TickEvents
     ) -> None:
-        if world.tick == 0 or world.tick % SPAWN_INTERVAL_TICKS != 0:
+        if world.tick == 0 or world.tick % self.settings.spawn_interval_ticks != 0:
             return
         if not players:
             return

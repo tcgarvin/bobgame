@@ -687,7 +687,7 @@ def test_the_sleep_descriptions_carry_the_recovery_for_the_time_of_day() -> None
     )
     by_day = options_to_criteria(enumerate_options(day))
     assert "1 fatigue per 2 ticks" in by_day["sleep:bed_1"]
-    assert "1 fatigue per 4 ticks" in by_day["sleep:ground"]
+    assert "1 fatigue per 3 ticks" in by_day["sleep:ground"]
 
     night = WorldModel("ada")
     night.update(
@@ -699,7 +699,7 @@ def test_the_sleep_descriptions_carry_the_recovery_for_the_time_of_day() -> None
     )
     at_night = options_to_criteria(enumerate_options(night))
     assert "1 fatigue per tick" in at_night["sleep:bed_1"]
-    assert "1 fatigue per 2 ticks" in at_night["sleep:ground"]
+    assert "2 fatigue per 3 ticks" in at_night["sleep:ground"]
 
 
 def test_only_waking_is_offered_to_a_sleeper() -> None:

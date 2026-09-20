@@ -321,12 +321,14 @@ FRESH = "fresh"
 TIRED = "tired"
 EXHAUSTED = "exhausted"
 
-# (on a bed, at night) -> ticks of sleep per fatigue point recovered.
-SLEEP_RECOVERY_TICKS: Mapping[tuple[bool, bool], int] = {
-    (True, True): 1,
-    (True, False): 2,
-    (False, True): 2,
-    (False, False): 4,
+# (on a bed, at night) -> (fatigue points recovered, every this many ticks).
+# Mirrors `world/sleep.py`: BED_NIGHT_RECOVERY, BED_DAY_RECOVERY,
+# GROUND_NIGHT_RECOVERY, GROUND_DAY_RECOVERY.
+SLEEP_RECOVERY: Mapping[tuple[bool, bool], tuple[int, int]] = {
+    (True, True): (1, 1),
+    (True, False): (1, 2),
+    (False, True): (2, 3),
+    (False, False): (1, 3),
 }
 
 
@@ -354,6 +356,23 @@ def settler_count_word(count: int) -> str:
     return _NUMBER_WORDS.get(count, str(count))
 
 
+def island_opening(settler_count: int = DEFAULT_SETTLER_COUNT) -> str:
+    """The setting and the goal, shared by every prompt that needs them.
+
+    The planner's narrative and the journal writer's narrative both open with
+    this, so the goal a settler plans towards and the goal it writes its
+    `Tomorrow` section against cannot drift apart.
+    """
+    return f"""\
+You are one of {settler_count_word(settler_count)} people who woke up together on a large, wild island with
+nothing but your hands. The others are real agents like you; they hear what you
+say and read what you write. Together, build a civilization: a settlement that
+lasts, where every one of you has a shelter of your own to sleep in, and where
+food, safety and rest are things you can count on tomorrow and not only today.
+Each of you also has to find your place in it: what you do, whom you work with,
+and what you are known for."""
+
+
 def wield_damage_text() -> str:
     """`"sword +3, iron_sword +5, ..."`: every wielded weapon's damage bonus."""
     return ", ".join(f"{kind} +{bonus}" for kind, bonus in WIELD_DAMAGE_BONUS.items())
@@ -369,9 +388,11 @@ def fatigue_word(fatigue: int) -> str:
 
 
 def sleep_recovery_text(on_bed: bool, night: bool) -> str:
-    """`"1 fatigue per tick"` or `"1 fatigue per 2 ticks"` for these conditions."""
-    ticks = SLEEP_RECOVERY_TICKS[(on_bed, night)]
-    return "1 fatigue per tick" if ticks == 1 else f"1 fatigue per {ticks} ticks"
+    """`"1 fatigue per tick"` or `"2 fatigue per 3 ticks"` for these conditions."""
+    points, ticks = SLEEP_RECOVERY[(on_bed, night)]
+    if ticks == 1:
+        return f"{points} fatigue per tick"
+    return f"{points} fatigue per {ticks} ticks"
 
 
 # --- Conversations (mirrors world/items.py, docs/09) -------------------------
