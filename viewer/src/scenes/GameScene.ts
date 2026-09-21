@@ -46,6 +46,10 @@ const ACTOR_SPRITES = [
 const ENTITY_SPRITE_MAP: Record<string, string> = {
   alice: 'actor-1',
   bob: 'actor-5',
+  // hamlet's three named settlers, on the sprites of the ones they replaced.
+  sloopa: 'actor-1',
+  meduski: 'actor-2',
+  pooka: 'actor-3',
   // The twelve settlers.
   ada: 'actor-1',
   bram: 'actor-2',

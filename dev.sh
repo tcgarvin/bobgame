@@ -4,10 +4,13 @@
 # Starts all components and handles cleanup on exit
 #
 # Usage:
-#   ./dev.sh [config]
+#   ./dev.sh [config] [--resume <run_id>[@<tick>]] [--stop-after-saves <n>]
 #
 # Arguments:
 #   config - Optional config name (default: hamlet, the only scenario)
+#   --resume <run_id>[@<tick>] - continue a saved run (docs/14)
+#   --stop-after-saves <n> - shut everything down once this run has written
+#       <n> complete new-moon saves, so the run ends on a resumable point
 #
 # The hamlet config generates the 4000x4000 procedural island on first run
 # and saves it to saves/island.npz. Subsequent runs load the existing map.
@@ -39,8 +42,12 @@ PIDS=()
 # Default config
 CONFIG="hamlet"
 RESUME_SPEC=""
+# 0 means run until Ctrl+C.
+STOP_AFTER_SAVES=0
+SAVE_POLL_SECONDS=5
 
-# Parse arguments: an optional config name, and --resume <run_id>[@<tick>].
+# Parse arguments: an optional config name, --resume <run_id>[@<tick>] and
+# --stop-after-saves <n>.
 while [ $# -gt 0 ]; do
     case "$1" in
         --resume)
@@ -51,14 +58,25 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             ;;
+        --stop-after-saves)
+            shift
+            STOP_AFTER_SAVES="${1:-}"
+            if ! [[ "$STOP_AFTER_SAVES" =~ ^[1-9][0-9]*$ ]]; then
+                echo "--stop-after-saves needs a whole number of saves, 1 or more"
+                exit 1
+            fi
+            ;;
         --help|-h)
-            echo "Usage: $0 [config] [--resume <run_id>[@<tick>]]"
+            echo "Usage: $0 [config] [--resume <run_id>[@<tick>]] [--stop-after-saves <n>]"
             echo ""
             echo "Arguments:"
             echo "  config  Config name from world/configs/ (default: hamlet)"
             echo "  --resume <run_id>[@<tick>]"
             echo "          Continue that run from its newest complete save,"
             echo "          or from the named tick (docs/14_new_moon_and_saves.md)."
+            echo "  --stop-after-saves <n>"
+            echo "          Stop the whole run once it has written <n> complete"
+            echo "          new-moon saves, so it ends on a resumable point."
             echo ""
             echo "Starts all components for development:"
             echo "  - World server (gRPC :50051, WebSocket :8765)"
@@ -69,7 +87,7 @@ while [ $# -gt 0 ]; do
             echo "Each run is recorded to runs/<YYYYMMDD-HHMMSS-config>/ and"
             echo "runs/latest points at it. Process logs live there too."
             echo "Replay an earlier run with ./replay.sh [run_id] and"
-            echo "summarise one with python tools/analyze_run.py [run_dir]."
+            echo "summarise one with uv run --project tools python tools/analyze_run.py [run_dir]."
             echo ""
             echo "The hamlet config generates the 4000x4000 procedural island on"
             echo "first run and saves it to saves/island.npz. Subsequent runs load"
@@ -113,10 +131,25 @@ log_error() {
     echo -e "${RED}[dev]${NC} $1"
 }
 
+# Every process below `pid`, deepest first.
+descendants_of() {
+    local child
+    for child in $(pgrep -P "$1" 2>/dev/null); do
+        descendants_of "$child"
+        echo "$child"
+    done
+}
+
 # Cleanup function - kill all spawned processes and their children
 cleanup() {
     echo ""
     log_info "Shutting down all components..."
+
+    # Listed before anything dies: a grandchild (vite under `npm run dev`) is
+    # reparented once its parent goes, and Ctrl+C reaches it only because the
+    # terminal signals the whole group. A run that stops itself has no such help.
+    local descendants
+    descendants="$(descendants_of $$)"
 
     # First, send TERM to tracked PIDs
     for pid in "${PIDS[@]}"; do
@@ -134,6 +167,9 @@ cleanup() {
     pkill -TERM -P $$ 2>/dev/null || true
     sleep 0.5
     pkill -9 -P $$ 2>/dev/null || true
+    for pid in $descendants; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
 
     log_info "All components stopped"
     exit 0
@@ -356,7 +392,11 @@ echo -e "  ${BLUE}Run dir${NC}:       $RUN_DIR"
 echo -e "  ${BLUE}Live${NC}:          http://localhost:5173"
 echo -e "  ${BLUE}Replay${NC}:        http://localhost:5173/?run=$RUN_ID"
 echo ""
-log_info "Press Ctrl+C to stop all components"
+if [ "$STOP_AFTER_SAVES" -gt 0 ]; then
+    log_info "Stopping by itself after $STOP_AFTER_SAVES complete save(s); Ctrl+C stops it sooner"
+else
+    log_info "Press Ctrl+C to stop all components"
+fi
 echo ""
 echo "─────────────────────────────────────────────────────────────────"
 echo ""
@@ -365,6 +405,26 @@ echo ""
 tail_log "world" "$CYAN" "$RUN_DIR/world.log"
 tail_log "runner" "$YELLOW" "$RUN_DIR/runner.log"
 tail_log "viewer" "$MAGENTA" "$RUN_DIR/viewer.log"
+
+# Saves this run has finished. complete.json is written last, so a directory
+# without it is a save still in progress (or abandoned) and does not count.
+count_complete_saves() {
+    ls "$RUN_DIR"/saves/tick-*/complete.json 2>/dev/null | wc -l
+}
+
+if [ "$STOP_AFTER_SAVES" -gt 0 ]; then
+    while [ "$(count_complete_saves)" -lt "$STOP_AFTER_SAVES" ]; do
+        if ! kill -0 "$WORLD_PID" 2>/dev/null; then
+            log_error "World server exited before save $STOP_AFTER_SAVES; see $RUN_DIR/world.log"
+            exit 1
+        fi
+        sleep "$SAVE_POLL_SECONDS"
+    done
+    NEWEST_SAVE="$(ls -d "$RUN_DIR"/saves/tick-* | sed 's/.*tick-//' | sort -n | tail -1)"
+    log_info "Save $STOP_AFTER_SAVES of $STOP_AFTER_SAVES is complete (tick $NEWEST_SAVE); stopping."
+    log_info "Continue with: ./dev.sh --resume $RUN_ID"
+    exit 0
+fi
 
 # Wait for any process to exit
 wait

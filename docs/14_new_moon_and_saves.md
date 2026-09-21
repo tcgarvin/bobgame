@@ -66,21 +66,25 @@ Facts only, in line with the rest of the prompt:
 ## 2. What "drained" means for a settler
 
 Falling asleep ends everything that holds the body: the planner's turn, any
-stint or reflex stint, any conversation seat, and the in-flight single-tick
-action. It then runs the journal rewrite (docs/12). While the body is asleep,
+stint or reflex stint, any stint still queued behind a reflex stint (answered
+as one that never ran), any conversation seat, any tool waiting for a
+conversation that can no longer start, and the in-flight single-tick action. It
+then runs the journal rewrite (docs/12). While the body is asleep,
 collapsed or dead the tick loop **refuses** new requests from the planner
 (`inactive_reason()`) instead of queueing them, so nothing new can start during
 the night. A settler is **drained** when all of these hold:
 
 - the body is asleep (or dead and awaiting respawn),
 - no stint, reflex stint or conversation session is active, held or queued,
-- the planner is parked in `await_active` with its turn ended,
+- the planner is parked: in `await_active` with its turn ended, or inside a
+  `sleep` tool waiting for the wake,
 - no journal rewrite and no converser closing call is in flight,
 - no single-tick action is in flight and no tool is waiting for a conversation.
 
 Two things deliberately do **not** block a drain. A `sleep` tool parked on
 `await_wake` does not: that is what a settler who chose to sleep looks like all
-night, and counting it would abandon the save for anyone who went to bed early.
+night, and counting it would abandon the save for anyone who went to bed early
+(a settler told "new moon tonight" often lies down a tick or two before it).
 And the planner's history reset is not checked, because it is never pending
 while asleep — the reset reason is set at the *wake*, and the snapshot stores no
 message history at all, which is the same state by another route.
@@ -111,6 +115,11 @@ On timeout the save is abandoned: the world logs `save_abandoned` at error
 level naming the entities that did not report, renames the directory to
 `tick-<T>.abandoned` (whatever the agents did write is kept, for working out
 who was late) and carries on. A run is never blocked by a save.
+
+`./dev.sh --stop-after-saves <n>` (`tools/live_run.sh start <seconds> --saves
+<n>`) ends the run once `<n>` directories of this run hold a `complete.json`.
+It only watches the run directory; the world does not know about it, and an
+abandoned save does not count, so give a detached run a time limit as well.
 
 ### World snapshot contents
 

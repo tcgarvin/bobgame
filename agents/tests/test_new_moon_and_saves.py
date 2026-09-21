@@ -16,6 +16,7 @@ from agents.jev_agent.agent import (
     ASLEEP_REJECTION,
     MODE_CONVERSATION,
     MODE_PLANNING,
+    MODE_REFLEX,
     SAVE_WAIT_ENV,
     DrainState,
     JevAgent,
@@ -37,7 +38,7 @@ from agents.jev_agent.snapshot import (
 )
 from agents.jev_agent.build import BUILD_OUT_OF_ITEMS
 from agents.jev_agent.recipes import CraftTally, craft_chain, craft_once
-from agents.jev_agent.stint import Brief
+from agents.jev_agent.stint import Brief, StintReport
 from agents.jev_agent.worldmodel import TileInfo, WorldClock, WorldModel
 
 from helpers import (
@@ -292,6 +293,80 @@ async def test_a_forced_sleep_mid_reflex_ends_the_reflex_stint(
     assert any("reflex ran" in note for note in agent.drain_notes())
 
 
+async def test_a_stint_queued_behind_a_reflex_is_refused_by_the_forced_sleep(
+    tmp_path: Path,
+) -> None:
+    """A stint asked for during a reflex stint waits for the reflex to end.
+
+    In the first three-day run the new moon ended the reflex instead, the
+    queued stint sat there all night, and two settlers answered "a stint is
+    queued" until the world abandoned the save.
+    """
+    script = [
+        make_observation(
+            tick,
+            make_entity("ada", (10, 10), fatigue=50, asleep=tick >= 4),
+            entities=(
+                [make_entity("wolf_1", (11, 10), entity_type="wolf")]
+                if tick in (2, 3)
+                else []
+            ),
+            events=[damaged_event("ada", "wolf_1", 3, 17)] if tick == 2 else [],
+            clock=moon_clock(tick, tonight=True),
+        )
+        for tick in range(1, 6)
+    ]
+    agent = build_agent(
+        FakeWorldClient(script), FakeJevClient(default_action="wait"), tmp_path
+    )
+    agent.set_reflex(
+        ReflexBrief(
+            instruction="Deal with the wolf",
+            success_condition="it is gone",
+            max_ticks=30,
+            trigger_distance=4,
+        )
+    )
+    reports: list[StintReport] = []
+
+    async def ask_during_the_reflex() -> None:
+        while agent.mode != MODE_REFLEX:
+            await asyncio.sleep(0)
+        reports.append(await agent.run_stint(Brief("go", "never", 3)))
+        await asyncio.sleep(3600)
+
+    agent.planner.run = ask_during_the_reflex  # type: ignore[method-assign]
+    await agent.run()
+
+    assert [report.end_reason for report in reports] == [END_NEW_MOON]
+    assert reports[0].ticks_used == 0
+    assert agent.drained().reason != "a stint is queued"
+
+
+async def test_a_tool_waiting_for_a_conversation_is_answered_by_the_forced_sleep(
+    tmp_path: Path,
+) -> None:
+    """The start grace (4 ticks) outlasts the save tick (3 into the night)."""
+    agent = build_agent(
+        FakeWorldClient(sleeping_script(asleep_from=3, count=4)),
+        FakeJevClient(default_action="wait"),
+        tmp_path,
+    )
+    answers: list[object] = []
+
+    async def wait_for_a_conversation() -> None:
+        while agent.model.tick < 2:
+            await asyncio.sleep(0)
+        answers.append(await agent.await_conversation())
+        await asyncio.sleep(3600)
+
+    agent.planner.run = wait_for_a_conversation  # type: ignore[method-assign]
+    await agent.run()
+
+    assert answers == [None]
+    assert agent.drained().reason != "a tool is waiting for a conversation"
+
+
 # --- the drained predicate (docs/14 section 2) ------------------------------
 
 
@@ -315,6 +390,29 @@ async def test_an_asleep_settler_with_nothing_outstanding_is_drained(
     tmp_path: Path,
 ) -> None:
     agent = await drained_agent(tmp_path)
+
+    assert agent.drained() == DrainState(drained=True, reason="")
+
+
+async def test_a_settler_that_chose_to_sleep_before_nightfall_is_drained(
+    tmp_path: Path,
+) -> None:
+    """Its `sleep` tool is parked on the wake, so its turn has not ended.
+
+    A settler told "new moon tonight" went to bed a tick early in the first
+    three-day run, and the save was abandoned waiting for a turn that could
+    not end before morning.
+    """
+    agent = build_agent(FakeWorldClient([]), FakeJevClient(), tmp_path)
+    agent.model.update(
+        make_observation(
+            4,
+            make_entity("ada", (10, 10), fatigue=40, asleep=True),
+            clock=moon_clock(4, tonight=True),
+        )
+    )
+    asyncio.create_task(agent.await_wake(3))
+    await asyncio.sleep(0)
 
     assert agent.drained() == DrainState(drained=True, reason="")
 

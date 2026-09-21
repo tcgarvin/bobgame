@@ -52,7 +52,7 @@ Available intents (defined in `proto/world.proto`):
 ```bash
 cd agents
 set -a; . ../.env; set +a          # TYPESAFE_API_KEY, OPENROUTER_API_KEY
-uv run python -m agents.jev_agent --entity ada --server localhost:50051
+uv run python -m agents.jev_agent --entity dov --server localhost:50051
 ```
 
 Flags: `--log-root`, `--planner-model`, `--jev-model`, `--journal-model`,

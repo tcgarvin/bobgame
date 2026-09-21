@@ -36,19 +36,19 @@ save_on_new_moon = true
 save_wait_seconds = 180
 
 [[entities]]
-id = "ada"
+id = "sloopa"
 type = "player"
 x = 0
 y = 0
 
 [[entities]]
-id = "bram"
+id = "meduski"
 type = "player"
 x = 0
 y = 0
 
 [[entities]]
-id = "cleo"
+id = "pooka"
 type = "player"
 x = 0
 y = 0

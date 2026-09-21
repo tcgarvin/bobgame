@@ -14,8 +14,8 @@ The reading and the summaries live in ``tools/runlib``; this file is the
 command line over them.
 
 Usage:
-    python tools/analyze_run.py [run_dir]      # default: runs/latest
-    python tools/analyze_run.py --json         # machine-readable dump
+    uv run --project tools python tools/analyze_run.py [run_dir]      # default: runs/latest
+    uv run --project tools python tools/analyze_run.py --json         # machine-readable dump
 """
 
 from __future__ import annotations

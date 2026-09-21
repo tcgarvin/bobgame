@@ -75,9 +75,9 @@ class TestShippedConfigs:
 
         entities = config_to_entities(config)
         assert [e.entity_id for e in entities] == [
-            "ada",
-            "bram",
-            "cleo",
+            "sloopa",
+            "meduski",
+            "pooka",
             "dov",
             "esme",
             "finn",

@@ -914,10 +914,28 @@ class JevAgent:
         if stint is not None:
             stint.finish(reason)
             self._finish_stint()
+        self._refuse_queued_stints(reason)
         session = self._conversation
         if session is not None:
             session.finish(sleep_end_reason(self._model))
             self._finish_conversation()
+        else:
+            # With a seat, the closing report answers the waiting tool. Without
+            # one the conversation can no longer start, and the grace period
+            # (4 ticks) outlasts the save tick (3 ticks into the night).
+            self._expire_conversation_waiters(now=True)
+
+    def _refuse_queued_stints(self, reason: str) -> None:
+        """Answer every stint still waiting its turn as one that never ran.
+
+        A stint the planner asks for while a reflex stint holds the body waits
+        in the queue for the reflex to end. When the body falls asleep instead,
+        nothing will ever start it: it would sit there all night and make
+        `drained()` answer "a stint is queued", which abandons the save.
+        """
+        for request in _drain(self._stint_requests):
+            if not request.future.done():
+                request.future.set_result(self._refused_report(request.brief, reason))
 
     # -- reflex -------------------------------------------------------------
 
@@ -1111,12 +1129,16 @@ class JevAgent:
         if not delivered:
             self._note_for_planner(text)
 
-    def _expire_conversation_waiters(self) -> None:
-        """Release a planner tool whose conversation never started."""
+    def _expire_conversation_waiters(self, *, now: bool = False) -> None:
+        """Release a planner tool whose conversation never started.
+
+        `now` releases every waiter whatever its deadline, for a body that has
+        fallen asleep and can no longer take a seat.
+        """
         if self._conversation is not None:
             return
         for waiter in list(self._conversation_waiters):
-            if self._model.tick < waiter.deadline_tick:
+            if not now and self._model.tick < waiter.deadline_tick:
                 continue
             self._conversation_waiters.remove(waiter)
             if not waiter.future.done():
@@ -1230,10 +1252,10 @@ class JevAgent:
         agent's back, the planner has parked itself on `await_active`, and no
         queue holds a request.
 
-        A `sleep` tool parked on `await_wake` is deliberately not counted: it
-        is what a settler that chose to sleep looks like all night, and the
-        snapshot carries no futures, so a resumed settler simply takes a fresh
-        turn when it wakes.
+        A `sleep` tool parked on `await_wake` counts as a parked planner: it
+        is what a settler that chose to sleep looks like all night (its turn
+        does not end until it wakes), and the snapshot carries no futures, so a
+        resumed settler simply takes a fresh turn when it wakes.
         """
         info = self._model.self_info
         if info.alive and not info.asleep:
@@ -1257,7 +1279,7 @@ class JevAgent:
             return DrainState.busy("a single-tick action is in flight")
         if self._conversation_waiters:
             return DrainState.busy("a tool is waiting for a conversation")
-        if not self._active_waiters:
+        if not self._active_waiters and not self._wake_waiters:
             return DrainState.busy("the planner turn has not ended yet")
         return DRAINED
 

@@ -8,7 +8,7 @@ OpenRouter) that thinks in tools, and TypeSafe's Jev picking one action per tick
 
 ## Current state
 
-One scenario, `hamlet`: six settlers (ada, bram, cleo, dov, esme, finn) on the
+One scenario, `hamlet`: six settlers (sloopa, meduski, pooka, dov, esme, finn) on the
 island with one wolf. What a settler can do today:
 
 - Forage, extract, craft (stations, multi-tick work, tool tiers), equip, place
@@ -80,13 +80,18 @@ live run can be opened at any past tick. `./replay.sh [run_id]` (default
 `http://localhost:5173/?run=<run_id>&tick=<n>&entity=<id>` (also `x`, `y`,
 `zoom`, `play`, `speed`, `panel`, `object`).
 
-**Detached live runs**: `tools/live_run.sh start <seconds> [--resume
-<run_id>[@<tick>]]` starts `./dev.sh` detached with an automatic stop;
-`status`, `wait` and `stop` follow it. The
+**Stopping on a save**: `./dev.sh --stop-after-saves <n>` shuts the run down by
+itself once it has written `<n>` complete new-moon saves, so it ends on a point
+`--resume` can continue from (hamlet's first save is about tick 900, 30 minutes).
+
+**Detached live runs**: `tools/live_run.sh start <seconds> [--saves <n>]
+[--resume <run_id>[@<tick>]]` starts `./dev.sh` detached with an automatic stop
+after `<seconds>`, or sooner once `<n>` saves are complete; `status`, `wait` and
+`stop` follow it. The
 `live-run` sub-agent (`.claude/agents/live-run.md`, Haiku) drives this script
 and reports back; use it instead of babysitting a run yourself.
 
-**Analysis**: `python tools/analyze_run.py [run_dir]` summarises `runs/latest` —
+**Analysis**: `uv run --project tools python tools/analyze_run.py [run_dir]` summarises `runs/latest` —
 stints, Jev latency, planner tool use, failures, world-level
 deaths/wolves/crafts, conversations, giving and reflex firings (docs/09 section
 6) — plus "notable moments" with deep links and a cost section (OpenRouter's
@@ -94,7 +99,7 @@ exact per-request cost for planner and converser, Jev priced locally at $42 per
 billion input tokens, per settler and per turn with $/100 ticks and $/hour;
 contract [docs/11_cost_accounting.md](docs/11_cost_accounting.md)). Flags:
 `--json`, `--max-moments`, `--viewer-url`.
-`python tools/settlement_progress.py` answers one question instead: how far has
+`uv run --project tools python tools/settlement_progress.py` answers one question instead: how far has
 the settlement got, and has it plateaued. Both are thin CLIs over
 `tools/runlib/` (`runio`, `worldscan`, `agenttrace`, `cost`, `social`, `report`,
 `rooms`).
@@ -102,7 +107,7 @@ the settlement got, and has it plateaued. Both are thin CLIs over
 Or manually, and terrain by hand:
 ```bash
 cd world && uv run python -m world.server --config hamlet
-cd agents && uv run python -m agents.jev_agent --entity ada --settlers 6
+cd agents && uv run python -m agents.jev_agent --entity dov --settlers 6
 cd viewer && npm run dev
 cd world && uv run python -m world.terrain    # standalone terrain generation CLI
 uv run --with pillow python tools/visualize_world.py <map.npz> [out] [--crop X,Y,SIZE --scale N --mark X,Y]

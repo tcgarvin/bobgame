@@ -61,9 +61,9 @@ http://localhost:5173/?run=<run_id>&tick=412&entity=bram
 To summarise a run and get links to its notable moments:
 
 ```bash
-python tools/analyze_run.py                 # runs/latest
-python tools/analyze_run.py runs/<run_id>
-python tools/analyze_run.py --json          # machine-readable
+uv run --project tools python tools/analyze_run.py                 # runs/latest
+uv run --project tools python tools/analyze_run.py runs/<run_id>
+uv run --project tools python tools/analyze_run.py --json          # machine-readable
 ```
 
 The recording format and replay protocol are specified in

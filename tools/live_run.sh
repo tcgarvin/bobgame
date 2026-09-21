@@ -1,8 +1,10 @@
 #!/bin/bash
 # Detached live runs of the bobgame scenario (hamlet, the only one).
 #
-#   tools/live_run.sh start <seconds> [--resume <run_id>[@<tick>]]
+#   tools/live_run.sh start <seconds> [--saves <n>] [--resume <run_id>[@<tick>]]
 #                                                start ./dev.sh detached, auto-stop after <seconds>;
+#                                                --saves stops it sooner, once <n> new-moon saves are
+#                                                complete (<seconds> is then the upper bound);
 #                                                --resume continues a saved run (docs/14)
 #   tools/live_run.sh status                     one-screen health + progress report
 #   tools/live_run.sh wait-ticks                 block until the world records ticks (max 3 minutes)
@@ -38,16 +40,34 @@ port_busy() {
 }
 
 cmd_start() {
-    local seconds="${1:?usage: start <seconds> [--resume <run_id>[@<tick>]]}"
+    local seconds="${1:?usage: start <seconds> [--saves <n>] [--resume <run_id>[@<tick>]]}"
     shift || true
     local resume=""
-    if [ "${1:-}" = "--resume" ]; then
-        resume="${2:-}"
-        if [ -z "$resume" ]; then
-            echo "REFUSED: --resume needs a run id, optionally with @<tick>."
-            return 2
-        fi
-    fi
+    local saves=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --resume)
+                resume="${2:-}"
+                if [ -z "$resume" ]; then
+                    echo "REFUSED: --resume needs a run id, optionally with @<tick>."
+                    return 2
+                fi
+                shift 2
+                ;;
+            --saves)
+                saves="${2:-}"
+                if ! [[ "$saves" =~ ^[1-9][0-9]*$ ]]; then
+                    echo "REFUSED: --saves needs a whole number of saves, 1 or more."
+                    return 2
+                fi
+                shift 2
+                ;;
+            *)
+                echo "REFUSED: unknown argument '$1'. Usage: start <seconds> [--saves <n>] [--resume <run_id>[@<tick>]]"
+                return 2
+                ;;
+        esac
+    done
     if ! [[ "$seconds" =~ ^[0-9]+$ ]] || [ "$seconds" -lt 1 ]; then
         echo "REFUSED: '$seconds' is not a number of seconds. Usage: start <seconds> (the only scenario is $CONFIG)."
         return 2
@@ -78,9 +98,12 @@ cmd_start() {
     if [ -n "$resume" ]; then
         dev_args+=(--resume "$resume")
     fi
+    if [ -n "$saves" ]; then
+        dev_args+=(--stop-after-saves "$saves")
+    fi
     setsid nohup timeout -s INT "$seconds" ./dev.sh "${dev_args[@]}" >"$OUT_FILE" 2>&1 < /dev/null &
     echo $! >"$PID_FILE"
-    echo "STARTED pid=$(cat "$PID_FILE") config=$CONFIG resume=${resume:-none} auto_stop_after=${seconds}s"
+    echo "STARTED pid=$(cat "$PID_FILE") config=$CONFIG resume=${resume:-none} stop_after_saves=${saves:-none} auto_stop_after=${seconds}s"
     echo "The world needs about 40 s to load the island. Run 'wait-ticks' next."
 }
 
@@ -92,8 +115,10 @@ cmd_status() {
     run_dir="$(readlink -f "$ROOT/runs/latest" 2>/dev/null)"
     echo "run_dir: $run_dir"
     echo "memory_available_mb: $(free -m | awk '/^Mem:/ {print $7}')"
+    echo "complete_saves: $(ls "$run_dir"/saves/tick-*/complete.json 2>/dev/null | wc -l)"
     if [ -s "$run_dir/world/ticks.jsonl.gz" ]; then
-        (cd "$ROOT" && python tools/analyze_run.py "$run_dir" 2>&1 \
+        # Through the tools project: the analyser imports bobgame_rules.
+        (cd "$ROOT/tools" && uv run python analyze_run.py "$run_dir" 2>&1 \
             | grep -E "^== world|^deaths|^wolf kills|^wolves|^crafts|^placements|^building|^notes")
         local agents_up
         agents_up=$(pgrep -fc "agents.jev_agent" || true)
@@ -169,5 +194,5 @@ case "${1:-}" in
     wait-ticks) cmd_wait_ticks ;;
     wait) cmd_wait ;;
     stop) cmd_stop ;;
-    *) sed -n 2,9p "${BASH_SOURCE[0]}"; exit 2 ;;
+    *) sed -n 2,11p "${BASH_SOURCE[0]}"; exit 2 ;;
 esac

@@ -12,7 +12,7 @@ Everything goes through one script. Always run it from the repo root:
 
 ```bash
 cd /home/timg/code/bobgame
-tools/live_run.sh start <seconds> [--resume <run_id>[@<tick>]]
+tools/live_run.sh start <seconds> [--saves <n>] [--resume <run_id>[@<tick>]]
 tools/live_run.sh wait-ticks
 tools/live_run.sh status
 tools/live_run.sh wait
@@ -41,7 +41,9 @@ unless you were told to do more. Never restart a run that ended normally.
 ## Procedure
 
 1. `tools/live_run.sh start <seconds>` (plus `--resume <run_id>[@<tick>]` if
-   you were asked to continue a run)
+   you were asked to continue a run, and `--saves <n>` if you were asked to run
+   until `<n>` new-moon saves are written; `<seconds>` is then only the upper
+   bound, and `status` shows `complete_saves`)
    - If it prints `REFUSED: a live run is already active`: run `status`, report
      that a run was already going, and stop. Do not stop someone else's run.
    - If it prints `REFUSED: port ... in use`: the user probably has their own
