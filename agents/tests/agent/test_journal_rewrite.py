@@ -6,6 +6,10 @@ import asyncio
 import gzip
 import json
 from pathlib import Path
+
+import pytest
+
+from agents.jev_agent.agent import core as agent_core
 from agents.jev_agent.journal import (
     SECTION_SCRATCH,
     SECTION_STORY,
@@ -192,6 +196,34 @@ async def test_a_failed_rewrite_is_traced_and_the_day_log_comes_back(
     assert agent.trace.memory_path.read_text(encoding="utf-8") == before
     assert [e.text for e in agent.planner.day_log.entries][0] == "look({})"
     assert agent.ledger.journal_rewrites == 0
+
+
+async def test_a_rewrite_that_never_answers_is_given_up_and_the_settler_drains(
+    fake_jev: FakeJevClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class HungWriter:
+        async def rewrite(self, *args: object, **kwargs: object) -> None:
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(agent_core, "JOURNAL_REWRITE_TIMEOUT_SECONDS", 0.01)
+    world = FakeWorldClient(sleeping_observations([2, 3], 4))
+    agent = journal_agent(world, fake_jev, tmp_path, HungWriter())
+    await idle_planner(agent)
+    agent.planner.day_log.add(1, "call", "look({})")
+
+    await agent.run()
+    await asyncio.gather(*list(agent._background))
+    agent.trace.close()
+
+    failures = [
+        line
+        for line in planner_trace_lines(tmp_path / "agent-ada")
+        if line["event"] == "journal_rewrite_failed"
+    ]
+    assert len(failures) == 1
+    assert "no answer in" in failures[0]["error"]
+    assert agent._journal_task is not None and agent._journal_task.done()
+    assert [e.text for e in agent.planner.day_log.entries][0] == "look({})"
 
 
 async def test_a_waking_or_respawning_body_tells_the_planner_to_start_over(

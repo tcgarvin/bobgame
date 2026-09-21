@@ -59,6 +59,17 @@ SECTION_TOKEN_LIMIT = 600
 # How long a planner turn waits for a rewrite that is still running before it
 # gives up and reads the journal as it stands.
 JOURNAL_WAIT_SECONDS = 120.0
+# How long one rewrite may run before it is given up as failed (the day log is
+# kept for the next one). It has to end inside a settler's save wait (170 s,
+# `agent/saving.py`): a model call that hung for eleven minutes left its settler
+# undrained at the new moon and the whole save was abandoned. Rewrites
+# normally take 35-100 s.
+JOURNAL_REWRITE_TIMEOUT_SECONDS = 150.0
+
+
+class JournalRewriteTimeout(Exception):
+    """A journal rewrite that did not answer in time and was given up."""
+
 
 # The day log is rendered for the model; anything past this is dropped oldest
 # first. 60k characters is roughly 15k tokens, comfortably inside one call.

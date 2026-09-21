@@ -49,7 +49,9 @@ from ..conversation import (
 from ..jevclient import JevClient, TypeSafeJevClient
 from ..outcomes import ActionOutcome, Seat
 from ..journal import (
+    JOURNAL_REWRITE_TIMEOUT_SECONDS,
     JOURNAL_WAIT_SECONDS,
+    JournalRewriteTimeout,
     KIND_EVENT,
     KIND_NOTE,
     TRIGGER_DEATH,
@@ -732,12 +734,20 @@ class JevAgent:
         path = self.trace.memory_path
         try:
             journal = Journal.load(path, self.entity_id)
-            rewrite = await self.journal_writer.rewrite(
-                journal,
-                render_day_log(entries),
-                self.entity_id,
-                self._model.clock.moon_text(),
-            )
+            try:
+                rewrite = await asyncio.wait_for(
+                    self.journal_writer.rewrite(
+                        journal,
+                        render_day_log(entries),
+                        self.entity_id,
+                        self._model.clock.moon_text(),
+                    ),
+                    JOURNAL_REWRITE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError as error:
+                raise JournalRewriteTimeout(
+                    f"no answer in {JOURNAL_REWRITE_TIMEOUT_SECONDS:.0f} seconds"
+                ) from error
             rewrite.journal.save(path)
         except asyncio.CancelledError:
             raise

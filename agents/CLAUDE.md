@@ -592,7 +592,10 @@ bridge note and life event since the last rewrite, de-duplicated at render time
 Each section is capped at 600 tokens: a `ModelRetry` first, then a hard cut.
 Falling asleep or dying spends the tool budget so the turn ends, and the turn
 after a wake or a respawn drops `Planner.history`; `build_prompt` waits (up to
-`JOURNAL_WAIT_SECONDS`) for a rewrite in flight before reading the file.
+`JOURNAL_WAIT_SECONDS`) for a rewrite in flight before reading the file. A
+rewrite itself is given up after `JOURNAL_REWRITE_TIMEOUT_SECONDS` (150, under
+the 170 s save wait) as `journal_rewrite_failed`, the day log kept for the next
+one: a hung model call once left a settler undrained and abandoned a save.
 
 ### Building (docs/08_building.md)
 
